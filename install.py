@@ -404,7 +404,7 @@ def install(args: argparse.Namespace, system: System) -> None:
     address = own_address()
     say("")
     say(f"✓ FlowThermPi {version} läuft.")
-    say(f"  Öffnen im Heimnetz:  http://{socket.gethostname()}.local{suffix}"
+    say(f"  Öffnen im Heimnetz:  http://{socket.gethostname().split('.')[0]}.local{suffix}"
         + (f"   oder   http://{address}{suffix}" if address else ""))
     say("  Update später:       denselben Befehl noch einmal ausführen")
     say(f"  Meldungen ansehen:   journalctl -u {NAME} -f")
