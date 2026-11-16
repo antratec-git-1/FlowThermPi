@@ -69,6 +69,39 @@ HEIZAPP_PASSWORD='geheim' python3 run.py --host 0.0.0.0
 Beim ersten Start fragt macOS, ob das Terminal auf Geräte im lokalen Netzwerk zugreifen
 darf – erlauben, sonst erscheinen die Heizungen als „offline“ („No route to host“).
 
+## Installation auf dem Raspberry Pi
+
+Voraussetzung: Raspberry Pi mit aktuellem **Raspberry Pi OS** (Lite reicht), im selben Netz wie die
+Heizungen und per SSH erreichbar. Dann **ein Befehl** per SSH auf dem Pi:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
+```
+
+Das Skript lädt FlowThermPi von GitHub nach `/opt/flowthermpi`, legt den Dienst `flowthermpi` an
+(startet beim Einschalten und nach Absturz oder Stromausfall von selbst), legt die Daten in
+`/var/lib/flowthermpi` an (Heizungsliste mit Tokens nur für den Dienst lesbar), stellt die Zeitzone
+auf Europe/Berlin, falls noch die Werkseinstellung gilt, prüft, ob die App antwortet, und zeigt die
+Adresse an – z. B. `http://flowthermpi.local`.
+
+- **Update:** denselben Befehl noch einmal ausführen. Startet die neue Version nicht, läuft die
+  vorherige weiter. Heizungen, Tokens, Räume, Pläne und PIN bleiben erhalten.
+- **Daten vom Mac übernehmen** (Heizungen mit Tokens, Räume, Pläne, PIN):
+  ```bash
+  # auf dem Mac, im App-Ordner:
+  scp heizungen.conf data/data.json BENUTZER@flowthermpi.local:
+  # auf dem Pi:
+  curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 - --import ~
+  rm ~/heizungen.conf ~/data.json
+  ```
+  Danach die App auf dem Mac beenden – sonst steuern zwei Apps dieselben Heizungen.
+- **Weitere Optionen** hinter `python3 -`: `--port 8080`, `--ref v0.2.0` (bestimmte Version),
+  `--reset-pin` (PIN vergessen), `--uninstall` (Daten bleiben), `--uninstall --purge` (alles weg).
+- **Meldungen:** `journalctl -u flowthermpi -f`. Passwort fürs Heimnetz: `HEIZAPP_PASSWORD=…` in
+  `/etc/default/flowthermpi` eintragen, dann `sudo systemctl restart flowthermpi`.
+- **Uhrzeit:** Ein Raspberry Pi hat keine Batterie-Uhr. Die App stellt die Heizungsuhren erst, wenn
+  der Pi seine Uhrzeit aus dem Internet hat – nach einem Stromausfall also nie auf eine falsche Zeit.
+
 ## Heizungen im Netz suchen
 
 In der Einrichtung unter „Geräte“ → **Im Netz suchen**: Die App fragt jede Adresse des Heimnetzes
@@ -156,7 +189,7 @@ beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht an
 
 ## Ideen für später
 
-- Paket für NAS (Docker) und Raspberry Pi mit Update-Funktion.
+- Paket für das NAS (Docker); automatische Updates und Update-Knopf in der Einrichtung.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
 - Verlauf und Kosten (Heizdauer × Nennleistung × Strompreis).
 - Heizungen zusätzlich in Apple Home einbinden.

@@ -514,6 +514,18 @@ class ApiTest(unittest.TestCase):
             self.assertTrue(res.headers["Server"].startswith("FlowThermPi/"))
         self.call("GET", "/api/nope", expect=404)
 
+    def test_heater_clocks_wait_until_own_clock_is_right(self):
+        from heizapp import service as service_module   # e.g. a Raspberry Pi right after a power cut
+        original = service_module.host_clock_synced
+        service_module.host_clock_synced = lambda: False
+        try:
+            self.service._clock_trusted = False
+            self.assertEqual(self.service.sync_clocks()["results"], [])
+            self.call("POST", "/api/heaters/91110001/clock", expect=409)
+        finally:
+            service_module.host_clock_synced = original
+        self.call("POST", "/api/heaters/91110001/clock")                   # fine once it is synchronised
+
     def test_state_names_the_app(self):
         app = self.call("GET", "/api/state")["app"]
         self.assertEqual((app["name"], app["license"]), ("FlowThermPi", "GPL-3.0"))

@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -29,6 +31,21 @@ LOST_AFTER = 180       # seconds offline before the app looks for the heater at 
 HEAL_EVERY = 900       # at most one automatic network search per 15 minutes
 MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Boost",
                "boost_off": "Boost beendet", "off": "Aus (Frostschutz)", "on": "Eingeschaltet"}
+
+
+def host_clock_synced() -> bool:
+    """Can this computer's clock be trusted? A Raspberry Pi has no battery clock: after a power cut it
+    starts with the time it was switched off until it reaches a time server. Only Linux/systemd can tell."""
+    if not sys.platform.startswith("linux"):
+        return True
+    if os.path.exists("/run/systemd/timesync/synchronized"):
+        return True
+    try:
+        out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True  # no systemd (e.g. Docker on a NAS): behave as before
+    return out.returncode != 0 or out.stdout.strip() != "no"
 
 
 def _num(value: float, fmt: str = ".1f") -> str:
@@ -104,6 +121,8 @@ class Service:
         self._scan_lock = threading.Lock()   # one network search at a time
         self._last_heal = 0.0
         self._last_daily_sync = None
+        self._clock_trusted = False
+        self._clock_warned = False
         known = {m.get("last_host"): k for k, m in self.store.data["heaters"].items() if not k.startswith("host:")}
         for e in self.entries:
             e.key = known.get(e.label)
@@ -112,6 +131,16 @@ class Service:
     def now(self) -> datetime:
         """Local wall-clock time (naive), as the heaters expect it."""
         return datetime.now(self.tz).replace(tzinfo=None) if self.tz else datetime.now()
+
+    def clock_trusted(self) -> bool:
+        """Only set heater clocks once this computer's own clock is right (checked until it is)."""
+        if not self._clock_trusted:
+            self._clock_trusted = host_clock_synced()
+            if not self._clock_trusted and not self._clock_warned:
+                self._clock_warned = True
+                log.warning("Uhrzeit dieses Geräts ist noch nicht übers Internet abgeglichen – "
+                            "die Heizungsuhren werden erst danach gestellt.")
+        return self._clock_trusted
 
     def _iso(self, ts: float | None) -> str | None:
         return datetime.fromtimestamp(ts, self.tz).isoformat(timespec="seconds") if ts else None
@@ -437,6 +466,11 @@ class Service:
                 "message": f"Temperatur-Korrektur {_num(old / 10, '+.1f')} °C → {_num(new / 10, '+.1f')} °C{basis_text}."}
 
     def sync_clocks(self, only_drifted: bool = False, heater_id: str | None = None) -> dict:
+        if not self.clock_trusted():
+            if heater_id:
+                raise ActionError("Die Uhrzeit dieses Geräts ist noch nicht übers Internet abgeglichen – "
+                                  "bitte gleich noch einmal versuchen.", 409)
+            return {"results": []}
         entries = [self._entry(heater_id)] if heater_id else self.entries
         targets = [e for e in entries if e.online and e.device.writable and
                    (not only_drifted or (e.clock_drift is not None and abs(e.clock_drift) > DRIFT_LIMIT))]
