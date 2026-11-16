@@ -1,0 +1,10 @@
+# Heizungen – eine pro Zeile: IP-Adresse (oder FRITZ!Box-Name) und Token.
+#
+# Token = Feld "pop" (24 Zeichen) im QR-Code, den die Heizung unter
+#         Einstellungen > Verbindungen > Verbinden anzeigt.
+# Ohne Token wird die Heizung nur angezeigt, aber nicht gesteuert.
+# Tipp: In der FRITZ!Box jeder Heizung eine feste IP-Adresse geben.
+#
+# IP-Adresse        Token
+192.168.5.81        XXXXXXXXXXXXXXXXXXXXXXXX
+192.168.5.152

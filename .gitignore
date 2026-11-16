@@ -1,0 +1,8 @@
+heizungen.conf
+data/
+__pycache__/
+*.pyc
+*.pdf
+*.log
+.DS_Store
+.claude/

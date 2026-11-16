@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Heizung">
+  <meta name="theme-color" content="#1c2430">
+  <title>Heizung</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="view-home">
+  <!-- simple view for residents: one big tile per room, no login -->
+  <div id="home">
+    <header class="home-head">
+      <div class="home-title">
+        <h1>Heizung</h1>
+        <p id="clock" class="clock"></p>
+      </div>
+      <button class="setup-link" data-action="open-setup">Einrichtung</button>
+    </header>
+    <p id="home-banner" class="banner" role="alert" hidden></p>
+    <main id="tiles" class="tiles" aria-live="polite"></main>
+  </div>
+
+  <!-- setup ("Einrichtung"): heaters, rooms, plans, calibration – behind the PIN once one is set -->
+  <div id="setup" hidden>
+    <header>
+      <h1>Einrichtung</h1>
+      <span id="status" class="muted">verbinde …</span>
+      <span class="head-tools">
+        <button class="small" data-action="pin-settings" id="pin-button">PIN festlegen</button>
+        <button class="small primary" data-action="close-setup">Fertig</button>
+      </span>
+    </header>
+    <p id="pin-warning" class="setup-warning" hidden>Noch keine PIN festgelegt – jeder kann die Einrichtung öffnen.
+      <button class="small" data-action="pin-settings">PIN festlegen</button></p>
+    <nav id="tabs" role="tablist">
+      <button data-tab="rooms" role="tab">Räume</button>
+      <button data-tab="plans" role="tab">Heizpläne</button>
+      <button data-tab="devices" role="tab">Geräte</button>
+    </nav>
+    <main>
+      <section id="tab-rooms" class="tab"></section>
+      <section id="tab-plans" class="tab" hidden></section>
+      <section id="tab-devices" class="tab" hidden></section>
+    </main>
+  </div>
+
+  <div id="dialog" class="dialog-backdrop" hidden></div>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
