@@ -95,12 +95,20 @@ async function refresh() {
     const on = state.heaters.filter(h => h.online).length;
     setStatus(`${on}/${state.heaters.length} Heizung(en) online · ${new Date().toLocaleTimeString("de-DE")}`);
     setBanner(null);
+    showAppInfo(state.app);
     if (view === "setup" && !state.setup.unlocked && !pinPromise) showView("home");  // e.g. the app was restarted
   } catch (e) {
     setStatus("keine Verbindung zur App", true);
     setBanner("Keine Verbindung zur Heizungs-App. Es wird gleich noch einmal versucht.");
   }
   render();
+}
+
+function showAppInfo(app) {  // footer of the setup: name, version, licence, source code
+  if (!app) return;
+  setHTML(document.getElementById("app-info"),
+    `${esc(app.name)} ${esc(app.version)} · Lizenz ${esc(app.license)} · ` +
+    `<a href="${esc(app.repo)}" target="_blank" rel="noopener">Quellcode auf GitHub</a>`);
 }
 
 function setBanner(text) {

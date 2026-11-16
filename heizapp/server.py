@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import APP_NAME, LICENSE, REPO_URL, __version__
 from .access import COOKIE, SetupAccess
 from .service import ActionError, Service
 
@@ -63,7 +64,7 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "Heizung/1.0"
+        server_version = f"{APP_NAME}/{__version__}"
 
         def log_message(self, fmt, *args):  # only log changes, not the 5-second polling
             if self.command != "GET":
@@ -106,6 +107,7 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
         def state(self) -> dict:
             result = service.state()
             result["setup"] = {"pin": access.pin_set, "unlocked": access.allowed(self._token(), touch=False)}
+            result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "repo": REPO_URL}
             return result
 
         def unlock(self, pin) -> dict:
@@ -131,7 +133,7 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
             self._set_cookies = []
             if not self._authorized():
                 self._send(401, b"Anmeldung erforderlich", "text/plain; charset=utf-8",
-                           {"WWW-Authenticate": 'Basic realm="Heizung", charset="UTF-8"'})
+                           {"WWW-Authenticate": f'Basic realm="{APP_NAME}", charset="UTF-8"'})
                 return
             path = urlparse(self.path).path
             if not path.startswith("/api/"):

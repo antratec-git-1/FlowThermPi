@@ -212,3 +212,8 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
          background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; max-width: min(92vw, 560px);
          box-shadow: 0 6px 24px rgba(0,0,0,.25); z-index: 20; font-size: 14px; }
 #toast.error { background: var(--danger); color: #fff; }
+
+/* app name: small label above "Heizung" and footer of the setup */
+.brand { margin: 0 0 2px; font-size: 13px; font-weight: 600; letter-spacing: .06em; color: var(--accent); }
+.app-info { padding: 4px 16px 28px; font-size: 13px; color: var(--muted); }
+.app-info a { color: inherit; }

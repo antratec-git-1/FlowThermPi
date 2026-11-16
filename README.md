@@ -160,3 +160,12 @@ beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht an
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
 - Verlauf und Kosten (Heizdauer × Nennleistung × Strompreis).
 - Heizungen zusätzlich in Apple Home einbinden.
+
+## Lizenz
+
+Copyright © 2026 antratec
+
+FlowThermPi ist freie Software unter der **GNU General Public License, Version 3**
+(siehe [LICENSE](LICENSE)): Sie darf genutzt, verändert und weitergegeben werden – wer eine
+veränderte Version weitergibt, muss deren Quellcode ebenfalls unter dieser Lizenz offenlegen.
+FlowThermPi wird ohne jede Gewährleistung bereitgestellt.

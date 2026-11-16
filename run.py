@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Startet die lokale Heizungs-Web-App.
+"""Startet FlowThermPi, die lokale Web-App für Thermotec-Heizungen.
 
     python3 run.py                      # nur auf diesem Rechner: http://127.0.0.1:8080
     python3 run.py --host 0.0.0.0       # im ganzen Heimnetz erreichbar (dann Passwort setzen!)
@@ -18,13 +18,15 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 
+from heizapp import APP_NAME, __version__  # noqa: E402
 from heizapp.server import make_server  # noqa: E402
 from heizapp.service import Service  # noqa: E402
 from heizapp.store import ConfigError, DataStore  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Lokale Steuerung für Thermotec-Heizungen")
+    parser = argparse.ArgumentParser(prog=APP_NAME, description=f"{APP_NAME} – lokale Steuerung für Thermotec-Heizungen")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("--host", default=os.environ.get("HEIZAPP_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("HEIZAPP_PORT", "8080")))
     parser.add_argument("--config", default=os.environ.get("HEIZAPP_CONFIG", str(BASE / "heizungen.conf")))
@@ -54,7 +56,8 @@ def main() -> int:
 
     service.start()
     server = make_server(service, args.host, args.port, password)
-    logging.info("%d Heizung(en) konfiguriert – App läuft auf http://%s:%d", len(service.entries), args.host, args.port)
+    logging.info("%s %s – %d Heizung(en) konfiguriert – läuft auf http://%s:%d",
+                 APP_NAME, __version__, len(service.entries), args.host, args.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
