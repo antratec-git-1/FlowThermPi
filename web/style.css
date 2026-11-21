@@ -20,11 +20,13 @@ h2 { font-size: 17px; margin: 0; }
 .hint { font-size: 13px; margin: 8px 0 0; }
 .error-text { color: var(--danger); }
 
-nav { display: flex; gap: 6px; padding: 6px 16px 10px; position: sticky; top: 0; background: var(--bg); z-index: 5; }
-nav button { flex: 1; max-width: 160px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 480px) {   /* five tabs side by side on a phone */
+nav { display: flex; gap: 6px; padding: 6px 16px 10px; position: sticky; top: 0; background: var(--bg); z-index: 5;
+      overflow-x: auto; scrollbar-width: none; }   /* more tabs than fit (phone): the bar scrolls sideways */
+nav::-webkit-scrollbar { display: none; }
+nav button { flex: 1 0 auto; max-width: 160px; white-space: nowrap; }   /* never narrower than its word */
+@media (max-width: 480px) {
   nav { gap: 4px; padding: 6px 8px 10px; }
-  nav button { flex: 1 1 auto; padding: 7px 6px; font-size: 14px; }   /* as wide as the word needs */
+  nav button { padding: 7px 8px; font-size: 14px; }
 }
 nav button[aria-selected="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
 
@@ -291,3 +293,14 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .bars i:nth-child(3) { height: 80%; }
 .bars i:nth-child(4) { height: 100%; }
 .bars i.on { background: var(--ok); }
+
+/* "Fernwartung": login with QR code; the residents' note that it is on */
+.remote-status .about-facts { margin-top: 12px; }
+.remote-login { max-width: 560px; }
+.remote-login p { margin: 0 0 10px; }
+.remote-qr { display: block; width: 256px; height: 256px; margin: 4px 0 12px; padding: 10px; border-radius: 10px;
+             background: #fff; image-rendering: pixelated; }   /* Tailscale's 128-pixel code, twice as big */
+.remote-link { overflow-wrap: anywhere; font-size: 14px; }
+.remote-hint { margin: 4px 0 0; font-size: 15px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.remote-hint::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.remote-hint[hidden] { display: none; }

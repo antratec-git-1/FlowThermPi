@@ -5,11 +5,13 @@
 
 Updates danach in der App: Einrichtung › Über › „Nach Updates suchen“ – oder derselbe Befehl noch
 einmal. WLAN einrichten: Einrichtung › WLAN (der Pi kann also mit Netzwerkkabel ausgeliefert werden).
+Fernwartung: Einrichtung › Fernwartung – Tailscale wird erst installiert, wenn man dort darum bittet.
 Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi und
 bleiben bei Updates erhalten.
 
 Dieses Skript ist der einzige Teil von FlowThermPi, der als root läuft – auch für den Update-Knopf
-(--from-app) und die WLAN-Einrichtung (--wifi). Die App selbst hat keine Rechte am System.
+(--from-app), die WLAN-Einrichtung (--wifi) und die Fernwartung (--remote). Die App selbst hat keine
+Rechte am System.
 
 Optionen hinter „python3 -“ anhängen, z. B. „… | sudo python3 - --port 8080“:
     --port N           Port der App (Standard 80: http://<name>.local ohne Portangabe)
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import platform
@@ -61,6 +64,17 @@ WIFI_STATUS = "wifi-status.json"         # in DATA_DIR: result and network state
 WIFI_ACTIONS = ("scan", "connect", "forget")
 WIFI_COUNTRIES = ("DE", "AT", "CH", "LU", "LI", "NL", "BE", "FR", "IT", "DK", "PL", "CZ", "ES", "GB", "US")
 WIFI_PROFILE = "FlowThermPi WLAN"        # name of the NetworkManager connections made here
+WIFI_ONLY_LINK = ("Der Pi hängt gerade nur über „{ssid}“ am Netz. Vergisst er dieses WLAN, ist er nicht mehr "
+                  "erreichbar – auch nicht aus der Ferne. Bitte zuerst das Netzwerkkabel am Pi einstecken.")
+REMOTE_UNIT = f"/etc/systemd/system/{NAME}-remote.service"   # runs this script for the remote maintenance in the app
+REMOTE_PATH = f"/etc/systemd/system/{NAME}-remote.path"      # watches for the app's requests about it
+REMOTE_REQUEST = "remote-request.json"   # in DATA_DIR: placed by the app (Einrichtung › Fernwartung) – just an action
+REMOTE_STATUS = "remote-status.json"     # in DATA_DIR: Tailscale's state for the app, the login link while one is open
+REMOTE_ACTIONS = ("status", "up", "down", "logout")
+TAILSCALE_PACKAGES = "https://pkgs.tailscale.com/stable"   # Tailscale's own package archive, signed by Tailscale
+TAILSCALE_KEYRING = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
+TAILSCALE_SOURCE = "/etc/apt/sources.list.d/tailscale.list"
+TAILSCALE_LOGIN_WAIT = 8                 # seconds „tailscale up“ waits; the login link comes within a second or two
 RELEASE_INFO = "release.json"            # in each release: version and Git commit, read by the app
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MIN_PYTHON = (3, 11)
@@ -98,6 +112,7 @@ Environment=HEIZAPP_CONFIG={data}/heizungen.conf
 Environment=HEIZAPP_DATA={data}/data/data.json
 Environment=HEIZAPP_UPDATE_DIR={data}
 Environment=HEIZAPP_WIFI_DIR={data}
+Environment=HEIZAPP_REMOTE_DIR={data}
 EnvironmentFile=-/etc/default/{name}
 ExecStart={python} {app}/current/run.py
 Restart=always
@@ -174,6 +189,42 @@ Unit={name}-wifi.service
 WantedBy=multi-user.target
 """
 
+REMOTE_UNIT_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Fernwartung mit Tailscale, wenn die App darum bittet (Einrichtung › Fernwartung).
+[Unit]
+Description=FlowThermPi – Fernwartung (Tailscale)
+Wants=network-online.target
+After=network-online.target
+# while a login is open the app asks every few seconds – more often than systemd allows by default
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+ExecStart={python} -I -B -X utf8 {app}/current/install.py --remote
+TimeoutStartSec=20min
+"""
+
+REMOTE_PATH_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Startet {name}-remote.service, sobald die App eine Anfrage zur Fernwartung ablegt.
+[Unit]
+Description=FlowThermPi – wartet auf Anfragen der App zur Fernwartung
+
+[Path]
+PathExists={data}/{remote_request}
+Unit={name}-remote.service
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+TAILSCALE_SOURCE_TEMPLATE = """\
+# Tailscale – eingerichtet von FlowThermPi (Einrichtung › Fernwartung)
+deb [signed-by={keyring}] {packages}/{distro} {codename} main
+"""
+
 
 class InstallError(Exception):
     pass
@@ -185,6 +236,11 @@ class CommandError(InstallError):
     def __init__(self, shown: str, detail: str):
         super().__init__(f"„{shown}“ ist fehlgeschlagen: {detail}")
         self.detail = detail
+
+
+class ProgramMissing(CommandError):
+    def __init__(self, program: str):
+        super().__init__(program, "Programm nicht gefunden")
 
 
 def say(text: str = "") -> None:
@@ -203,7 +259,7 @@ class System:
             code, out, err = self.execute(cmd, env)
         except FileNotFoundError:
             if check:
-                raise CommandError(cmd[0], "Programm nicht gefunden") from None
+                raise ProgramMissing(cmd[0]) from None
             return ""
         if check and code != 0:
             shown, detail = " ".join(cmd), (err or out).strip()
@@ -212,8 +268,19 @@ class System:
             raise CommandError(shown, detail)
         return out.strip()
 
-    def execute(self, cmd: tuple[str, ...], env: dict | None) -> tuple[int, str, str]:
-        res = subprocess.run(cmd, text=True, capture_output=True, env=env)
+    def call(self, *cmd: str, timeout: float | None = None) -> tuple[int, str, str]:
+        """Exit code, output and error output of cmd, whatever the code. ProgramMissing if there is no such program."""
+        try:
+            return self.execute(cmd, None, timeout=timeout)
+        except FileNotFoundError:
+            raise ProgramMissing(cmd[0]) from None
+
+    def execute(self, cmd: tuple[str, ...], env: dict | None, timeout: float | None = None) -> tuple[int, str, str]:
+        try:
+            res = subprocess.run(cmd, text=True, capture_output=True, env=env, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:   # the program was stopped; what it printed until then
+            out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            return 124, out, f"{cmd[0]}: keine Antwort nach {timeout:g} Sekunden"
         return res.returncode, res.stdout, res.stderr
 
     def ok(self, *cmd: str) -> bool:
@@ -247,6 +314,10 @@ class DryRun(System):
     def run(self, *cmd: str, check: bool = True, env: dict | None = None, redact: str = "") -> str:
         self.commands.append(cmd)
         return ""
+
+    def execute(self, cmd: tuple[str, ...], env: dict | None, timeout: float | None = None) -> tuple[int, str, str]:
+        self.commands.append(cmd)
+        return 0, "", ""
 
     def ok(self, *cmd: str) -> bool:
         self.commands.append(cmd)
@@ -515,11 +586,12 @@ def configured_port(unit: Path) -> int | None:
 
 
 def write_units(root: Path, port: int) -> None:
-    """The app's service plus the units behind the update button and the WLAN setup."""
+    """The app's service plus the units behind the update button, the WLAN setup and the remote maintenance."""
     values = {"name": NAME, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
-              "wifi_request": WIFI_REQUEST, "python": sys.executable or "/usr/bin/python3"}
+              "wifi_request": WIFI_REQUEST, "remote_request": REMOTE_REQUEST, "python": sys.executable or "/usr/bin/python3"}
     for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE),
-                           (WIFI_UNIT, WIFI_UNIT_TEMPLATE), (WIFI_PATH, WIFI_PATH_TEMPLATE)):
+                           (WIFI_UNIT, WIFI_UNIT_TEMPLATE), (WIFI_PATH, WIFI_PATH_TEMPLATE),
+                           (REMOTE_UNIT, REMOTE_UNIT_TEMPLATE), (REMOTE_PATH, REMOTE_PATH_TEMPLATE)):
         path = root / unit.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.format(**values), encoding="utf-8")
@@ -618,6 +690,7 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "enable", NAME)
         system.run("systemctl", "enable", "--now", f"{NAME}-update.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-wifi.path")
+        system.run("systemctl", "enable", "--now", f"{NAME}-remote.path")
         system.run("systemctl", "restart", NAME)
 
         if system.live:
@@ -964,6 +1037,13 @@ def wifi_forget(system: System, ssid: str) -> int:
     return removed
 
 
+def wifi_only_link(state: dict, ssid: str) -> bool:
+    """The Pi is in this WLAN and no cable is in: forgetting it would cut the Pi off – also for remote access
+    (Tailscale and the like run over that WLAN, too)."""
+    up = [i for i in state["interfaces"] if i["state"].startswith("connected")]
+    return not any(i["type"] == "ethernet" for i in up) and any(i["type"] == "wifi" and i.get("ssid") == ssid for i in up)
+
+
 def run_wifi(system: System, request: dict, status: dict) -> None:
     state = wifi_state(system)
     device = next((i["name"] for i in state["interfaces"] if i["type"] == "wifi"), None)
@@ -978,6 +1058,8 @@ def run_wifi(system: System, request: dict, status: dict) -> None:
         wifi_connect(system, request, device)
         status["message"] = f"Verbunden mit „{ssid}“."
     else:
+        if wifi_only_link(state, ssid):
+            raise InstallError(WIFI_ONLY_LINK.format(ssid=ssid))
         removed = wifi_forget(system, ssid)
         status["message"] = f"„{ssid}“ ist vergessen." if removed else f"„{ssid}“ war nicht gespeichert."
     say(f"✓ {status.get('message') or 'WLAN-Netze gesucht.'}")
@@ -1027,6 +1109,320 @@ def wifi_from_app(args: argparse.Namespace, system: System) -> None:
         os.close(folder)
 
 
+# ---------------------------------------------------------------------- Fernwartung (Einrichtung › Fernwartung)
+# Remote maintenance with Tailscale: the Pi joins the private network ("tailnet") of whoever signs it in, and
+# from there the app can be opened from afar. The app places {data}/remote-request.json with nothing but one of
+# REMOTE_ACTIONS, and flowthermpi-remote.path runs „install.py --remote“ as root. Tailscale is installed only when
+# „up“ asks for it, from Tailscale's own signed package archive; it then keeps itself up to date (auto-update).
+# The name in the tailnet is decided here (flowthermpi-<device number>), never by the app. Signing in works with
+# a login link that the app shows as a QR code: whoever completes it decides whose tailnet the Pi joins.
+def device_number(root: Path) -> str | None:
+    """Eight hex digits that tell this Pi from others: the end of its serial number, part of its name in Tailscale.
+    The same as heizapp.remote.device_number (the app shows it, e.g. for a sticker on the Pi)."""
+    serial = ""
+    try:
+        serial = (root / "sys/firmware/devicetree/base/serial-number").read_bytes().decode("ascii", "replace")
+    except OSError:
+        pass
+    if not serial.strip("\x00 \t\n"):
+        try:
+            found = re.search(r"^Serial\s*:\s*(\S+)\s*$", (root / "proc/cpuinfo").read_text(encoding="ascii", errors="replace"), re.M)
+            serial = found.group(1) if found else ""
+        except OSError:
+            pass
+    serial = serial.strip("\x00 \t\n").lower()
+    if re.fullmatch(r"[0-9a-f]{8,}", serial) and int(serial, 16):
+        return serial[-8:]
+    try:   # not a Raspberry Pi: derived from the machine id (which itself should not be shown)
+        machine = (root / "etc/machine-id").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return hashlib.sha256(f"flowthermpi:{machine}".encode()).hexdigest()[:8] if re.fullmatch(r"[0-9a-f]{32}", machine) else None
+
+
+def remote_name(root: Path) -> str:
+    number = device_number(root)
+    return f"{NAME}-{number}" if number else NAME
+
+
+def remote_request(text: str) -> str:
+    """The app's request, checked: only the action counts, nothing else in it is used."""
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise InstallError("Die Anfrage der App zur Fernwartung ist unlesbar.") from exc
+    if not isinstance(raw, dict) or raw.get("action") not in REMOTE_ACTIONS:
+        raise InstallError("Unbekannte Anfrage zur Fernwartung.")
+    return raw["action"]
+
+
+def first_line(text: str) -> str:
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")[:200]
+
+
+def json_objects(text: str) -> list[dict]:
+    """The JSON objects in text, one after the other („tailscale up --json“ prints them as they come)."""
+    decoder, found, pos = json.JSONDecoder(), [], 0
+    while (pos := text.find("{", pos)) >= 0:
+        try:
+            item, pos = decoder.raw_decode(text, pos)
+        except ValueError:
+            pos += 1
+            continue
+        if isinstance(item, dict):
+            found.append(item)
+    return found
+
+
+def tailscale(system: System, *args: str, timeout: float = 60) -> tuple[int, str, str]:
+    return system.call("tailscale", *args, timeout=timeout)
+
+
+def tailscale_state(system: System) -> dict:
+    """Tailscale as „tailscale status --json“ reports it – only what the app shows."""
+    try:
+        code, out, err = tailscale(system, "status", "--json", timeout=30)
+    except ProgramMissing:
+        return {"installed": False}
+    raw = None
+    if code == 0:
+        try:
+            raw = json.loads(out)
+        except ValueError:
+            pass
+    if not isinstance(raw, dict):   # e.g. „failed to connect to local tailscaled“
+        return {"installed": True, "daemon": False, "problem": first_line(err or out) or f"Fehlercode {code}"}
+
+    def obj(value) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def text(value) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    me, tailnet = obj(raw.get("Self")), obj(raw.get("CurrentTailnet"))
+    user = obj(obj(raw.get("User")).get(str(me.get("UserID"))))
+    ips = me.get("TailscaleIPs") or raw.get("TailscaleIPs")
+    return {"installed": True, "daemon": True, "state": text(raw.get("BackendState")),
+            "version": (text(raw.get("Version")) or "").split("-")[0] or None,
+            "auth_url": text(raw.get("AuthURL")), "host_name": text(me.get("HostName")),
+            "dns_name": (text(me.get("DNSName")) or "").rstrip(".") or None,
+            "ips": [ip for ip in ips if isinstance(ip, str)] if isinstance(ips, list) else [],
+            "key_expiry": text(me.get("KeyExpiry")),
+            "tags": [t for t in me.get("Tags") or [] if isinstance(t, str)] if isinstance(me.get("Tags"), list) else [],
+            "tailnet": text(tailnet.get("Name")), "magic_dns": tailnet.get("MagicDNSEnabled") is True,
+            "user": text(user.get("LoginName"))}
+
+
+def tailscale_wait(system: System, done, seconds: int) -> dict:
+    """Ask Tailscale once a second until done(state) or the time is up."""
+    state = tailscale_state(system)
+    for _ in range(seconds):
+        if done(state):
+            break
+        system.sleep(1)
+        state = tailscale_state(system)
+    return state
+
+
+def os_release(root: Path) -> dict:
+    for name in ("etc/os-release", "usr/lib/os-release"):
+        try:
+            text = (root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        info = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if sep and re.fullmatch(r"[A-Z_]+", key):
+                info[key] = value.strip().strip("\"'")
+        return info
+    return {}
+
+
+def fetch(url: str, missing: str, limit: int = 1 << 16) -> bytes:
+    """A small file over HTTPS (checked against the system's certificates)."""
+    error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as res:
+                data = res.read(limit + 1)
+            if len(data) > limit:
+                raise InstallError(f"{url} ist unerwartet groß – abgebrochen.")
+            return data
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise InstallError(missing) from exc
+            error = exc
+        except (urllib.error.URLError, OSError) as exc:
+            error = exc
+        time.sleep(3 * attempt)
+    raise InstallError(f"Download von {url} fehlgeschlagen ({error}). Hat der Pi Internet?")
+
+
+def write_system_file(path: Path, data: bytes) -> None:
+    """A file of the system (root's own folder, 0644), replaced in one step."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def apt_reason(detail: str) -> str:
+    errors = [line.strip() for line in detail.splitlines() if line.startswith("E:")]
+    return (errors[0] if errors else first_line(detail) or "unbekannter Fehler")[:200]
+
+
+def install_tailscale(system: System, root: Path) -> None:
+    """Tailscale from its own package archive – what Tailscale's installer does, without running a script from the web.
+    Only the signing key is downloaded; the archive's address is fixed here."""
+    info = os_release(root)
+    distro, codename = info.get("ID", ""), info.get("VERSION_CODENAME", "")
+    if distro not in ("debian", "raspbian") or not re.fullmatch(r"[a-z]{3,20}", codename):
+        raise InstallError("Tailscale lässt sich hier nur unter Raspberry Pi OS oder Debian einrichten.")
+    say(f"• Lade den Schlüssel von Tailscales Paketarchiv ({distro} {codename}) …")
+    key = fetch(f"{TAILSCALE_PACKAGES}/{distro}/{codename}.noarmor.gpg",
+                missing=f"Für {distro} „{codename}“ bietet Tailscale (noch) keine Pakete an.")
+    if len(key) < 100 or not key[0] & 0x80:   # an OpenPGP key starts with a packet tag – not e.g. a web page
+        raise InstallError("Der Schlüssel von Tailscales Paketarchiv sieht nicht richtig aus – abgebrochen.")
+    write_system_file(root / TAILSCALE_KEYRING.lstrip("/"), key)
+    write_system_file(root / TAILSCALE_SOURCE.lstrip("/"), TAILSCALE_SOURCE_TEMPLATE.format(
+        keyring=TAILSCALE_KEYRING, packages=TAILSCALE_PACKAGES, distro=distro, codename=codename).encode())
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive", "LC_ALL": "C.UTF-8"}
+    apt = ("apt-get", "-o", "DPkg::Lock::Timeout=300")   # waits if the system is installing updates right now
+    say("• Lade die Paketlisten …")
+    system.run(*apt, "update", check=False, env=env)     # a broken other archive must not stop us
+    say("• Installiere Tailscale …")
+    try:
+        system.run(*apt, "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+                   "install", "-y", "tailscale", "tailscale-archive-keyring", env=env)
+    except CommandError as exc:
+        raise InstallError(f"Tailscale ließ sich nicht installieren ({apt_reason(exc.detail)}).") from None
+    system.run("systemctl", "enable", "--now", "tailscaled", check=False)
+
+
+def tailscale_login(system: System, hostname: str) -> dict:
+    """„tailscale up“ with this Pi's settings. Returns what it printed – the login link and its QR code when the Pi
+    still has to be signed in. It waits only a few seconds: the login goes on in tailscaled, and the app follows it."""
+    code, out, err = tailscale(system, "up", "--json", "--qr", f"--timeout={TAILSCALE_LOGIN_WAIT}s",
+                               f"--hostname={hostname}", "--accept-dns=false", timeout=TAILSCALE_LOGIN_WAIT + 60)
+    found: dict = {}
+    for item in json_objects(out):
+        found.update({key: value for key, value in item.items() if isinstance(value, str) and value})
+    if code != 0 and not found.get("AuthURL") and "timeout waiting" not in err + out:
+        reason = found.get("Error") or first_line(err or out) or f"Fehlercode {code}"
+        if "non-default" in reason:   # someone changed Tailscale's settings by hand: „up“ wants them all repeated
+            reason = (f"Auf dem Pi wurden Einstellungen von Tailscale von Hand geändert. Bitte dort per SSH anmelden: "
+                      f"sudo tailscale up --hostname={hostname} --accept-dns=false – und die eigenen Einstellungen dazu")
+        raise InstallError(f"Tailscale ließ sich nicht verbinden: {reason}")
+    return found
+
+
+def remote_up(system: System, root: Path, status: dict, report) -> None:
+    state = tailscale_state(system)
+    if not state["installed"]:
+        status["phase"] = "installing"
+        report()
+        install_tailscale(system, root)
+        state = tailscale_state(system)
+        if not state["installed"]:
+            raise InstallError("Tailscale ist nach der Installation nicht zu finden.")
+    status["phase"] = "connecting"
+    report()
+    if not state.get("daemon"):
+        system.run("systemctl", "enable", "--now", "tailscaled", check=False)
+        state = tailscale_wait(system, lambda s: s.get("daemon"), 20)
+        if not state.get("daemon"):
+            raise InstallError(f"Tailscale startet nicht ({state.get('problem') or 'keine Antwort'}).")
+    if state.get("state") == "Stopped":   # signed in, only switched off: on again – every setting stays as it is
+        code, _, _ = tailscale(system, "up", timeout=60)
+        if code == 0:
+            state = tailscale_wait(system, lambda s: s.get("state") in ("Running", "NeedsLogin", "NeedsMachineAuth"), 20)
+    if state.get("state") not in ("Running", "Starting", "NeedsMachineAuth"):
+        hostname = remote_name(root)
+        say(f"• Melde den Pi als „{hostname}“ bei Tailscale an …")
+        printed = tailscale_login(system, hostname)
+        state = tailscale_wait(system, lambda s: s.get("state") in ("Running", "NeedsMachineAuth") or bool(s.get("auth_url")), 30)
+        if state.get("auth_url") and state["auth_url"] == printed.get("AuthURL") and printed.get("QR"):
+            status["qr"] = printed["QR"]
+        if state.get("state") == "NeedsLogin" and not state.get("auth_url"):
+            raise InstallError("Tailscale hat keinen Anmelde-Link geschickt. Hat der Pi Internet? Bitte gleich noch einmal versuchen.")
+    code, out, err = tailscale(system, "set", "--auto-update=true", timeout=30)   # Tailscale keeps itself up to date
+    status["auto_update"] = code == 0
+    if code:
+        say(f"  Automatische Updates von Tailscale ließen sich nicht einschalten: {first_line(err or out)}")
+    status["message"] = {"Running": "Die Fernwartung ist an.",
+                         "NeedsLogin": "Bitte den Pi jetzt bei Tailscale anmelden.",
+                         "NeedsMachineAuth": "Der Pi wartet auf die Freigabe in der Tailscale-Verwaltung."}.get(
+        state.get("state"), "Tailscale verbindet sich noch – bitte gleich noch einmal nachsehen.")
+
+
+def run_remote(system: System, root: Path, action: str, status: dict, report) -> None:
+    if action == "up":
+        remote_up(system, root, status, report)
+        say(f"✓ {status['message']}")
+        return
+    state = tailscale_state(system)
+    if action == "status" or not state.get("daemon"):
+        return
+    if action == "down":
+        code, out, err = tailscale(system, "down", timeout=60)
+        if code and tailscale_state(system).get("state") in ("Running", "Starting"):
+            raise InstallError(f"Ausschalten hat nicht geklappt: {first_line(err or out) or f'Fehlercode {code}'}")
+        status["message"] = "Die Fernwartung ist aus."
+    else:   # logout – also ends a login that is still open; afterwards nothing comes up again by itself
+        code, out, err = tailscale(system, "logout", timeout=60)
+        tailscale(system, "down", timeout=60)
+        if tailscale_state(system).get("state") in ("Running", "Starting", "Stopped"):
+            raise InstallError(f"Abmelden hat nicht geklappt: {first_line(err or out) or 'Tailscale ist noch angemeldet'}")
+        status["message"] = "Der Pi ist bei Tailscale abgemeldet."
+    say(f"✓ {status['message']}")
+
+
+def remote_from_app(args: argparse.Namespace, system: System) -> None:
+    """Run by flowthermpi-remote.service when the app has placed a request. The result goes to remote-status.json,
+    always with Tailscale's state afterwards."""
+    root = Path(args.root)
+    data_dir = root / DATA_DIR.lstrip("/")
+    try:
+        folder = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise InstallError(f"Datenordner {DATA_DIR} fehlt oder ist kein Ordner ({exc.strerror}).") from exc
+    try:
+        try:
+            text = read_private(folder, REMOTE_REQUEST)
+        finally:
+            try:
+                os.unlink(REMOTE_REQUEST, dir_fd=folder)   # first: while it exists, the path unit starts us again
+            except FileNotFoundError:
+                pass
+        if text is None:
+            say("Keine Anfrage der App zur Fernwartung – nichts zu tun.")
+            return
+        status = {"id": request_id(text), "action": None, "state": "running", "phase": None, "at": now_text(),
+                  "device": device_number(root)}
+
+        def report() -> None:
+            status["at"] = now_text()
+            write_private(folder, REMOTE_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
+
+        try:
+            status["action"] = remote_request(text)
+            run_remote(system, root, status["action"], status, report)
+            status["state"] = "done"
+        except InstallError as exc:   # reported to the app; not an error of the service itself
+            status.update(state="failed", message=str(exc))
+            say(f"✗ {exc}")
+        status["phase"] = None
+        status["tailscale"] = tailscale_state(system)
+        report()
+    finally:
+        os.close(folder)
+
+
 def reset_pin(args: argparse.Namespace, system: System) -> None:
     system.run("systemctl", "stop", NAME, check=False)
     try:
@@ -1042,14 +1438,18 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
     with install_lock(root / APP_DIR.lstrip("/")):
         system.run("systemctl", "disable", "--now", f"{NAME}-update.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-wifi.path", check=False)
+        system.run("systemctl", "disable", "--now", f"{NAME}-remote.path", check=False)
         system.run("systemctl", "disable", "--now", NAME, check=False)
-        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH):
+        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH, REMOTE_UNIT, REMOTE_PATH):
             path = root / unit.lstrip("/")
             if path.exists():
                 path.unlink()
         system.run("systemctl", "daemon-reload", check=False)
         shutil.rmtree(root / APP_DIR.lstrip("/"), ignore_errors=True)
     say(f"✓ FlowThermPi entfernt ({APP_DIR}).")
+    if system.live and shutil.which("tailscale"):
+        say("  Tailscale (Fernwartung) bleibt installiert. Abmelden: sudo tailscale logout – "
+            "entfernen: sudo apt remove tailscale")
     if args.purge:
         shutil.rmtree(root / DATA_DIR.lstrip("/"), ignore_errors=True)
         system.run("userdel", NAME, check=False)
@@ -1073,6 +1473,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--purge", action="store_true", help="mit --uninstall: auch alle Daten löschen")
     parser.add_argument("--from-app", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-update.service
     parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-wifi.service
+    parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-remote.service
     parser.add_argument("--commit", help=argparse.SUPPRESS)  # with --source: Git commit of that folder
     parser.add_argument("--root", default="/", help=argparse.SUPPRESS)  # tests: work inside this folder only
     return parser.parse_args(argv)
@@ -1092,6 +1493,8 @@ def main(argv: list[str] | None = None, system: System | None = None) -> int:
             update_from_app(args, system)
         elif args.wifi:
             wifi_from_app(args, system)
+        elif args.remote:
+            remote_from_app(args, system)
         elif args.uninstall:
             uninstall(args, system)
         elif args.reset_pin:

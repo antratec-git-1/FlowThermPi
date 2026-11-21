@@ -36,6 +36,9 @@ MAX_STATUS = 1 << 20
 BUSY = {"scan": "Die Suche nach WLAN-Netzen läuft schon.",
         "connect": "Der Pi verbindet sich gerade mit dem WLAN – bitte einen Moment warten.",
         "forget": "Einen Moment bitte – der Pi vergisst gerade ein WLAN."}
+# the same text as WIFI_ONLY_LINK in install.py, which checks again with the current state of the Pi
+ONLY_LINK = ("Der Pi hängt gerade nur über „{ssid}“ am Netz. Vergisst er dieses WLAN, ist er nicht mehr erreichbar – "
+             "auch nicht aus der Ferne. Bitte zuerst das Netzwerkkabel am Pi einstecken.")
 
 
 def _now() -> str:
@@ -110,6 +113,13 @@ def _networks(value) -> list[dict] | None:
     return result
 
 
+def _only_link(net: dict | None, ssid: str) -> bool:
+    """The Pi is in this WLAN and no cable is in: forgetting it cuts the Pi off – for every browser, also one
+    that comes from afar (Tailscale and the like run over that WLAN, too)."""
+    up = [i for i in (net or {}).get("interfaces", []) if i["connected"]]
+    return not any(i["type"] == "ethernet" for i in up) and any(i["type"] == "wifi" and i["ssid"] == ssid for i in up)
+
+
 def _via(net: dict | None, local: str | None) -> str | None:
     """How this browser reached the Pi: "ethernet", "wifi" or None (unknown, e.g. on the Pi itself)."""
     for item in (net or {}).get("interfaces", []) if local else []:
@@ -177,11 +187,8 @@ class Wifi:
         ssid = check_ssid(body.get("ssid"))
         with self._lock:
             net = self._net
-        if _via(net, local) == "wifi":
-            cable = any(i["type"] == "ethernet" and i["connected"] for i in net["interfaces"])
-            if not cable and any(i["type"] == "wifi" and i["connected"] and i["ssid"] == ssid for i in net["interfaces"]):
-                raise ActionError(f"Dieses Gerät ist gerade über „{ssid}“ mit dem Pi verbunden. Vergisst der Pi dieses "
-                                  "WLAN, ist er nicht mehr erreichbar. Bitte zuerst das Netzwerkkabel am Pi einstecken.", 409)
+        if _only_link(net, ssid):   # quick answer from the last known state; install.py checks again
+            raise ActionError(ONLY_LINK.format(ssid=ssid), 409)
         status = self._ask("forget", {"action": "forget", "ssid": ssid})
         if status.get("state") != "done":
             raise ActionError(_text(status.get("message"), 300) or "Das hat nicht geklappt.", 502)

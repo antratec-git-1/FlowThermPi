@@ -65,12 +65,19 @@ class InstallTest(Base):
         self.assertIn("Environment=HEIZAPP_WIFI_DIR=/var/lib/flowthermpi\n", unit)     # enables Einrichtung › WLAN
         self.assertIn("PathExists=/var/lib/flowthermpi/wifi-request.json\n", self.path(install.WIFI_PATH).read_text())
         self.assertIn("/opt/flowthermpi/current/install.py --wifi\n", self.path(install.WIFI_UNIT).read_text())
+        self.assertIn("Environment=HEIZAPP_REMOTE_DIR=/var/lib/flowthermpi\n", unit)   # enables Einrichtung › Fernwartung
+        self.assertIn("PathExists=/var/lib/flowthermpi/remote-request.json\n", self.path(install.REMOTE_PATH).read_text())
+        remote_unit = self.path(install.REMOTE_UNIT).read_text()
+        self.assertIn("/opt/flowthermpi/current/install.py --remote\n", remote_unit)
+        self.assertIn("StartLimitBurst=30\n", remote_unit)                    # the app asks often while a login is open
         commands = [" ".join(c) for c in system.commands]
         self.assertTrue(any(c.startswith("useradd --system") for c in commands))
         self.assertIn("systemctl enable flowthermpi", commands)
         self.assertIn("systemctl enable --now flowthermpi-update.path", commands)
         self.assertIn("systemctl enable --now flowthermpi-wifi.path", commands)
+        self.assertIn("systemctl enable --now flowthermpi-remote.path", commands)
         self.assertIn("systemctl restart flowthermpi", commands)
+        self.assertFalse([c for c in commands if "tailscale" in c or "apt" in c])   # Tailscale only when asked for
         self.assertIn("FlowThermPi 1.2.3 läuft", out)
         info = json.loads((current / "release.json").read_text())
         self.assertEqual((info["version"], info["commit"], info["ref"]), ("1.2.3", None, None))  # local folder
@@ -168,10 +175,12 @@ class InstallTest(Base):
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall"], system)
         self.assertFalse(self.path("/opt/flowthermpi").exists())
-        for unit in (install.UNIT, install.UPDATE_UNIT, install.UPDATE_PATH, install.WIFI_UNIT, install.WIFI_PATH):
+        for unit in (install.UNIT, install.UPDATE_UNIT, install.UPDATE_PATH, install.WIFI_UNIT, install.WIFI_PATH,
+                     install.REMOTE_UNIT, install.REMOTE_PATH):
             self.assertFalse(self.path(unit).exists(), unit)
         self.assertIn(("systemctl", "disable", "--now", "flowthermpi-update.path"), system.commands)
         self.assertIn(("systemctl", "disable", "--now", "flowthermpi-wifi.path"), system.commands)
+        self.assertIn(("systemctl", "disable", "--now", "flowthermpi-remote.path"), system.commands)
         self.assertTrue(self.path("/var/lib/flowthermpi/heizungen.conf").exists())
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall", "--purge"], install.DryRun())
@@ -545,6 +554,20 @@ class WifiFromAppTest(Base):
         self.assertEqual(status["message"], "„Gibt es nicht“ war nicht gespeichert.")
         self.assertFalse([c for c in self.nm.commands if c[0] == "raspi-config"])  # forgetting switches nothing on
 
+    def test_forget_does_not_cut_the_pi_off(self):
+        self.nm.country, self.nm.cable = "DE", False
+        self.nm.active = self.nm.add_profile("Zuhause", "a-1234567", "preconfigured")
+        self.nm.add_profile("Café", "")
+        _, _, status = self.ask({"action": "forget", "ssid": "Zuhause"})       # the only way into the network
+        self.assertEqual((status["state"], status["message"]), ("failed", install.WIFI_ONLY_LINK.format(ssid="Zuhause")))
+        self.assertEqual(len(self.nm.profiles), 2)
+        _, _, status = self.ask({"action": "forget", "ssid": "Café"})          # another saved WLAN may go
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(list(self.nm.profiles), [self.nm.active])
+        self.nm.cable = True                                                    # with the cable in, so may this one
+        _, _, status = self.ask({"action": "forget", "ssid": "Zuhause"})
+        self.assertEqual((status["state"], self.nm.profiles), ("done", {}))
+
     def test_bad_requests_are_refused(self):
         for text in ("kaputt", '{"action": "format"}', json.dumps({"action": "connect", "ssid": "x" * 33}),
                      json.dumps({"action": "connect", "ssid": "Zuhause", "password": "kurz"}),
@@ -579,6 +602,315 @@ class WifiFromAppTest(Base):
         code, _, status = self.ask({"action": "scan"})
         self.assertEqual((code, status["state"]), (0, "failed"))
         self.assertIn("NetworkManager", status["message"])
+
+
+KEY = b"\x99\x02\x0d\x04" + b"k" * 600   # looks like a binary OpenPGP key
+QR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACAAQAAAADrRVxmAAAA"
+TIMEOUT = 'timeout waiting for Tailscale service to enter a Running state; check health with "tailscale status"\n'
+
+
+class FakeTS(install.DryRun):
+    """tailscale, tailscaled and apt as on a Raspberry Pi – Tailscale's servers included."""
+
+    run = install.System.run     # the real error handling
+
+    def __init__(self):
+        super().__init__()
+        self.installed = False
+        self.daemon = True        # tailscaled answers (once installed)
+        self.backend = "NoState"  # before the first „tailscale up“
+        self.prefs = {"hostname": "", "accept_dns": True, "auto_update": False, "want_running": False, "control": ""}
+        self.by_hand = None       # a setting someone made on the Pi by hand, e.g. "--ssh"
+        self.login = None         # login link that is open
+        self.account = None       # signed in as …
+        self.url_delay = 0        # this many looks until the login link is there (slow servers)
+        self.apt_error = None     # what „apt-get install“ says when it fails
+        self.logins = 0
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+    def sign_in(self, account="helfer@github"):
+        """Someone opens the login link (on their phone) and signs in."""
+        assert self.login, "no login open"
+        self.account, self.login = account, None
+        self.backend = "Running" if self.prefs["want_running"] else "Stopped"
+
+    def execute(self, cmd, env, timeout=None):
+        self.commands.append(cmd)
+        if cmd[0] == "tailscale":
+            if not self.installed:
+                raise FileNotFoundError(cmd[0])
+            if not self.daemon:
+                return 1, "", "failed to connect to local tailscaled; it doesn't appear to be running (sudo systemctl start tailscaled ?)\n"
+            return self.tailscale(list(cmd[1:]))
+        if cmd[0] == "apt-get":
+            assert env and env["DEBIAN_FRONTEND"] == "noninteractive", env
+            if "install" in cmd:
+                if self.apt_error:
+                    return 100, "Reading package lists...\n", self.apt_error
+                self.installed = self.daemon = True   # the package starts tailscaled
+            return 0, "", ""
+        if cmd == ("systemctl", "enable", "--now", "tailscaled"):
+            self.daemon = self.installed
+            return 0, "", ""
+        return 127, "", f"{cmd[0]}: im Test unbekannt"
+
+    def status_json(self):
+        url = None
+        if self.login:
+            if self.url_delay:
+                self.url_delay -= 1
+            else:
+                url = self.login
+        me = {"ID": "nA1", "HostName": self.prefs["hostname"] or "flowthermpi", "OS": "linux", "UserID": 0,
+              "TailscaleIPs": None, "Online": False}
+        result = {"Version": "1.90.8-t0a1b2c3d4-g5e6f7a8b9", "BackendState": self.backend, "AuthURL": url or "",
+                  "TailscaleIPs": None, "Self": me, "Health": [], "CurrentTailnet": None, "User": None}
+        if self.account:
+            me.update(DNSName=f"{me['HostName']}.tail1234.ts.net.", UserID=4711, Online=self.backend == "Running",
+                      TailscaleIPs=["100.101.102.103", "fd7a:115c:a1e0::1"], KeyExpiry="2027-05-20T10:00:00Z")
+            result.update(TailscaleIPs=me["TailscaleIPs"], User={"4711": {"ID": 4711, "LoginName": self.account}},
+                          CurrentTailnet={"Name": self.account, "MagicDNSSuffix": "tail1234.ts.net", "MagicDNSEnabled": True})
+        return result
+
+    def tailscale(self, a):
+        if a == ["status", "--json"]:
+            return 0, json.dumps(self.status_json(), indent=2), ""
+        if a == ["up"] and self.account and self.backend != "NeedsLogin":   # just on again, settings as they are
+            self.prefs["want_running"] = True
+            self.backend = "Running"
+            return 0, "", ""
+        if a[:1] == ["up"]:
+            flags = dict(f[2:].split("=", 1) if "=" in f else (f[2:], "true") for f in a[1:])
+            if self.prefs["control"] and self.by_hand and self.by_hand not in a:
+                return 1, "", ("Error: changing settings via 'tailscale up' requires mentioning all non-default flags. "
+                               "To proceed, either re-run your command with --reset or use the command below to explicitly "
+                               f"mention the current value of all non-default settings:\n\n\ttailscale up {self.by_hand}\n")
+            self.prefs.update(hostname=flags.get("hostname", ""), accept_dns=flags.get("accept-dns") != "false",
+                              want_running=True, control="https://controlplane.tailscale.com")
+            if self.account:
+                self.backend = "Running"
+                return 0, json.dumps({"BackendState": "Running"}, indent="\t") + "\n", ""
+            self.logins += 1
+            self.login, self.backend = f"https://login.tailscale.com/a/{self.logins:012x}", "NeedsLogin"
+            if self.url_delay:   # the link comes after „up“ has given up waiting
+                return 1, "", TIMEOUT
+            return 1, json.dumps({"AuthURL": self.login, "QR": QR, "BackendState": "NeedsLogin"}, indent="\t") + "\n", TIMEOUT
+        if a == ["set", "--auto-update=true"]:
+            self.prefs["auto_update"] = True
+            return 0, "", ""
+        if a == ["down"]:
+            self.prefs["want_running"] = False
+            if self.backend in ("Running", "Starting"):
+                self.backend = "Stopped"
+            return 0, "", ""
+        if a == ["logout"]:
+            self.account = self.login = None
+            self.backend = "NeedsLogin"
+            return 0, "", ""
+        return 1, "", f"tailscale: im Test unbekannt: {a}"
+
+
+def pi_root(root: Path, serial: bytes | None = b"10000000a1b2c3d4\x00", distro="debian", codename="trixie") -> None:
+    """The files of a Raspberry Pi that the remote maintenance reads."""
+    if serial is not None:
+        path = root / "sys/firmware/devicetree/base/serial-number"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(serial)
+    (root / "etc").mkdir(parents=True, exist_ok=True)
+    (root / "etc/os-release").write_text(f'PRETTY_NAME="Debian GNU/Linux"\nID={distro}\nVERSION_CODENAME={codename}\n')
+
+
+class RemoteFromAppTest(Base):
+    """install.py --remote, as flowthermpi-remote.service runs it for Einrichtung › Fernwartung."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_install()
+        self.data = self.path("/var/lib/flowthermpi")
+        pi_root(self.root)
+        self.ts = FakeTS()
+        self.fetched = []
+        self.key = KEY
+        original = install.fetch
+        install.fetch = self.fake_fetch
+        self.addCleanup(setattr, install, "fetch", original)
+
+    def fake_fetch(self, url, missing, limit=1 << 16):
+        self.fetched.append(url)
+        return self.key
+
+    def ask(self, action, **extra):
+        text = action if action.startswith("{") or action == "kaputt" else json.dumps({"id": "0123abcd", "action": action, **extra})
+        (self.data / install.REMOTE_REQUEST).write_text(text)
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--remote"], self.ts)
+        self.assertFalse((self.data / install.REMOTE_REQUEST).exists())
+        path = self.data / install.REMOTE_STATUS
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        return code, out.getvalue(), json.loads(path.read_text())
+
+    def ran(self, *start):
+        return [c for c in self.ts.commands if c[:len(start)] == start]
+
+    def test_first_setup_installs_tailscale_and_opens_the_login(self):
+        code, out, status = self.ask("up")
+        self.assertEqual((code, status["state"], status["action"], status["id"]), (0, "done", "up", "0123abcd"), out)
+        self.assertEqual(self.fetched, ["https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg"])
+        keyring = self.path(install.TAILSCALE_KEYRING)
+        self.assertEqual((keyring.read_bytes(), oct(keyring.stat().st_mode & 0o777)), (KEY, "0o644"))
+        self.assertIn("deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] "
+                      "https://pkgs.tailscale.com/stable/debian trixie main\n", self.path(install.TAILSCALE_SOURCE).read_text())
+        install_cmd = self.ran("apt-get", "-o", "DPkg::Lock::Timeout=300", "-o")
+        self.assertEqual(install_cmd[0][-4:], ("install", "-y", "tailscale", "tailscale-archive-keyring"))
+        self.assertTrue(self.ran("apt-get", "-o", "DPkg::Lock::Timeout=300", "update"))
+        self.assertEqual(self.ran("tailscale", "up"), [("tailscale", "up", "--json", "--qr", "--timeout=8s",
+                                                        "--hostname=flowthermpi-a1b2c3d4", "--accept-dns=false")])
+        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # the device number from the serial
+        self.assertFalse(self.ts.prefs["accept_dns"])                         # the Pi keeps the household's DNS
+        self.assertTrue(self.ts.prefs["auto_update"] and status["auto_update"])
+        ts = status["tailscale"]
+        self.assertEqual((ts["state"], ts["auth_url"], status["qr"]), ("NeedsLogin", "https://login.tailscale.com/a/000000000001", QR))
+        self.assertEqual((status["device"], status["phase"]), ("a1b2c3d4", None))
+        self.assertEqual(status["message"], "Bitte den Pi jetzt bei Tailscale anmelden.")
+
+    def test_signed_in_the_pi_reports_its_name_and_address(self):
+        self.ask("up")
+        self.ts.sign_in()
+        code, _, status = self.ask("status")
+        ts = status["tailscale"]
+        self.assertEqual((code, status["state"], ts["state"], ts["auth_url"]), (0, "done", "Running", None))
+        self.assertEqual((ts["dns_name"], ts["ips"], ts["user"], ts["tailnet"]),
+                         ("flowthermpi-a1b2c3d4.tail1234.ts.net", ["100.101.102.103", "fd7a:115c:a1e0::1"],
+                          "helfer@github", "helfer@github"))
+        self.assertEqual((ts["version"], ts["key_expiry"], ts["magic_dns"]), ("1.90.8", "2027-05-20T10:00:00Z", True))
+        self.assertNotIn("qr", status)
+        self.assertEqual(len(self.ran("apt-get")), 2)                          # installed once, not again
+
+    def test_status_never_installs_anything(self):
+        code, _, status = self.ask("status")
+        self.assertEqual((code, status["state"], status["tailscale"]), (0, "done", {"installed": False}))
+        self.assertEqual((self.fetched, self.ran("apt-get")), ([], []))
+        self.assertFalse(self.path(install.TAILSCALE_SOURCE).exists())
+        for action in ("down", "logout"):                                     # nothing to do without Tailscale
+            self.assertEqual(self.ask(action)[2]["state"], "done")
+        self.assertEqual(self.ran("apt-get"), [])
+
+    def test_switched_off_and_on_again_without_a_new_login(self):
+        self.ask("up")
+        self.ts.sign_in()
+        _, _, status = self.ask("down")
+        self.assertEqual((status["message"], status["tailscale"]["state"]), ("Die Fernwartung ist aus.", "Stopped"))
+        self.ts.by_hand = "--ssh"                                             # e.g. Tailscale SSH, switched on by hand
+        _, out, status = self.ask("up")
+        self.assertEqual((status["state"], status["tailscale"]["state"]), ("done", "Running"), out)
+        self.assertIn(("tailscale", "up"), self.ts.commands)                 # plain „up“: keeps every setting
+        self.assertEqual((self.ts.logins, status["message"]), (1, "Die Fernwartung ist an."))
+
+    def test_settings_made_by_hand_are_explained(self):
+        self.ask("up")
+        self.ts.sign_in()
+        self.ask("logout")
+        self.ts.by_hand = "--ssh"
+        _, _, status = self.ask("up")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("von Hand geändert", status["message"])
+        self.assertIn("sudo tailscale up --hostname=flowthermpi-a1b2c3d4 --accept-dns=false", status["message"])
+
+    def test_logout_ends_an_open_login(self):
+        self.ask("up")
+        _, _, status = self.ask("logout")
+        self.assertEqual((status["state"], status["message"]), ("done", "Der Pi ist bei Tailscale abgemeldet."))
+        self.assertEqual((status["tailscale"]["state"], status["tailscale"]["auth_url"]), ("NeedsLogin", None))
+        self.assertIn(("tailscale", "logout"), self.ts.commands)
+        self.assertFalse(self.ts.prefs["want_running"])                       # nothing comes up again by itself
+
+    def test_slow_servers_send_the_link_later(self):
+        self.ts.url_delay = 3
+        _, _, status = self.ask("up")
+        self.assertEqual((status["state"], status["tailscale"]["auth_url"]), ("done", "https://login.tailscale.com/a/000000000001"))
+        self.assertNotIn("qr", status)                                         # „up“ printed no QR code this time
+        self.assertEqual(self.ts.sleeps, [1, 1, 1])
+
+    def test_tailscaled_not_running(self):
+        self.ts.installed, self.ts.daemon = True, False
+        _, _, status = self.ask("status")
+        self.assertEqual((status["tailscale"]["installed"], status["tailscale"]["daemon"]), (True, False))
+        self.assertIn("tailscaled", status["tailscale"]["problem"])
+        _, _, status = self.ask("up")
+        self.assertIn(("systemctl", "enable", "--now", "tailscaled"), self.ts.commands)
+        self.assertEqual((status["state"], status["tailscale"]["state"]), ("done", "NeedsLogin"))
+        self.assertEqual(self.ran("apt-get"), [])
+
+    def test_only_on_raspberry_pi_os_and_debian(self):
+        pi_root(self.root, distro="ubuntu", codename="noble")
+        _, _, status = self.ask("up")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("nur unter Raspberry Pi OS oder Debian", status["message"])
+        self.assertEqual((self.fetched, self.ran("apt-get")), ([], []))
+        self.assertFalse(self.path(install.TAILSCALE_KEYRING).exists())
+        pi_root(self.root, distro="raspbian", codename="bookworm")          # Raspberry Pi OS (32 bit)
+        self.ask("up")
+        self.assertEqual(self.fetched, ["https://pkgs.tailscale.com/stable/raspbian/bookworm.noarmor.gpg"])
+
+    def test_a_web_page_is_not_taken_for_the_key(self):
+        self.key = b"<!DOCTYPE html><html><body>Fehler</body></html>" * 5
+        _, _, status = self.ask("up")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("Schlüssel", status["message"])
+        self.assertFalse(self.path(install.TAILSCALE_KEYRING).exists())
+        self.assertFalse(self.path(install.TAILSCALE_SOURCE).exists())
+        self.assertEqual(self.ran("apt-get"), [])
+
+    def test_apt_errors_are_reported(self):
+        self.ts.apt_error = "E: Unable to locate package tailscale\n"
+        _, _, status = self.ask("up")
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["message"], "Tailscale ließ sich nicht installieren (E: Unable to locate package tailscale).")
+        self.assertEqual(status["tailscale"], {"installed": False})
+
+    def test_the_request_cannot_choose_anything(self):
+        _, _, status = self.ask("up", hostname="fremder-name", flags=["--advertise-routes=192.168.0.0/16"])
+        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # extra fields are ignored
+        self.assertFalse([c for c in self.ts.commands if any("advertise" in part or "fremder" in part for part in c)])
+        for text in ("kaputt", '{"action": "rm -rf /"}', '{"action": ["up"]}', '["up"]'):
+            code, _, status = self.ask(text)
+            self.assertEqual((code, status["state"]), (0, "failed"), text)
+            self.assertIn("Fernwartung", status["message"])
+
+    def test_nothing_to_do_without_request(self):
+        with redirect_stdout(io.StringIO()):
+            code = install.main(["--root", str(self.root), "--remote"], self.ts)
+        self.assertEqual((code, self.ts.commands), (0, []))
+        self.assertFalse((self.data / install.REMOTE_STATUS).exists())
+
+    def test_request_link_is_not_followed(self):
+        victim = self.tmp / "fremde-datei"
+        victim.write_text('{"action": "up"}')
+        (self.data / install.REMOTE_REQUEST).symlink_to(victim)
+        with redirect_stdout(io.StringIO()):
+            code = install.main(["--root", str(self.root), "--remote"], self.ts)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.ts.commands, [])
+        self.assertFalse((self.data / install.REMOTE_REQUEST).is_symlink())   # removed, the file it pointed to stays
+        self.assertTrue(victim.exists())
+
+    def test_device_number(self):
+        self.assertEqual(install.device_number(self.root), "a1b2c3d4")
+        other = self.tmp / "other"
+        (other / "proc").mkdir(parents=True)
+        (other / "proc/cpuinfo").write_text("processor\t: 0\nRevision\t: d03114\nSerial\t\t: 100000009F8E7D6C\nModel\t: Raspberry Pi 4\n")
+        self.assertEqual(install.device_number(other), "9f8e7d6c")           # older systems: /proc/cpuinfo
+        (other / "proc/cpuinfo").write_text("Serial\t\t: 0000000000000000\n")
+        self.assertIsNone(install.device_number(other))                       # no serial, no machine id
+        (other / "etc").mkdir()
+        (other / "etc/machine-id").write_text("0123456789abcdef0123456789abcdef\n")
+        number = install.device_number(other)
+        self.assertRegex(number, r"^[0-9a-f]{8}$")
+        self.assertNotIn(number, "0123456789abcdef0123456789abcdef")          # derived, the machine id itself stays hidden
+        self.assertEqual(install.remote_name(other), f"flowthermpi-{number}")
 
 
 if __name__ == "__main__":

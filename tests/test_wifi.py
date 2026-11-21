@@ -87,8 +87,9 @@ class Base(unittest.TestCase):
 
 
 class WifiTest(Base):
-    def test_countries_match_the_installer(self):
+    def test_countries_and_texts_match_the_installer(self):
         self.assertEqual(tuple(wifi_module.COUNTRIES), install.WIFI_COUNTRIES)
+        self.assertEqual(wifi_module.ONLY_LINK, install.WIFI_ONLY_LINK)
 
     def test_scan_shows_networks_and_the_state_of_the_pi(self):
         self.start_service()
@@ -166,15 +167,31 @@ class WifiTest(Base):
         self.nm.country, self.nm.cable = "DE", False
         self.nm.active = self.nm.add_profile("Zuhause", "richtig-geheim")
         self.wifi.scan({})
-        with self.assertRaises(ActionError) as ctx:                          # the browser came via that WLAN
-            self.wifi.forget({"ssid": "Zuhause"}, local="192.168.1.21")
-        self.assertEqual(ctx.exception.status, 409)
-        self.assertIn("Netzwerkkabel", str(ctx.exception))
+        # via that WLAN, from afar (Tailscale runs over the same WLAN) or on the Pi itself: always refused
+        for local in ("192.168.1.21", "100.101.102.103", "127.0.0.1", None):
+            with self.assertRaises(ActionError) as ctx:
+                self.wifi.forget({"ssid": "Zuhause"}, local=local)
+            self.assertEqual(ctx.exception.status, 409, local)
+            self.assertIn("Netzwerkkabel", str(ctx.exception))
         self.assertEqual(len(self.nm.profiles), 1)
+        self.assertFalse([c for c in self.nm.commands if "delete" in c])     # the Pi was not even asked
         self.nm.cable = True                                                  # with the cable in, it may go
         self.wifi.scan({})
-        self.wifi.forget({"ssid": "Zuhause"}, local="192.168.1.21")
+        self.wifi.forget({"ssid": "Zuhause"}, local="100.101.102.103")
         self.assertEqual(self.nm.profiles, {})
+
+    def test_forget_asks_the_pi_about_the_cable_again(self):
+        self.start_service()
+        self.nm.country = "DE"
+        self.nm.active = self.nm.add_profile("Zuhause", "richtig-geheim")
+        self.wifi.scan({})                                                    # the app last saw the cable in …
+        self.nm.cable = False                                                 # … but it has been pulled since
+        with self.assertRaises(ActionError) as ctx:
+            self.wifi.forget({"ssid": "Zuhause"}, local="100.101.102.103")
+        self.assertIn("Netzwerkkabel", str(ctx.exception))
+        self.assertEqual(len(self.nm.profiles), 1)
+        cable = self.wifi.view()["net"]["interfaces"][0]
+        self.assertEqual((cable["type"], cable["connected"]), ("ethernet", False))   # and the app knows it now
 
     def test_state_survives_a_restart_of_the_app(self):
         self.start_service()

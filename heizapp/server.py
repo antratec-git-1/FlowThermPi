@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from . import APP_NAME, COPYRIGHT, LICENSE, REPO_URL, __version__
 from .access import COOKIE, SetupAccess
+from .remote import Remote
 from .service import ActionError, Service
 from .update import Updater
 from .wifi import Wifi
@@ -25,7 +26,7 @@ MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 
 
-def _routes(s: Service, u: Updater, w: Wifi):
+def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
     return [
@@ -68,14 +69,20 @@ def _routes(s: Service, u: Updater, w: Wifi):
         ("POST", r"/api/wifi/scan", lambda m, b, r: w.scan(b, r.local_ip()), SETUP),
         ("POST", r"/api/wifi/connect", lambda m, b, r: w.connect(b, r.local_ip()), SETUP),
         ("POST", r"/api/wifi/forget", lambda m, b, r: w.forget(b, r.local_ip()), SETUP),
+        ("GET", r"/api/remote", lambda m, b, r: t.view(r.local_ip()), SETUP),   # holds the login link: setup only
+        ("POST", r"/api/remote/refresh", lambda m, b, r: t.refresh(r.local_ip()), SETUP),
+        ("POST", r"/api/remote/up", lambda m, b, r: t.up(r.local_ip()), SETUP),
+        ("POST", r"/api/remote/down", lambda m, b, r: t.down(r.local_ip()), SETUP),
+        ("POST", r"/api/remote/logout", lambda m, b, r: t.logout(r.local_ip()), SETUP),
     ]
 
 
 def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None,
-                 updater: Updater | None = None, wifi: Wifi | None = None):
+                 updater: Updater | None = None, wifi: Wifi | None = None, remote: Remote | None = None):
     updater = updater or Updater(None)   # without it: no update button (e.g. on the Mac or in Docker)
     wifi = wifi or Wifi(None)            # without it: no WLAN setup
-    routes = _routes(service, updater, wifi)
+    remote = remote or Remote(None)      # without it: no remote maintenance
+    routes = _routes(service, updater, wifi, remote)
     access = access or SetupAccess(service.store)
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
@@ -126,8 +133,9 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
             result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "copyright": COPYRIGHT,
                              "repo": REPO_URL, "commit": updater.installed["commit"],
                              "installed": updater.installed["installed"], "updates": updater.supported,
-                             "wifi": wifi.supported}
+                             "wifi": wifi.supported, "remote": remote.supported, "device": remote.device}
             result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
+            result["remote"] = remote.summary()   # residents see when remote maintenance is on
             return result
 
         def local_ip(self) -> str | None:
@@ -244,5 +252,6 @@ class _Server(ThreadingHTTPServer):
 
 
 def make_server(service: Service, host: str, port: int, password: str | None = None,
-                updater: Updater | None = None, wifi: Wifi | None = None) -> ThreadingHTTPServer:
-    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi))
+                updater: Updater | None = None, wifi: Wifi | None = None,
+                remote: Remote | None = None) -> ThreadingHTTPServer:
+    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi, remote))

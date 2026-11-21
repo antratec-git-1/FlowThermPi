@@ -1,7 +1,8 @@
 # FlowThermPi – lokale Steuerung für Thermotec AeroFlow (FlexiSmart Pro)
 
 Kleine Web-App, die Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler** direkt im
-Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek).
+Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek). Nur die
+freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale.
 
 Inoffizielles Projekt – kein Produkt von Thermotec und nicht von Thermotec unterstützt.
 
@@ -51,6 +52,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   deckt Sommer-/Winterzeit ab). Ohne Internet stellt der Regler sie nicht selbst um.
 - **WLAN** (nur auf dem Raspberry Pi): Netze in der Nähe suchen, mit Passwort verbinden, gespeicherte
   WLANs vergessen – siehe [WLAN einrichten](#wlan-einrichten).
+- **Fernwartung** (nur auf dem Raspberry Pi): den Pi mit Tailscale aus der Ferne erreichbar machen, um einem
+  Haushalt zu helfen, ohne hinzufahren – siehe [Fernwartung](#fernwartung-tailscale).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -86,6 +89,13 @@ Das Skript lädt FlowThermPi von GitHub nach `/opt/flowthermpi`, legt den Dienst
 auf Europe/Berlin, falls noch die Werkseinstellung gilt, prüft, ob die App antwortet, und zeigt die
 Adresse an – z. B. `http://flowthermpi.local`.
 
+- **Am Mac mit Chrome oder Firefox nicht erreichbar** (Chrome: `ERR_ADDRESS_UNREACHABLE`): Ab macOS 15
+  braucht jeder Browser außer Safari die Freigabe *Lokales Netzwerk*. Der Mac fragt beim ersten Aufruf
+  danach – *Erlauben* wählen und die Seite neu laden. Wurde die Frage abgelehnt: *Systemeinstellungen ›
+  Datenschutz & Sicherheit › Lokales Netzwerk*, dort den Browser einschalten und die Seite neu laden; hilft
+  das nicht, den Browser ganz beenden (⌘Q) und neu öffnen. Safari braucht die Freigabe nicht, Browser auf
+  iPhone und iPad auch nicht
+  ([Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)).
 - **Update per Knopf:** in der App *Einrichtung › Über › Nach Updates suchen*, dann *Jetzt
   aktualisieren*. Der Pi holt den neuesten Stand von `main` und startet neu (etwa eine Minute, die
   Heizungen heizen weiter); die Seite lädt danach von selbst neu. Startet die neue Version nicht,
@@ -130,8 +140,9 @@ Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danac
   wieder und geht zurück ins vorherige WLAN, falls es eins gab. Die App zeigt den Grund.
 - Frisches Raspberry Pi OS hat das WLAN aus, bis ein WLAN-Land gesetzt ist. Das erledigt die App bei der
   ersten Suche (Deutschland).
-- **Vergessen** entfernt ein gespeichertes WLAN. Ist der Browser gerade über genau dieses WLAN verbunden und
-  steckt kein Kabel, lehnt die App das ab – sonst wäre der Pi nicht mehr erreichbar.
+- **Vergessen** entfernt ein gespeichertes WLAN. Das WLAN, über das der Pi gerade im Netz hängt, lässt sich nur
+  vergessen, wenn das Netzwerkkabel steckt – sonst wäre der Pi nicht mehr erreichbar, auch nicht aus der Ferne
+  (etwa über Tailscale). Der Pi prüft das vor dem Löschen selbst noch einmal.
 - Versteckte WLANs: „Namen selbst eingeben“. Firmen-WLANs mit eigener Anmeldung (802.1X) gehen nicht.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt eine Anfrage in ihren Datenordner (nur für
   sie lesbar). Der Dienst `flowthermpi-wifi` (root) prüft sie noch einmal, löscht sie sofort und steuert
@@ -141,6 +152,69 @@ Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danac
   Meldungen: `journalctl -u flowthermpi-wifi`.
 - Voraussetzung: Raspberry Pi OS ab Bookworm (NetworkManager). Den Reiter gibt es ab Version 0.3.0; ein Pi
   mit 0.2.0 bekommt ihn über den Update-Knopf.
+
+## Fernwartung (Tailscale)
+
+Damit man einem Haushalt helfen kann, ohne hinzufahren: Unter *Einrichtung › Fernwartung* kommt der Pi in das
+eigene private Netz bei [Tailscale](https://tailscale.com). Darüber öffnet man die App von überall, ohne Freigaben
+im Router. Die Fernwartung ist freiwillig; ohne sie bleibt alles im Heimnetz.
+
+**Vorher, einmal:** ein eigenes Tailscale-Konto anlegen (z. B. mit dem GitHub-Login) und Tailscale auf dem eigenen
+Mac oder Handy installieren. Der Tarif *Personal* ist kostenlos und für private Nutzung gedacht (Stand November 2026:
+bis 6 Nutzer, bis 50 getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tailscale.com/pricing)).
+
+1. Im Heimnetz die App öffnen, *Einrichtung › Fernwartung › Fernwartung einrichten*. Der Pi lädt Tailscale aus
+   dessen offiziellem, signiertem Paketarchiv (`pkgs.tailscale.com`, etwa 30 MB). Das dauert ein paar Minuten; die
+   Heizungen heizen dabei weiter.
+2. Die App zeigt einen QR-Code und einen Anmelde-Link. Mit dem Handy scannen und mit dem eigenen Tailscale-Konto
+   anmelden. **Link und Code nicht weitergeben:** Wer sich damit anmeldet, holt den Pi in sein eigenes Netz.
+3. Danach zeigt die App „An – der Pi ist aus der Ferne erreichbar“ und die Adressen für unterwegs, z. B.
+   `http://flowthermpi-a1b2c3d4` (mit MagicDNS) oder `http://100.x.y.z`. Gleich danach das
+   [Tailscale-Netz einrichten](#tailscale-netz-einrichten-einmal-in-der-tailscale-verwaltung).
+
+- **Name:** Im Tailscale-Netz heißt der Pi `flowthermpi-` + **Gerätenummer** (die letzten 8 Zeichen seiner
+  Seriennummer), damit sich mehrere Pis auseinanderhalten lassen. Die Gerätenummer steht unter *Einrichtung › Über*
+  und *Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `flowthermpi.local`.
+- **Die Bewohner sehen es:** Solange die Fernwartung an ist, steht in der Heizungsansicht „Fernwartung ist
+  eingeschaltet“.
+- **Ausschalten** trennt den Pi vom Tailscale-Netz (`tailscale down`); angemeldet bleibt er. **Einschalten** geht
+  ohne neue Anmeldung, aber nur im Heimnetz. **Abmelden** (`tailscale logout`) nimmt ihn ganz heraus; danach lässt er
+  sich in der Tailscale-Verwaltung löschen.
+- **Updates:** Tailscale hält sich selbst aktuell (`tailscale set --auto-update`).
+- Der Pi übernimmt keine DNS-Einstellungen aus dem Tailscale-Netz (`--accept-dns=false`), damit Heizungen mit
+  FRITZ!Box-Namen erreichbar bleiben. Er gibt nur sich selbst frei, nicht das Heimnetz (keine Subnet-Routen).
+- `--uninstall` lässt Tailscale installiert. Abmelden: `sudo tailscale logout`, entfernen: `sudo apt remove tailscale`.
+- **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage mit der gewünschten Aktion in
+  ihren Datenordner. Der Dienst `flowthermpi-remote` (root) kennt genau vier: nachsehen, einschalten (beim ersten Mal
+  mit Installieren und Anmelden), ausschalten, abmelden. Namen und Einstellungen bestimmt er selbst, ohne Shell.
+  Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Meldungen: `journalctl -u flowthermpi-remote`.
+- Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Den Reiter gibt es ab Version 0.4.0; ein Pi mit 0.3.0
+  bekommt ihn über den Update-Knopf.
+
+### Tailscale-Netz einrichten (einmal, in der Tailscale-Verwaltung)
+
+Von sich aus darf in einem Tailscale-Netz jedes Gerät jedes andere erreichen, also auch der Pi im einen Haushalt den
+Pi im anderen und den eigenen Mac. Deshalb in der Verwaltung ([login.tailscale.com](https://login.tailscale.com/admin)):
+
+1. **Access controls:** die Regel, nach der alle alles dürfen (`"src": ["*"]`, `"dst": ["*"]` bzw. `"*:*"`), löschen
+   und stattdessen diese beiden Abschnitte eintragen (die übrigen, etwa `ssh`, bleiben):
+   ```jsonc
+   {
+     "tagOwners": { "tag:flowthermpi": ["autogroup:admin"] },
+     "grants": [
+       // die eigenen Geräte untereinander (Mac, Handy …)
+       { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
+       // die eigenen Geräte zu den Pis: nur die App (Port 80) und SSH
+       { "src": ["autogroup:member"], "dst": ["tag:flowthermpi"], "ip": ["tcp:80", "tcp:22"] }
+     ]
+   }
+   ```
+   Für die Pis selbst gibt es keine Regel: Sie erreichen weder einander noch den Mac.
+2. **Jeden neuen Pi gleich nach der Anmeldung taggen:** *Machines* › beim Pi „…“ › *Edit ACL tags* ›
+   `tag:flowthermpi`. Bis dahin gehört er zum eigenen Konto und darf so viel wie Mac und Handy.
+3. **Ablauf ausschalten:** *Machines* › beim Pi „…“ › *Disable key expiry*. Sonst läuft seine Anmeldung nach etwa
+   sechs Monaten ab, und er muss vor Ort neu angemeldet werden. Ein Tag allein ändert daran nichts; die App zeigt
+   das Ablaufdatum, solange es eins gibt.
 
 ## Heizungen im Netz suchen
 
@@ -255,7 +329,8 @@ python3 -m unittest discover -s tests -v
 
 Die Tests laufen gegen eine simulierte Heizung (`tests/fake_heater.py`), die das oben
 beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen. Die
-WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`).
+WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`), die
+Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto.
 
 ## Ideen für später
 

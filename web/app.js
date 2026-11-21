@@ -20,6 +20,7 @@ let dialog = null;       // open dialog: {title, text, fields, buttons, onSubmit
 let pinPromise = null;   // a PIN dialog that is already open
 let setupIdleTimer = null;
 let tab = localStorage.getItem("heizung.tab") || "rooms";
+let shownTab = null;     // tab last brought into view in the tab bar
 let editing = null;      // plan in the editor: {id|null, name, days}
 let roomForm = null;     // room form in "Räume": {mode: "new"|"edit", id, name, heaters: [ids]}
 let deviceForm = null;   // heater form in "Geräte": {mode: "new"|"edit", id, name, host, token, hasToken, removeToken}
@@ -231,6 +232,7 @@ function showView(name) {
   else sessionStorage.removeItem("heizung.view");
   document.body.className = "view-" + name;
   if (name === "setup" && tab === "wifi") openWifiTab();
+  if (name === "setup" && tab === "remote") openRemoteTab();
   touchSetup();
   window.scrollTo(0, 0);
 }
@@ -258,8 +260,17 @@ function render() {
   const wifiTab = document.querySelector('#tabs [data-tab="wifi"]');
   if (state) wifiTab.hidden = !state.app.wifi;           // only on the Pi, set up with the installer
   if (state && tab === "wifi" && !state.app.wifi) tab = "rooms";
+  const remoteTab = document.querySelector('#tabs [data-tab="remote"]');
+  if (state) remoteTab.hidden = !state.app.remote;       // only on the Pi, set up with the installer
+  if (state && tab === "remote" && !state.app.remote) tab = "rooms";
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  for (const name of ["rooms", "plans", "devices", "wifi", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  if (tab !== shownTab) {   // a tab bar that scrolls (phone): bring the chosen tab into view – only when it changes
+    shownTab = tab;
+    const b = document.querySelector('#tabs button[aria-selected="true"]'), nav = b && b.parentElement;
+    if (nav && (b.offsetLeft < nav.scrollLeft || b.offsetLeft + b.offsetWidth > nav.scrollLeft + nav.clientWidth))
+      nav.scrollLeft = b.offsetLeft - 8;
+  }
+  for (const name of ["rooms", "plans", "devices", "wifi", "remote", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
@@ -268,6 +279,7 @@ function render() {
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
   else if (tab === "about") renderAbout(el);
   else if (tab === "wifi") renderWifi(el);
+  else if (tab === "remote") renderRemote(el);
   else renderDevices(el);
 }
 
@@ -279,6 +291,7 @@ function renderAbout(el) {  // "Über": logo, what the app does, version, licenc
       direkt im eigenen WLAN – ohne Cloud und ohne Konto beim Hersteller. Alle Daten bleiben im Haus.</p>
     <dl class="about-facts">
       <dt>Version</dt><dd>${esc(app.version)}</dd>
+      ${app.device ? `<dt>Gerätenummer</dt><dd>${esc(app.device)}</dd>` : ""}
       <dt>Lizenz</dt><dd>${esc(app.license)} – freie Software, ${esc(app.copyright)}</dd>
       <dt>Quellcode</dt><dd><a href="${esc(app.repo)}" target="_blank" rel="noopener">${esc(String(app.repo).replace(/^https:\/\//, ""))}</a></dd>
     </dl>
@@ -440,6 +453,7 @@ function renderHome() {
     now.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }) + " · " +
     now.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) + " Uhr";
   if (!state) return;
+  document.getElementById("remote-hint").hidden = !(state.remote && state.remote.on);   // residents know when someone can look in
   const gs = groups().filter(g => g.heaters.length);
   setHTML(document.getElementById("tiles"), gs.length ? gs.map(homeTile).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>');
@@ -1527,7 +1541,7 @@ let wifiFocus = false;    // after a failed attempt: cursor back into the passwo
 
 function wifiConnecting() { return !!(wifi && wifi.job && ["waiting", "connecting"].includes(wifi.job.state)); }
 function wifiBusy() { return !!(wifi && wifi.busy) || wifiConnecting() || !!(wifiScan && wifiScan.running); }
-function wifiURL(host) { return `http://${host}${location.port ? ":" + location.port : ""}`; }
+function appURL(host) { return `http://${host}${location.port ? ":" + location.port : ""}`; }   // same port as this page
 function signalWord(s) { return s >= 70 ? "sehr guter Empfang" : s >= 50 ? "guter Empfang" : s >= 30 ? "mäßiger Empfang" : "schwacher Empfang"; }
 function signalBars(s) {
   const n = s >= 70 ? 4 : s >= 50 ? 3 : s >= 30 ? 2 : 1;
@@ -1606,6 +1620,13 @@ async function connectWifi() {
 
 async function forgetWifi(ssid) {
   const n = wifi && (wifi.networks || []).find(x => x.ssid === ssid);
+  const up = (wifi && wifi.net ? wifi.net.interfaces : []).filter(i => i.connected);
+  if (!up.some(i => i.type === "ethernet") && up.some(i => i.type === "wifi" && i.ssid === ssid)) {   // the Pi's only way in
+    return ask({ title: `„${ssid}“ lässt sich gerade nicht vergessen`,
+      text: "Der Pi hängt gerade nur über dieses WLAN am Netz. Vergisst er es, ist er nicht mehr erreichbar – auch nicht " +
+        "aus der Ferne. Bitte zuerst das Netzwerkkabel am Pi einstecken.",
+      buttons: [{ label: "OK", value: null }] });
+  }
   const yes = await ask({
     title: `„${ssid}“ vergessen?`,
     text: "Der Pi verbindet sich dann nicht mehr von selbst mit diesem WLAN." + (n && n.active ? " Er trennt sich sofort davon" +
@@ -1652,7 +1673,7 @@ function wifiStatusHTML(w) {
     note = j.state === "done" ? `<div class="wifi-note ok">
         <p><b>✓ Der Pi ist jetzt im WLAN „${esc(j.ssid)}“.</b></p>
         ${cable && cable.connected ? `<p>Du kannst das Netzwerkkabel jetzt abziehen. Die App ist danach über das WLAN erreichbar:
-          <b>${esc(wifiURL(w.hostname + ".local"))}</b>${ip ? ` oder <b>${esc(wifiURL(ip))}</b>` : ""}</p>` : ""}
+          <b>${esc(appURL(w.hostname + ".local"))}</b>${ip ? ` oder <b>${esc(appURL(ip))}</b>` : ""}</p>` : ""}
         <button class="small" data-action="wifi-ok">OK</button></div>`
       : `<div class="wifi-note bad"><p><b>Verbinden mit „${esc(j.ssid)}“ hat nicht geklappt.</b></p>
         <p>${esc(j.message || "")}</p><button class="small" data-action="wifi-ok">OK</button></div>`;
@@ -1660,7 +1681,7 @@ function wifiStatusHTML(w) {
   return `<div class="card wifi-status">
     <h2>Verbindung des Pi</h2>
     ${lines}${note}
-    <p class="hint">Im Heimnetz erreichbar unter <b>${esc(wifiURL(w.hostname + ".local"))}</b>${w.at ? ` · Stand ${esc(fmtTime(w.at))}` : ""}</p>
+    <p class="hint">Im Heimnetz erreichbar unter <b>${esc(appURL(w.hostname + ".local"))}</b>${w.at ? ` · Stand ${esc(fmtTime(w.at))}` : ""}</p>
   </div>`;
 }
 
@@ -1682,7 +1703,7 @@ function wifiFormHTML(f, w) {
         <p class="hint">Das Passwort steht meist auf der Rück- oder Unterseite des Routers, bei der FRITZ!Box als
           „WLAN-Netzwerkschlüssel“. Auf Groß- und Kleinschreibung achten.</p>`}
     ${w.via === "wifi" ? `<p class="hint warn">Du bist gerade über das WLAN mit dem Pi verbunden. Wechselt er in ein anderes
-      WLAN, ist diese Seite kurz weg. Danach wieder öffnen: ${esc(wifiURL(w.hostname + ".local"))}</p>` : ""}
+      WLAN, ist diese Seite kurz weg. Danach wieder öffnen: ${esc(appURL(w.hostname + ".local"))}</p>` : ""}
     ${f.error ? `<p class="error-text">${esc(f.error)}</p>` : ""}
     <div class="row">
       <button class="primary" data-action="wifi-connect">Verbinden</button>
@@ -1730,6 +1751,191 @@ function renderWifi(el) {
   }
 }
 
+// ------------------------------------------------------------------ Fernwartung ("Einrichtung › Fernwartung")
+let remote = null;          // what api/remote answered: tailscale (state, name, addresses, login link), job, device
+let remoteError = null;     // api/remote could not be loaded
+let remotePending = null;   // a button pressed here whose answer is still out: "refresh" | "up" | "down" | "logout"
+let remoteSeen = null;      // id of the setup whose failure was closed with "OK"
+let remoteTimer = null;     // polls every 2 s while the Pi installs, connects or waits for the login
+
+function remoteRunning() { return !!(remote && remote.job && ["waiting", "running"].includes(remote.job.state)); }
+function remoteBusy() {     // a quick look at the Pi ("status") does not count: the server waits for it
+  return !!remotePending || !!(remote && remote.busy && remote.busy !== "status") || remoteRunning();
+}
+
+async function loadRemote() {
+  try { remote = await api("GET", "api/remote"); remoteError = null; }
+  catch (e) { remoteError = e.message; }
+  followRemote();
+  render();
+}
+
+function followRemote() {
+  const on = remoteRunning() || !!(remote && remote.watching);
+  if (on && !remoteTimer) remoteTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "remote") loadRemote(); }, 2000);
+  if (!on && remoteTimer) { clearInterval(remoteTimer); remoteTimer = null; }
+}
+
+async function openRemoteTab() {  // fresh state from the Pi: Tailscale may have changed since
+  await loadRemote();
+  if (remote && remote.supported && !remoteBusy()) remoteDo("refresh", { quiet: true });
+}
+
+async function remoteDo(action, { quiet = false, okText = null } = {}) {
+  remotePending = action;
+  render();
+  try {
+    const res = await api("POST", "api/remote/" + action);
+    remote = res.remote;
+    if (!quiet && (okText || res.message)) toast(okText || res.message);
+  } catch (e) {
+    if (!quiet) toast(e.message, true);
+    try { remote = await api("GET", "api/remote"); } catch (_) { /* shown with the next look */ }
+  }
+  remotePending = null;
+  followRemote();
+  invalidate();
+  render();
+}
+
+async function remoteSetup() {
+  const t = remote && remote.tailscale;
+  if (!t || !t.installed) {
+    const yes = await ask({ title: "Fernwartung einrichten?",
+      text: "Der Pi lädt dafür Tailscale aus dessen offiziellem Paketarchiv (pkgs.tailscale.com, etwa 30 MB) und hält es " +
+        "danach selbst aktuell. Das dauert ein paar Minuten, die Heizungen heizen dabei ganz normal weiter. Danach meldest " +
+        "du den Pi mit deinem Tailscale-Konto an.",
+      buttons: [{ label: "Abbrechen", value: null }, { label: "Einrichten", value: "yes", cls: "primary" }] });
+    if (!yes) return;
+  }
+  remoteSeen = null;
+  remoteDo("up");
+}
+
+function farAway() { return remote && remote.via_tailscale ? "Du bist gerade aus der Ferne hier – diese Seite ist danach weg. " : ""; }
+
+async function remoteOff() {
+  const yes = await ask({ title: "Fernwartung ausschalten?",
+    text: farAway() + "Der Pi ist dann nicht mehr aus der Ferne erreichbar. Wieder einschalten lässt sie sich nur hier im " +
+      "Heimnetz, in der Einrichtung. Angemeldet bleibt der Pi trotzdem.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Ausschalten", value: "yes", cls: "danger-solid" }] });
+  if (yes) remoteDo("down");
+}
+
+async function remoteLogout() {
+  const yes = await ask({ title: "Pi bei Tailscale abmelden?",
+    text: farAway() + "Der Pi verlässt dann das Tailscale-Netz. Für die Fernwartung muss er danach hier im Heimnetz neu " +
+      "angemeldet werden, mit QR-Code. In der Tailscale-Verwaltung lässt er sich anschließend löschen.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Abmelden", value: "yes", cls: "danger-solid" }] });
+  if (yes) remoteDo("logout");
+}
+
+function remoteStateText(t) {   // [dot, words]
+  if (!t.installed) return ["", "Aus – noch nicht eingerichtet"];
+  if (!t.daemon) return ["offline", "Tailscale läuft gerade nicht"];
+  switch (t.state) {
+    case "Running": return ["ok", "An – der Pi ist aus der Ferne erreichbar"];
+    case "Stopped": return ["", "Aus – angemeldet, aber ausgeschaltet"];
+    case "Starting": return ["on", "Verbindet …"];
+    case "NeedsMachineAuth": return ["on", "Wartet auf die Freigabe in der Tailscale-Verwaltung"];
+    case "NeedsLogin": return t.auth_url ? ["on", "Wartet auf die Anmeldung"] : ["", "Aus – nicht angemeldet"];
+    default: return ["", "Tailscale startet …"];
+  }
+}
+
+function remoteButtonsHTML(t, busy) {
+  const b = (action, label, cls = "") => `<button class="${cls}" data-action="${action}" ${busy ? "disabled" : ""}>${label}</button>`;
+  if (!t.installed || !t.daemon) return b("remote-setup", "Fernwartung einrichten", "primary");
+  switch (t.state) {
+    case "Running": return b("remote-off", "Ausschalten …") + b("remote-logout", "Abmelden …");
+    case "Stopped": return b("remote-on", "Einschalten", "primary") + b("remote-logout", "Abmelden …");
+    case "Starting": case "NeedsMachineAuth": return b("remote-cancel", "Abbrechen");
+    case "NeedsLogin": return t.auth_url ? "" : b("remote-setup", "Fernwartung einrichten", "primary");   // the login card has its own
+    default: return "";
+  }
+}
+
+function remoteFactsHTML(t) {
+  const far = [t.magic_dns && t.name ? appURL(t.name) : null, t.ipv4 ? appURL(t.ipv4) : null].filter(Boolean);
+  const tags = t.tags || [];   // a tagged Pi belongs to its tag, no longer to the account that signed it in
+  return `<dl class="about-facts">
+    <dt>Name</dt><dd>${esc(t.name || "–")}</dd>
+    ${t.state === "Running" && far.length ? `<dt>Aus der Ferne</dt><dd>${far.map(u => `<b>${esc(u)}</b>`).join(" oder ")}</dd>` : ""}
+    ${tags.length ? `<dt>Tag</dt><dd>${esc(tags.join(", "))}${t.tailnet ? ` · Netz ${esc(t.tailnet)}` : ""}</dd>`
+      : `<dt>Konto</dt><dd>${esc(t.user || t.tailnet || "–")}${t.tailnet && t.user && t.tailnet !== t.user ? ` · Netz ${esc(t.tailnet)}` : ""}</dd>`}
+    <dt>Anmeldung</dt><dd>${t.key_expiry ? "gültig bis " + esc(fmtDate(t.key_expiry)) : "läuft nicht ab"}</dd>
+    ${t.version ? `<dt>Tailscale</dt><dd>Version ${esc(t.version)}</dd>` : ""}
+  </dl>
+  ${t.key_expiry ? `<p class="hint">Tipp: In der Tailscale-Verwaltung bei diesem Pi „Disable key expiry“ wählen –
+    sonst muss er etwa alle sechs Monate hier vor Ort neu angemeldet werden.</p>` : ""}`;
+}
+
+function remoteStatusHTML(r) {
+  const t = r.tailscale, j = r.job, busy = remoteBusy();
+  let body;
+  if (remoteRunning()) {
+    const installing = j.phase === "installing";
+    body = `<p class="searching"><b>${installing ? "Tailscale wird installiert …" : "Verbinde mit Tailscale …"}</b></p>
+      <p class="muted">${installing ? "Das dauert ein paar Minuten. Die Heizungen heizen dabei ganz normal weiter."
+        : "Gleich erscheint hier der Anmelde-Link."}</p>`;
+  } else if (!t) {
+    body = `<p class="${r.error ? "error-text" : "searching"}">${esc(r.error || "Frage den Pi …")}</p>`;
+  } else {
+    const [dot, words] = remoteStateText(t);
+    body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b>
+        ${!t.daemon && t.problem ? `<span class="muted">${esc(t.problem)}</span>` : ""}</span>
+        ${r.via_tailscale ? `<span class="tag ok">darüber bist du gerade verbunden</span>` : ""}</li></ul>
+      ${t.daemon && ["Running", "Stopped"].includes(t.state) ? remoteFactsHTML(t) : ""}
+      ${r.error ? `<p class="error-text">${esc(r.error)}</p>` : ""}
+      <div class="row">${remoteButtonsHTML(t, busy)}</div>`;
+  }
+  const failed = j && !remoteRunning() && j.state === "failed" && j.id !== remoteSeen && j.finished &&
+    Date.now() - Date.parse(j.finished) < 30 * 60 * 1000;
+  return `<div class="card remote-status">
+    <div class="card-head"><h2>Fernwartung</h2>
+      <button class="small" data-action="remote-refresh" ${busy ? "disabled" : ""}>${remotePending === "refresh" ? "frage …" : "Aktualisieren"}</button></div>
+    ${body}
+    ${failed ? `<div class="wifi-note bad"><p><b>Das hat nicht geklappt.</b></p><p>${esc(j.message || "")}</p>
+      <button class="small" data-action="remote-ok">OK</button></div>` : ""}
+    <p class="hint">Gerätenummer <b>${esc(r.device || "–")}</b> · im Tailscale-Netz „${esc(r.hostname)}“${r.at ? ` · Stand ${esc(fmtTime(r.at))}` : ""}</p>
+  </div>`;
+}
+
+function remoteLoginHTML(r) {
+  const t = r.tailscale, busy = remoteBusy();
+  if (remoteRunning() || !t || !t.daemon || t.state !== "NeedsLogin" || !t.auth_url) return "";
+  return `<div class="card remote-login">
+    <h2>Pi bei Tailscale anmelden</h2>
+    <p>Mit dem Handy den Code scannen oder den Link öffnen und dort mit dem Tailscale-Konto anmelden, über das du den Pi
+      aus der Ferne erreichen willst.</p>
+    ${t.qr ? `<img class="remote-qr" src="${esc(t.qr)}" width="128" height="128" alt="QR-Code mit dem Anmelde-Link">` : ""}
+    <p class="remote-link"><a href="${esc(t.auth_url)}" target="_blank" rel="noopener noreferrer">${esc(t.auth_url)}</a></p>
+    ${r.watching ? `<p class="searching">Warte auf die Anmeldung …</p>`
+      : `<p class="muted">Noch nicht angemeldet. <button class="small" data-action="remote-refresh" ${busy ? "disabled" : ""}>Neu prüfen</button></p>`}
+    <p class="hint warn">Wer sich mit diesem Link anmeldet, kann die Heizungs-App danach aus der Ferne öffnen. Link und Code
+      deshalb nicht weitergeben.</p>
+    <div class="row"><button data-action="remote-cancel" ${busy ? "disabled" : ""}>Abbrechen</button></div>
+  </div>`;
+}
+
+function remoteAboutHTML(r) {
+  return `<div class="card">
+    <h2>So funktioniert die Fernwartung</h2>
+    <p>Der Pi kommt in dein privates Netz bei <b>Tailscale</b>. Von deinem Rechner oder Handy aus öffnest du die
+      Heizungs-App dann von überall – ohne Freigaben im Router. Für private Nutzung ist Tailscale kostenlos.</p>
+    <p>Im Heimnetz bleibt die App wie gewohnt unter <b>${esc(appURL(r.lan + ".local"))}</b> erreichbar.</p>
+    <p class="hint">Die Bewohner sehen in der Heizungsansicht, wenn die Fernwartung eingeschaltet ist.</p>
+  </div>`;
+}
+
+function renderRemote(el) {
+  const r = remote;
+  if (!r) return setHTML(el, `<div class="card"><p class="${remoteError ? "error-text" : "searching"}">${esc(remoteError || "Frage den Pi …")}</p></div>`);
+  if (!r.supported) return setHTML(el, `<div class="card"><p>Fernwartung gibt es nur, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
+  setHTML(el, remoteStatusHTML(r) + remoteLoginHTML(r) + remoteAboutHTML(r));
+}
+
 // ------------------------------------------------------------------ events
 function planOf(t) { return state.plans.find(p => p.id === t.closest("[data-plan]").dataset.plan); }
 function dayOf(t) { return t.closest(".day").dataset.day; }
@@ -1761,6 +1967,7 @@ document.addEventListener("click", e => {
     localStorage.setItem("heizung.tab", tab);
     if (tab === "plans" && editing) renderEditor();
     if (tab === "wifi") openWifiTab();
+    if (tab === "remote") openRemoteTab();
     render();
     return;
   }
@@ -1823,6 +2030,13 @@ document.addEventListener("click", e => {
     case "wifi-connect": return connectWifi();
     case "wifi-forget": return forgetWifi(t.dataset.ssid);
     case "wifi-ok": wifiSeen = wifi && wifi.job && wifi.job.id; return render();
+    case "remote-refresh": return remoteDo("refresh");
+    case "remote-setup": return remoteSetup();
+    case "remote-on": return remoteDo("up");
+    case "remote-off": return remoteOff();
+    case "remote-logout": return remoteLogout();
+    case "remote-cancel": return remoteDo("logout", { okText: "Anmeldung abgebrochen." });
+    case "remote-ok": remoteSeen = remote && remote.job && remote.job.id; return render();
   }
 });
 
