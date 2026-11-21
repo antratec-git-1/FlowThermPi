@@ -17,6 +17,7 @@ from . import APP_NAME, COPYRIGHT, LICENSE, REPO_URL, __version__
 from .access import COOKIE, SetupAccess
 from .service import ActionError, Service
 from .update import Updater
+from .wifi import Wifi
 
 log = logging.getLogger("heizapp")
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
@@ -24,7 +25,7 @@ MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 
 
-def _routes(s: Service, u: Updater):
+def _routes(s: Service, u: Updater, w: Wifi):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
     return [
@@ -63,13 +64,18 @@ def _routes(s: Service, u: Updater):
         ("DELETE", rf"/api/plans/{i}", lambda m, b, r: s.delete_plan(m[1]), SETUP),
         ("POST", r"/api/update/check", lambda m, b, r: u.check(), SETUP),
         ("POST", r"/api/update/start", lambda m, b, r: u.start(), SETUP),
+        ("GET", r"/api/wifi", lambda m, b, r: w.view(r.local_ip()), SETUP),
+        ("POST", r"/api/wifi/scan", lambda m, b, r: w.scan(b, r.local_ip()), SETUP),
+        ("POST", r"/api/wifi/connect", lambda m, b, r: w.connect(b, r.local_ip()), SETUP),
+        ("POST", r"/api/wifi/forget", lambda m, b, r: w.forget(b, r.local_ip()), SETUP),
     ]
 
 
 def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None,
-                 updater: Updater | None = None):
+                 updater: Updater | None = None, wifi: Wifi | None = None):
     updater = updater or Updater(None)   # without it: no update button (e.g. on the Mac or in Docker)
-    routes = _routes(service, updater)
+    wifi = wifi or Wifi(None)            # without it: no WLAN setup
+    routes = _routes(service, updater, wifi)
     access = access or SetupAccess(service.store)
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
@@ -119,9 +125,17 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
             result["setup"] = {"pin": access.pin_set, "unlocked": access.allowed(self._token(), touch=False)}
             result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "copyright": COPYRIGHT,
                              "repo": REPO_URL, "commit": updater.installed["commit"],
-                             "installed": updater.installed["installed"], "updates": updater.supported}
+                             "installed": updater.installed["installed"], "updates": updater.supported,
+                             "wifi": wifi.supported}
             result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
             return result
+
+        def local_ip(self) -> str | None:
+            """The Pi's own address this browser talks to – on the cable or in the WLAN."""
+            try:
+                return str(self.connection.getsockname()[0]).removeprefix("::ffff:")
+            except (OSError, AttributeError, IndexError):
+                return None
 
         def unlock(self, pin) -> dict:
             self._cookie(access.unlock(pin))
@@ -230,5 +244,5 @@ class _Server(ThreadingHTTPServer):
 
 
 def make_server(service: Service, host: str, port: int, password: str | None = None,
-                updater: Updater | None = None) -> ThreadingHTTPServer:
-    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater))
+                updater: Updater | None = None, wifi: Wifi | None = None) -> ThreadingHTTPServer:
+    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi))

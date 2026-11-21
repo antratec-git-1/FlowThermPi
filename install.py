@@ -4,8 +4,12 @@
     curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
 
 Updates danach in der App: Einrichtung › Über › „Nach Updates suchen“ – oder derselbe Befehl noch
-einmal. Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi
-und bleiben bei Updates erhalten.
+einmal. WLAN einrichten: Einrichtung › WLAN (der Pi kann also mit Netzwerkkabel ausgeliefert werden).
+Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi und
+bleiben bei Updates erhalten.
+
+Dieses Skript ist der einzige Teil von FlowThermPi, der als root läuft – auch für den Update-Knopf
+(--from-app) und die WLAN-Einrichtung (--wifi). Die App selbst hat keine Rechte am System.
 
 Optionen hinter „python3 -“ anhängen, z. B. „… | sudo python3 - --port 8080“:
     --port N           Port der App (Standard 80: http://<name>.local ohne Portangabe)
@@ -50,6 +54,13 @@ UPDATE_UNIT = f"/etc/systemd/system/{NAME}-update.service"   # runs this script 
 UPDATE_PATH = f"/etc/systemd/system/{NAME}-update.path"      # watches for the app's request
 UPDATE_REQUEST = "update-request.json"   # in DATA_DIR: placed by the app (button „Jetzt aktualisieren“)
 UPDATE_STATUS = "update-status.json"     # in DATA_DIR: progress and result, for the app
+WIFI_UNIT = f"/etc/systemd/system/{NAME}-wifi.service"       # runs this script for the WLAN setup in the app
+WIFI_PATH = f"/etc/systemd/system/{NAME}-wifi.path"          # watches for the app's WLAN request
+WIFI_REQUEST = "wifi-request.json"       # in DATA_DIR: placed by the app (Einrichtung › WLAN), may hold a password
+WIFI_STATUS = "wifi-status.json"         # in DATA_DIR: result and network state, for the app – never a password
+WIFI_ACTIONS = ("scan", "connect", "forget")
+WIFI_COUNTRIES = ("DE", "AT", "CH", "LU", "LI", "NL", "BE", "FR", "IT", "DK", "PL", "CZ", "ES", "GB", "US")
+WIFI_PROFILE = "FlowThermPi WLAN"        # name of the NetworkManager connections made here
 RELEASE_INFO = "release.json"            # in each release: version and Git commit, read by the app
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MIN_PYTHON = (3, 11)
@@ -86,6 +97,7 @@ Environment=HEIZAPP_PORT={port}
 Environment=HEIZAPP_CONFIG={data}/heizungen.conf
 Environment=HEIZAPP_DATA={data}/data/data.json
 Environment=HEIZAPP_UPDATE_DIR={data}
+Environment=HEIZAPP_WIFI_DIR={data}
 EnvironmentFile=-/etc/default/{name}
 ExecStart={python} {app}/current/run.py
 Restart=always
@@ -135,8 +147,44 @@ WantedBy=multi-user.target
 """
 
 
+WIFI_UNIT_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Richtet das WLAN ein, wenn die App darum bittet (Einrichtung › WLAN).
+[Unit]
+Description=FlowThermPi – WLAN einrichten
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart={python} -I -B -X utf8 {app}/current/install.py --wifi
+TimeoutStartSec=3min
+"""
+
+WIFI_PATH_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Startet {name}-wifi.service, sobald die App eine WLAN-Anfrage ablegt.
+[Unit]
+Description=FlowThermPi – wartet auf WLAN-Anfragen der App
+
+[Path]
+PathExists={data}/{wifi_request}
+Unit={name}-wifi.service
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 class InstallError(Exception):
     pass
+
+
+class CommandError(InstallError):
+    """A command failed. detail is its own message, without the command line (that may hold a password)."""
+
+    def __init__(self, shown: str, detail: str):
+        super().__init__(f"„{shown}“ ist fehlgeschlagen: {detail}")
+        self.detail = detail
 
 
 def say(text: str = "") -> None:
@@ -149,14 +197,30 @@ class System:
 
     live = True
 
-    def run(self, *cmd: str, check: bool = True) -> str:
-        res = subprocess.run(cmd, text=True, capture_output=True)
-        if check and res.returncode != 0:
-            raise InstallError(f"„{' '.join(cmd)}“ ist fehlgeschlagen: {(res.stderr or res.stdout).strip()}")
-        return res.stdout.strip()
+    def run(self, *cmd: str, check: bool = True, env: dict | None = None, redact: str = "") -> str:
+        """Output of cmd. redact: a secret in the arguments that must not appear in an error message."""
+        try:
+            code, out, err = self.execute(cmd, env)
+        except FileNotFoundError:
+            if check:
+                raise CommandError(cmd[0], "Programm nicht gefunden") from None
+            return ""
+        if check and code != 0:
+            shown, detail = " ".join(cmd), (err or out).strip()
+            if redact:
+                shown, detail = shown.replace(redact, "•••"), detail.replace(redact, "•••")
+            raise CommandError(shown, detail)
+        return out.strip()
+
+    def execute(self, cmd: tuple[str, ...], env: dict | None) -> tuple[int, str, str]:
+        res = subprocess.run(cmd, text=True, capture_output=True, env=env)
+        return res.returncode, res.stdout, res.stderr
 
     def ok(self, *cmd: str) -> bool:
         return subprocess.run(cmd, capture_output=True).returncode == 0
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def user_exists(self) -> bool:
         import pwd
@@ -180,13 +244,16 @@ class DryRun(System):
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
 
-    def run(self, *cmd: str, check: bool = True) -> str:
+    def run(self, *cmd: str, check: bool = True, env: dict | None = None, redact: str = "") -> str:
         self.commands.append(cmd)
         return ""
 
     def ok(self, *cmd: str) -> bool:
         self.commands.append(cmd)
         return False
+
+    def sleep(self, seconds: float) -> None:
+        pass
 
     def user_exists(self) -> bool:
         return False
@@ -448,10 +515,11 @@ def configured_port(unit: Path) -> int | None:
 
 
 def write_units(root: Path, port: int) -> None:
-    """The app's service plus the two units behind the update button."""
+    """The app's service plus the units behind the update button and the WLAN setup."""
     values = {"name": NAME, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
-              "python": sys.executable or "/usr/bin/python3"}
-    for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE)):
+              "wifi_request": WIFI_REQUEST, "python": sys.executable or "/usr/bin/python3"}
+    for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE),
+                           (WIFI_UNIT, WIFI_UNIT_TEMPLATE), (WIFI_PATH, WIFI_PATH_TEMPLATE)):
         path = root / unit.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.format(**values), encoding="utf-8")
@@ -549,6 +617,7 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "daemon-reload")
         system.run("systemctl", "enable", NAME)
         system.run("systemctl", "enable", "--now", f"{NAME}-update.path")
+        system.run("systemctl", "enable", "--now", f"{NAME}-wifi.path")
         system.run("systemctl", "restart", NAME)
 
         if system.live:
@@ -638,6 +707,326 @@ def run_new_installer(src: Path, commit: str | None, args: argparse.Namespace) -
         raise InstallError(reason or f"Das Update ist fehlgeschlagen (Fehlercode {res.returncode}).")
 
 
+# ---------------------------------------------------------------------- WLAN (Einrichtung › WLAN)
+# The Pi is delivered for a network cable; the WLAN is set up in the app. The app may not change the
+# network itself: it places {data}/wifi-request.json and flowthermpi-wifi.path runs „install.py --wifi“
+# as root. Only three actions exist (scan, connect, forget); every value is checked here again, and
+# NetworkManager is driven with argument lists, never through a shell. The password is handed to nmcli
+# once („connection add“, a fraction of a second in its arguments) and never written to the status
+# file or the log. A failed connection is removed again and the previous WLAN comes back.
+def nm(system: System, *args: str, check: bool = True, redact: str = "") -> str:
+    """nmcli with English, machine-readable output and UTF-8 network names."""
+    return system.run("nmcli", *args, check=check, env={**os.environ, "LC_ALL": "C.UTF-8"}, redact=redact)
+
+
+def nm_fields(line: str) -> list[str]:
+    """One line of „nmcli -t“: fields split at „:“; a backslash keeps a following „:“ or backslash as it is."""
+    fields, current, escaped = [], [], False
+    for char in line:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ":":
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    fields.append("".join(current))
+    return fields
+
+
+def nm_rows(text: str, count: int) -> list[list[str]]:
+    return [(nm_fields(line) + [""] * count)[:count] for line in text.splitlines() if line.strip()]
+
+
+def check_ssid(value) -> str:
+    if (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 32
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise InstallError("Der WLAN-Name ist ungültig (1 bis 32 Zeichen).")
+    return value
+
+
+def check_wifi_password(value) -> str:
+    if value in (None, ""):
+        return ""   # open network
+    if not isinstance(value, str) or not (re.fullmatch(r"[\x20-\x7e]{8,63}", value) or re.fullmatch(r"[0-9a-fA-F]{64}", value)):
+        raise InstallError("Das WLAN-Passwort muss 8 bis 63 Zeichen lang sein (ohne Umlaute).")
+    return value
+
+
+def wifi_request(text: str) -> dict:
+    """The app's request, checked: nothing from it reaches nmcli unchecked."""
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise InstallError("Die WLAN-Anfrage der App ist unlesbar.") from exc
+    if not isinstance(raw, dict) or raw.get("action") not in WIFI_ACTIONS:
+        raise InstallError("Unbekannte WLAN-Anfrage.")
+    request = {"action": raw["action"], "country": raw.get("country") or "DE"}
+    if request["country"] not in WIFI_COUNTRIES:
+        raise InstallError("Unbekanntes Land für das WLAN.")
+    if raw["action"] in ("connect", "forget"):
+        request["ssid"] = check_ssid(raw.get("ssid"))
+    if raw["action"] == "connect":
+        request["password"] = check_wifi_password(raw.get("password"))
+        request["hidden"] = raw.get("hidden") is True
+    return request
+
+
+def request_id(text: str) -> str | None:
+    try:
+        rid = json.loads(text).get("id")
+    except (ValueError, AttributeError):
+        return None
+    return rid if isinstance(rid, str) and re.fullmatch(r"[0-9a-f]{8,32}", rid) else None
+
+
+def ipv4_addresses(system: System) -> dict[str, list[str]]:
+    try:
+        links = json.loads(system.run("ip", "-j", "-4", "addr", "show", check=False) or "[]")
+    except ValueError:
+        return {}
+    result = {}
+    for link in links if isinstance(links, list) else []:
+        if isinstance(link, dict) and isinstance(link.get("ifname"), str):
+            result[link["ifname"]] = [a["local"] for a in link.get("addr_info") or []
+                                      if isinstance(a, dict) and a.get("family") == "inet" and isinstance(a.get("local"), str)]
+    return result
+
+
+def wifi_country(system: System) -> str | None:
+    """WLAN country (regulatory domain); without one, Raspberry Pi OS keeps the WLAN switched off."""
+    found = re.search(r"^country ([A-Z0-9]{2}):", system.run("iw", "reg", "get", check=False), re.M)
+    return found.group(1) if found and found.group(1) not in ("00", "99") else None
+
+
+def wifi_profiles(system: System) -> list[dict]:
+    """Saved WLAN connections: uuid, name, ssid."""
+    profiles = []
+    for uuid, kind, name in nm_rows(nm(system, "-t", "-f", "UUID,TYPE,NAME", "connection", "show"), 3):
+        if kind in ("802-11-wireless", "wifi") and uuid:
+            fields = nm_fields(nm(system, "-t", "-f", "802-11-wireless.ssid", "connection", "show", "uuid", uuid,
+                                  check=False).strip())
+            profiles.append({"uuid": uuid, "name": name, "ssid": ":".join(fields[1:])})
+    return profiles
+
+
+def active_wifi(system: System, device: str) -> str | None:
+    """uuid of the connection active on the WLAN adapter."""
+    for uuid, kind, dev in nm_rows(nm(system, "-t", "-f", "UUID,TYPE,DEVICE", "connection", "show", "--active"), 3):
+        if dev == device and kind in ("802-11-wireless", "wifi"):
+            return uuid
+    return None
+
+
+def wifi_state(system: System) -> dict:
+    """Cable and WLAN as NetworkManager sees them, with IPv4 addresses and the WLAN country."""
+    try:
+        rows = nm_rows(nm(system, "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"), 4)
+    except InstallError as exc:
+        raise InstallError("NetworkManager antwortet nicht – das WLAN lässt sich auf diesem Gerät nicht einrichten.") from exc
+    addresses = ipv4_addresses(system)
+    interfaces = []
+    for device, kind, state, connection in rows:
+        if kind not in ("ethernet", "wifi"):
+            continue
+        entry = {"name": device, "type": kind, "state": state, "ipv4": addresses.get(device, [])}
+        if kind == "wifi" and state.startswith("connected"):
+            for in_use, ssid, signal in nm_rows(nm(system, "-t", "-f", "IN-USE,SSID,SIGNAL", "device", "wifi", "list",
+                                                   "ifname", device, "--rescan", "no", check=False), 3):
+                if in_use == "*":
+                    entry.update(ssid=ssid, signal=int(signal) if signal.isdigit() else None)
+                    break
+            else:
+                entry["ssid"] = next((p["ssid"] for p in wifi_profiles(system) if p["name"] == connection), connection)
+        interfaces.append(entry)
+    return {"interfaces": interfaces, "country": wifi_country(system)}
+
+
+def wifi_power_on(system: System, country: str, state: dict) -> None:
+    """Set the country if none is set yet (then Raspberry Pi OS switches the WLAN on) and unblock the radio."""
+    if not state["country"]:
+        try:   # raspi-config also keeps the country for the next start
+            system.run("raspi-config", "nonint", "do_wifi_country", country)
+        except InstallError:
+            system.run("iw", "reg", "set", country, check=False)
+        state["country"] = country
+        say(f"• WLAN-Land auf {country} gestellt")
+    system.run("rfkill", "unblock", "wifi", check=False)
+    nm(system, "radio", "wifi", "on", check=False)
+
+
+def wifi_scan(system: System, device: str, rescan: bool = True) -> list[dict]:
+    """Networks in range, the strongest access point per name; hidden networks (no name) are left out.
+    rescan=False: what NetworkManager saw last – quick, but possibly incomplete."""
+    text, error = None, None
+    for attempt in range(6 if rescan else 1):   # right after switching on, the adapter needs a few seconds
+        if attempt:
+            system.sleep(2)
+        try:
+            text = nm(system, "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list",
+                      "ifname", device, "--rescan", "yes" if rescan else "no")
+        except InstallError as exc:
+            error = exc
+            continue
+        if text or attempt or not rescan:   # an empty first list: the adapter has only just woken up
+            break
+    if text is None:
+        raise InstallError("Das WLAN des Pi ist noch nicht bereit – bitte gleich noch einmal suchen.") from error
+    best: dict[str, dict] = {}
+    for in_use, ssid, signal, security in nm_rows(text, 4):
+        if not ssid:
+            continue
+        security = "" if security.strip() in ("", "--") else security.strip()
+        entry = {"ssid": ssid, "signal": int(signal) if signal.isdigit() else 0, "security": security,
+                 "active": in_use == "*", "enterprise": "802.1X" in security}
+        old = best.get(ssid)
+        if old is None or entry["signal"] > old["signal"]:
+            entry["active"] = entry["active"] or bool(old and old["active"])
+            best[ssid] = entry
+        elif entry["active"]:
+            old["active"] = True
+    saved = {p["ssid"] for p in wifi_profiles(system)}
+    for entry in best.values():
+        entry["saved"] = entry["ssid"] in saved
+    return sorted(best.values(), key=lambda e: (not e["active"], -e["signal"], e["ssid"].lower()))[:40]
+
+
+def wifi_reason(detail: str, ssid: str) -> str:
+    """nmcli's error in words for the app."""
+    text = detail.lower()
+    if "secrets were required" in text or "802-11-wireless-security" in text or "psk" in text:
+        return "Das Passwort passt nicht. Bitte noch einmal eingeben (auf Groß- und Kleinschreibung achten)."
+    if re.search(r"no network with ssid|not (be )?found", text):
+        return f"Das WLAN „{ssid}“ ist nicht in Reichweite."
+    if "ip configuration" in text or "dhcp" in text:
+        return f"Mit „{ssid}“ verbunden, aber keine Adresse vom Router bekommen."
+    if "timeout" in text or "timed out" in text:
+        return f"„{ssid}“ antwortet nicht – Passwort falsch oder der Pi zu weit weg?"
+    first = (detail.strip().splitlines() or [""])[0].removeprefix("Error:").strip()[:160]
+    return f"Verbinden hat nicht geklappt ({first or 'unbekannter Fehler'})."
+
+
+def wifi_connect(system: System, request: dict, device: str) -> None:
+    ssid, password = request["ssid"], request["password"]
+    try:
+        networks = {n["ssid"]: n for n in wifi_scan(system, device, rescan=False)}
+    except InstallError:   # the WLAN was only just switched on
+        networks = {}
+    if ssid not in networks and not request["hidden"]:
+        networks = {n["ssid"]: n for n in wifi_scan(system, device)}
+    network = networks.get(ssid)
+    if network is None and not request["hidden"]:
+        raise InstallError(f"Das WLAN „{ssid}“ ist nicht in Reichweite.")
+    if network and network["enterprise"]:
+        raise InstallError("Firmen-WLAN mit eigener Anmeldung (802.1X) lässt sich hier nicht einrichten.")
+    secured = bool(network["security"]) if network else bool(password)
+    if secured and not password:
+        raise InstallError(f"Für „{ssid}“ fehlt das Passwort.")
+    wpa3_only = bool(network) and "WPA3" in network["security"] and not re.search(r"WPA[12]", network["security"])
+    profiles, previous = wifi_profiles(system), active_wifi(system, device)
+    args = ["connection", "add", "type", "wifi", "ifname", device, "con-name", f"{WIFI_PROFILE} {ssid}",
+            "802-11-wireless.ssid", ssid, "connection.autoconnect", "yes", "connection.autoconnect-priority", "10"]
+    if request["hidden"]:
+        args += ["802-11-wireless.hidden", "yes"]
+    if secured:
+        args += ["802-11-wireless-security.key-mgmt", "sae" if wpa3_only else "wpa-psk",
+                 "802-11-wireless-security.psk", password]
+    try:
+        added = nm(system, *args, redact=password)
+    except CommandError as exc:
+        raise InstallError(wifi_reason(exc.detail, ssid)) from None
+    found = re.search(r"\(([0-9a-fA-F-]{36})\)", added)
+    if not found:
+        raise InstallError("NetworkManager hat die neue Verbindung nicht bestätigt.")
+    uuid = found.group(1)
+    say(f"• Verbinde mit „{ssid}“ …")
+    try:
+        nm(system, "--wait", "45", "connection", "up", "uuid", uuid)
+    except CommandError as exc:
+        nm(system, "connection", "delete", "uuid", uuid, check=False)
+        if previous:   # back to the WLAN that worked before
+            nm(system, "--wait", "30", "connection", "up", "uuid", previous, check=False)
+        raise InstallError(wifi_reason(exc.detail, ssid)) from None
+    for profile in profiles:   # older entries for this network are outdated now (e.g. old password)
+        if profile["ssid"] == ssid and profile["uuid"] != uuid:
+            nm(system, "connection", "delete", "uuid", profile["uuid"], check=False)
+
+
+def wifi_forget(system: System, ssid: str) -> int:
+    removed = 0
+    for profile in wifi_profiles(system):
+        if profile["ssid"] == ssid:
+            nm(system, "connection", "delete", "uuid", profile["uuid"], check=False)
+            removed += 1
+    return removed
+
+
+def run_wifi(system: System, request: dict, status: dict) -> None:
+    state = wifi_state(system)
+    device = next((i["name"] for i in state["interfaces"] if i["type"] == "wifi"), None)
+    if device is None:
+        raise InstallError("Dieses Gerät hat keinen WLAN-Adapter, den NetworkManager verwaltet.")
+    ssid = request.get("ssid")
+    if request["action"] == "scan":
+        wifi_power_on(system, request["country"], state)
+        status["networks"] = wifi_scan(system, device)
+    elif request["action"] == "connect":
+        wifi_power_on(system, request["country"], state)
+        wifi_connect(system, request, device)
+        status["message"] = f"Verbunden mit „{ssid}“."
+    else:
+        removed = wifi_forget(system, ssid)
+        status["message"] = f"„{ssid}“ ist vergessen." if removed else f"„{ssid}“ war nicht gespeichert."
+    say(f"✓ {status.get('message') or 'WLAN-Netze gesucht.'}")
+
+
+def wifi_from_app(args: argparse.Namespace, system: System) -> None:
+    """Run by flowthermpi-wifi.service when the app has placed a WLAN request. The result goes to
+    wifi-status.json, together with the state of cable and WLAN afterwards."""
+    data_dir = Path(args.root) / DATA_DIR.lstrip("/")
+    try:
+        folder = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise InstallError(f"Datenordner {DATA_DIR} fehlt oder ist kein Ordner ({exc.strerror}).") from exc
+    try:
+        try:
+            text = read_private(folder, WIFI_REQUEST)
+        finally:
+            try:
+                os.unlink(WIFI_REQUEST, dir_fd=folder)   # at once: it may hold a password, and the path unit restarts us
+            except FileNotFoundError:
+                pass
+        if text is None:
+            say("Keine WLAN-Anfrage der App – nichts zu tun.")
+            return
+        status = {"id": request_id(text), "action": None, "state": "running", "at": now_text()}
+        try:
+            request = wifi_request(text)
+            status["action"] = request["action"]
+            if request["action"] == "connect":   # takes up to a minute: the app shows „verbinde …“
+                status["ssid"] = request["ssid"]
+                write_private(folder, WIFI_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
+            run_wifi(system, request, status)
+            status["state"] = "done"
+        except InstallError as exc:   # reported to the app; not an error of the service itself
+            status.update(state="failed", message=str(exc))
+            say(f"✗ {exc}")
+        try:   # how things are now; for the app's list also the networks NetworkManager sees
+            status["net"] = wifi_state(system)
+            wifi = next((i for i in status["net"]["interfaces"] if i["type"] == "wifi"), None)
+            if "networks" not in status and wifi and status["net"]["country"]:
+                status["networks"] = wifi_scan(system, wifi["name"], rescan=False)
+        except InstallError:
+            pass
+        status["at"] = now_text()
+        write_private(folder, WIFI_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
+    finally:
+        os.close(folder)
+
+
 def reset_pin(args: argparse.Namespace, system: System) -> None:
     system.run("systemctl", "stop", NAME, check=False)
     try:
@@ -652,8 +1041,9 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
     root = Path(args.root)
     with install_lock(root / APP_DIR.lstrip("/")):
         system.run("systemctl", "disable", "--now", f"{NAME}-update.path", check=False)
+        system.run("systemctl", "disable", "--now", f"{NAME}-wifi.path", check=False)
         system.run("systemctl", "disable", "--now", NAME, check=False)
-        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH):
+        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH):
             path = root / unit.lstrip("/")
             if path.exists():
                 path.unlink()
@@ -682,6 +1072,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="Dienst und Programm entfernen")
     parser.add_argument("--purge", action="store_true", help="mit --uninstall: auch alle Daten löschen")
     parser.add_argument("--from-app", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-update.service
+    parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-wifi.service
     parser.add_argument("--commit", help=argparse.SUPPRESS)  # with --source: Git commit of that folder
     parser.add_argument("--root", default="/", help=argparse.SUPPRESS)  # tests: work inside this folder only
     return parser.parse_args(argv)
@@ -699,6 +1090,8 @@ def main(argv: list[str] | None = None, system: System | None = None) -> int:
             check_host()
         if args.from_app:
             update_from_app(args, system)
+        elif args.wifi:
+            wifi_from_app(args, system)
         elif args.uninstall:
             uninstall(args, system)
         elif args.reset_pin:

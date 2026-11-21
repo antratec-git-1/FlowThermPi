@@ -62,10 +62,14 @@ class InstallTest(Base):
         update_unit = self.path(install.UPDATE_UNIT).read_text()
         self.assertIn("/opt/flowthermpi/current/install.py --from-app\n", update_unit)
         self.assertIn("Type=oneshot", update_unit)
+        self.assertIn("Environment=HEIZAPP_WIFI_DIR=/var/lib/flowthermpi\n", unit)     # enables Einrichtung › WLAN
+        self.assertIn("PathExists=/var/lib/flowthermpi/wifi-request.json\n", self.path(install.WIFI_PATH).read_text())
+        self.assertIn("/opt/flowthermpi/current/install.py --wifi\n", self.path(install.WIFI_UNIT).read_text())
         commands = [" ".join(c) for c in system.commands]
         self.assertTrue(any(c.startswith("useradd --system") for c in commands))
         self.assertIn("systemctl enable flowthermpi", commands)
         self.assertIn("systemctl enable --now flowthermpi-update.path", commands)
+        self.assertIn("systemctl enable --now flowthermpi-wifi.path", commands)
         self.assertIn("systemctl restart flowthermpi", commands)
         self.assertIn("FlowThermPi 1.2.3 läuft", out)
         info = json.loads((current / "release.json").read_text())
@@ -164,9 +168,10 @@ class InstallTest(Base):
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall"], system)
         self.assertFalse(self.path("/opt/flowthermpi").exists())
-        for unit in (install.UNIT, install.UPDATE_UNIT, install.UPDATE_PATH):
+        for unit in (install.UNIT, install.UPDATE_UNIT, install.UPDATE_PATH, install.WIFI_UNIT, install.WIFI_PATH):
             self.assertFalse(self.path(unit).exists(), unit)
         self.assertIn(("systemctl", "disable", "--now", "flowthermpi-update.path"), system.commands)
+        self.assertIn(("systemctl", "disable", "--now", "flowthermpi-wifi.path"), system.commands)
         self.assertTrue(self.path("/var/lib/flowthermpi/heizungen.conf").exists())
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall", "--purge"], install.DryRun())
@@ -253,6 +258,327 @@ class UpdateFromAppTest(Base):
         self.assertEqual((code, status["state"]), (0, "done"))
         self.assertEqual(victim.read_text(), "geheim\n")
         self.assertFalse((self.data / install.UPDATE_STATUS).is_symlink())
+
+
+def nm_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
+class FakeNM(install.DryRun):
+    """NetworkManager, iw, ip and raspi-config as on a Raspberry Pi 4 with cable and WLAN adapter."""
+
+    run = install.System.run     # the real error handling, hiding of the password included
+
+    def __init__(self):
+        super().__init__()
+        self.country = None      # WLAN country not set yet: Raspberry Pi OS keeps the WLAN switched off
+        self.cable = True
+        self.air = [             # in range: name, signal, security, password
+            ("Zuhause", 72, "WPA2", "richtig-geheim"),
+            ("Zuhause", 41, "WPA2", "richtig-geheim"),          # second access point (repeater)
+            ("Nachbar:5G", 55, "WPA2 WPA3", "nachbars-pw"),
+            ("Neu-WPA3", 61, "WPA3", "nur-wpa3-pw"),
+            ("Café", 30, "", ""),
+            ("Firma", 50, "WPA2 802.1X", None),
+            ("", 45, "WPA2", "x"),                               # hidden network: no name
+        ]
+        self.hidden = {"Versteckt": "versteckt-pw"}           # hidden networks that answer when asked by name
+        self.profiles = {}       # uuid -> {name, ssid, psk, args}
+        self.active = None       # uuid of the active WLAN connection
+        self.waking = 0          # the next scans fail: the adapter is still waking up
+        self.echo_psk = False    # „connection add“ fails with the password in its message
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+    def add_profile(self, ssid, psk, name=None):
+        n = len(self.profiles) + 1
+        uuid = f"{n:08x}-0000-4000-8000-{n:012x}"
+        self.profiles[uuid] = {"name": name or ssid, "ssid": ssid, "psk": psk, "args": {}}
+        return uuid
+
+    def password_of(self, ssid):
+        if ssid in self.hidden:
+            return self.hidden[ssid]
+        return next((pw for name, _, _, pw in self.air if name == ssid), False)   # False: not in range
+
+    def execute(self, cmd, env):
+        self.commands.append(cmd)
+        if cmd[0] == "nmcli":
+            assert env and env["LC_ALL"] == "C.UTF-8", env
+            return self.nmcli(list(cmd[1:]))
+        if cmd[:3] == ("iw", "reg", "get"):
+            return 0, f"global\ncountry {self.country or '00'}: DFS-{'ETSI' if self.country else 'UNSET'}\n" \
+                      "\t(2400 - 2483 @ 40), (N/A, 20), (N/A)\n\nphy#0 (self-managed)\ncountry 99: DFS-UNSET\n", ""
+        if cmd[:3] == ("raspi-config", "nonint", "do_wifi_country"):
+            self.country = cmd[3]
+            return 0, "", ""
+        if cmd[:3] == ("rfkill", "unblock", "wifi"):
+            return 0, "", ""
+        if cmd == ("ip", "-j", "-4", "addr", "show"):
+            links = [{"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1"}]}]
+            if self.cable:
+                links.append({"ifname": "eth0", "addr_info": [{"family": "inet", "local": "192.168.1.20"}]})
+            links.append({"ifname": "wlan0", "addr_info": [{"family": "inet", "local": "192.168.1.21"}] if self.active else []})
+            return 0, json.dumps(links), ""
+        return 127, "", f"{cmd[0]}: im Test unbekannt"
+
+    def rows(self, fields, rows):
+        return 0, "".join(":".join(nm_escape(str(r[f])) for f in fields) + "\n" for r in rows), ""
+
+    def nmcli(self, a):
+        if a[:1] == ["--wait"]:
+            a = a[2:]
+        if a == ["radio", "wifi", "on"]:
+            return 0, "", ""
+        if a[:2] == ["-t", "-f"]:
+            fields, rest = a[2].split(","), a[3:]
+            if rest == ["device", "status"]:
+                wlan = "connected" if self.active else "disconnected" if self.country else "unavailable"
+                return self.rows(fields, [
+                    {"DEVICE": "eth0", "TYPE": "ethernet", "STATE": "connected" if self.cable else "unavailable",
+                     "CONNECTION": "Wired connection 1" if self.cable else ""},
+                    {"DEVICE": "wlan0", "TYPE": "wifi", "STATE": wlan,
+                     "CONNECTION": self.profiles[self.active]["name"] if self.active else ""},
+                    {"DEVICE": "p2p-dev-wlan0", "TYPE": "wifi-p2p", "STATE": "disconnected", "CONNECTION": ""},
+                    {"DEVICE": "lo", "TYPE": "loopback", "STATE": "connected (externally)", "CONNECTION": "lo"}])
+            if rest[:5] == ["device", "wifi", "list", "ifname", "wlan0"]:
+                if not self.country:
+                    return 10, "", "Error: Wi-Fi radio is disabled."   # blocked until a country is set
+                if self.waking:
+                    self.waking -= 1
+                    return 10, "", "Error: Scanning not allowed while unavailable."
+                current = self.profiles[self.active]["ssid"] if self.active else None
+                air = list(self.air) + ([(current, 66, "WPA2", "")] if current in self.hidden else [])
+                marked, rows = False, []
+                for ssid, signal, security, _ in air:
+                    in_use = ssid == current and not marked
+                    marked = marked or in_use
+                    rows.append({"IN-USE": "*" if in_use else " ", "SSID": ssid, "SIGNAL": signal,
+                                 "SECURITY": security or "--"})
+                return self.rows(fields, rows)
+            if rest == ["connection", "show"]:
+                rows = [{"UUID": "11111111-2222-4333-8444-555555555555", "TYPE": "802-3-ethernet",
+                         "NAME": "Wired connection 1"}]
+                rows += [{"UUID": u, "TYPE": "802-11-wireless", "NAME": p["name"]} for u, p in self.profiles.items()]
+                return self.rows(fields, rows)
+            if rest == ["connection", "show", "--active"]:
+                rows = [{"UUID": u, "TYPE": "802-11-wireless", "DEVICE": "wlan0"} for u in [self.active] if u]
+                return self.rows(fields, rows)
+            if rest[:3] == ["connection", "show", "uuid"] and fields == ["802-11-wireless.ssid"]:
+                profile = self.profiles.get(rest[3])
+                if not profile:
+                    return 10, "", f"Error: {rest[3]} - no such connection profile."
+                return 0, f"802-11-wireless.ssid:{nm_escape(profile['ssid'])}\n", ""
+        if a[:2] == ["connection", "add"]:
+            args = dict(zip(a[2::2], a[3::2]))
+            psk = args.get("802-11-wireless-security.psk")
+            if self.echo_psk:
+                return 2, "", f"Error: failed to modify 802-11-wireless-security.psk: '{psk}' is not a valid PSK."
+            uuid = self.add_profile(args["802-11-wireless.ssid"], psk, args["con-name"])
+            self.profiles[uuid]["args"] = args
+            return 0, f"Connection '{args['con-name']}' ({uuid}) successfully added.\n", ""
+        if a[:3] == ["connection", "up", "uuid"]:
+            profile = self.profiles.get(a[3])
+            wanted = self.password_of(profile["ssid"]) if profile else False
+            self.active = None                                 # the old WLAN is left first
+            if wanted is False:
+                return 10, "", ("Error: Connection activation failed: The Wi-Fi network could not be found\n"
+                                "Hint: use 'journalctl -xe NM_CONNECTION=x + NM_DEVICE=wlan0' to get more details.")
+            if (wanted or None) != (profile["psk"] or None):
+                return 4, "", "Error: Connection activation failed: Secrets were required, but not provided"
+            self.active = a[3]
+            return 0, "Connection successfully activated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/7)\n", ""
+        if a[:3] == ["connection", "delete", "uuid"]:
+            profile = self.profiles.pop(a[3], None)
+            if self.active == a[3]:
+                self.active = None
+            return (0, f"Connection '{profile['name']}' ({a[3]}) successfully deleted.\n", "") if profile else \
+                   (10, "", f"Error: unknown connection '{a[3]}'.")
+        return 2, "", f"Error: im Test unbekannt: {a}"
+
+
+class WifiFromAppTest(Base):
+    """install.py --wifi, as flowthermpi-wifi.service runs it for Einrichtung › WLAN."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_install()
+        self.data = self.path("/var/lib/flowthermpi")
+        self.nm = FakeNM()
+
+    def ask(self, request):
+        text = request if isinstance(request, str) else json.dumps({"id": "0123abcd", **request})
+        (self.data / install.WIFI_REQUEST).write_text(text)
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--wifi"], self.nm)
+        self.assertFalse((self.data / install.WIFI_REQUEST).exists())         # always gone at once (password)
+        path = self.data / install.WIFI_STATUS
+        if not path.exists():
+            return code, out.getvalue(), None
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        return code, out.getvalue(), json.loads(path.read_text())
+
+    def connect(self, ssid, password="", **extra):
+        return self.ask({"action": "connect", "ssid": ssid, "password": password, **extra})
+
+    def nmcli(self, *start):
+        return [c[1:] for c in self.nm.commands if c[0] == "nmcli" and c[1:1 + len(start)] == start]
+
+    def test_reasons_in_plain_words(self):
+        for detail, words in (
+                ("Error: Connection activation failed: Secrets were required, but not provided", "Passwort passt nicht"),
+                ("Error: Connection activation failed: The Wi-Fi network could not be found", "nicht in Reichweite"),
+                ("Error: Connection activation failed: IP configuration could not be reserved (no available address, "
+                 "timeout, etc.).", "keine Adresse"),
+                ("Error: Timeout expired (45 seconds)", "antwortet nicht"),
+                ("Error: Connection activation failed: (53) The Wi-Fi P2P peer could not be found.", "nicht in Reichweite"),
+                ("Error: something new", "something new")):
+            self.assertIn(words, install.wifi_reason(detail, "Zuhause"), detail)
+
+    def test_country_without_raspi_config(self):
+        original = self.nm.execute
+
+        def execute(cmd, env):
+            if cmd[0] == "raspi-config":
+                raise FileNotFoundError(cmd[0])
+            if cmd[:3] == ("iw", "reg", "set"):
+                self.nm.country = cmd[3]
+            return original(cmd, env)
+
+        self.nm.execute = execute
+        code, _, status = self.ask({"action": "scan"})
+        self.assertEqual((code, status["state"], self.nm.country), (0, "done", "DE"))
+        self.assertIn(("iw", "reg", "set", "DE"), self.nm.commands)
+
+    def test_terse_fields(self):
+        self.assertEqual(install.nm_fields(r"*:Nachbar\:5G:55:WPA2 WPA3"), ["*", "Nachbar:5G", "55", "WPA2 WPA3"])
+        self.assertEqual(install.nm_fields(r"a\\:b\\\:c:"), ["a\\", "b\\:c", ""])
+
+    def test_scan_sets_the_country_once_and_lists_the_networks(self):
+        self.nm.waking = 2                                   # adapter needs a moment after switching on
+        code, out, status = self.ask({"action": "scan", "country": "AT"})
+        self.assertEqual((code, status["state"], status["id"], status["action"]), (0, "done", "0123abcd", "scan"), out)
+        self.assertIn(("raspi-config", "nonint", "do_wifi_country", "AT"), self.nm.commands)
+        self.assertEqual(self.nm.sleeps, [2, 2])
+        names = [n["ssid"] for n in status["networks"]]
+        self.assertEqual(names, ["Zuhause", "Neu-WPA3", "Nachbar:5G", "Firma", "Café"])   # strongest first, one per name
+        zuhause = status["networks"][0]
+        self.assertEqual((zuhause["signal"], zuhause["security"], zuhause["active"], zuhause["saved"]), (72, "WPA2", False, False))
+        self.assertTrue(status["networks"][3]["enterprise"])
+        self.assertEqual(status["networks"][4]["security"], "")                        # open network
+        self.assertEqual(status["net"]["country"], "AT")
+        self.assertEqual([(i["name"], i["type"], i["state"], i["ipv4"]) for i in status["net"]["interfaces"]],
+                         [("eth0", "ethernet", "connected", ["192.168.1.20"]), ("wlan0", "wifi", "disconnected", [])])
+        self.nm.commands.clear()
+        self.ask({"action": "scan", "country": "DE"})        # the country is only set while there is none
+        self.assertFalse([c for c in self.nm.commands if c[0] == "raspi-config"])
+        self.assertEqual(self.nm.country, "AT")
+
+    def test_connect_saves_the_network_and_reports_the_new_address(self):
+        old = self.nm.add_profile("Zuhause", "altes-passwort", "preconfigured")    # e.g. from the Raspberry Pi Imager
+        code, out, status = self.connect("Zuhause", "richtig-geheim", country="DE")
+        self.assertEqual((code, status["state"], status["ssid"]), (0, "done", "Zuhause"), out)
+        self.assertEqual(status["message"], "Verbunden mit „Zuhause“.")
+        [(uuid, profile)] = self.nm.profiles.items()                              # the outdated entry is gone
+        self.assertNotEqual(uuid, old)
+        self.assertEqual(self.nm.active, uuid)
+        args = profile["args"]
+        self.assertEqual((args["con-name"], args["ifname"], args["802-11-wireless-security.key-mgmt"],
+                          args["connection.autoconnect"]), ("FlowThermPi WLAN Zuhause", "wlan0", "wpa-psk", "yes"))
+        wlan = status["net"]["interfaces"][1]
+        self.assertEqual((wlan["state"], wlan["ssid"], wlan["signal"], wlan["ipv4"]),
+                         ("connected", "Zuhause", 72, ["192.168.1.21"]))
+        for text in (out, (self.data / install.WIFI_STATUS).read_text()):
+            self.assertNotIn("richtig-geheim", text)
+        self.assertEqual(len(self.nmcli("--wait", "45", "connection", "up")), 1)
+
+    def test_wrong_password_brings_back_the_old_network(self):
+        self.nm.country = "DE"
+        old = self.nm.add_profile("Zuhause", "richtig-geheim")
+        self.nm.active = old
+        code, out, status = self.connect("Nachbar:5G", "falsch-geraten")
+        self.assertEqual((code, status["state"]), (0, "failed"), out)
+        self.assertIn("Passwort passt nicht", status["message"])
+        self.assertEqual(list(self.nm.profiles), [old])                           # the failed entry is removed
+        self.assertEqual(self.nm.active, old)                                       # and the old WLAN is back
+        self.assertEqual(self.nmcli("--wait", "30", "connection", "up"), [("--wait", "30", "connection", "up", "uuid", old)])
+        self.assertEqual(status["net"]["interfaces"][1]["ssid"], "Zuhause")
+        self.assertNotIn("falsch-geraten", out + json.dumps(status))
+
+    def test_password_in_an_error_message_is_hidden(self):
+        self.nm.echo_psk = True
+        code, out, status = self.connect("Zuhause", "richtig-geheim")
+        self.assertEqual(status["state"], "failed")
+        for text in (out, (self.data / install.WIFI_STATUS).read_text()):
+            self.assertNotIn("richtig-geheim", text)
+
+    def test_kinds_of_networks(self):
+        _, _, status = self.connect("Neu-WPA3", "nur-wpa3-pw")
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.nm.profiles[self.nm.active]["args"]["802-11-wireless-security.key-mgmt"], "sae")
+        _, _, status = self.connect("Café")                                       # open: no password
+        self.assertEqual(status["state"], "done")
+        self.assertNotIn("802-11-wireless-security.key-mgmt", self.nm.profiles[self.nm.active]["args"])
+        _, _, status = self.connect("Versteckt", "versteckt-pw", hidden=True)
+        self.assertEqual(status["state"], "done", status)
+        self.assertEqual(self.nm.profiles[self.nm.active]["args"]["802-11-wireless.hidden"], "yes")
+        self.assertEqual(status["net"]["interfaces"][1]["ssid"], "Versteckt")
+        for ssid, password, words in (("Firma", "egal-was-1", "802.1X"), ("Zuhause", "", "fehlt das Passwort"),
+                                      ("Weit weg", "irgendwas-1", "nicht in Reichweite")):
+            before = len(self.nmcli("connection", "add"))
+            _, _, status = self.connect(ssid, password)
+            self.assertEqual(status["state"], "failed", ssid)
+            self.assertIn(words, status["message"])
+            self.assertEqual(len(self.nmcli("connection", "add")), before)          # nothing was saved
+
+    def test_forget_removes_every_entry_of_that_network(self):
+        self.nm.country = "DE"
+        self.nm.add_profile("Zuhause", "a-1234567", "preconfigured")
+        self.nm.add_profile("Zuhause", "b-1234567", "FlowThermPi WLAN Zuhause")
+        cafe = self.nm.add_profile("Café", "")
+        code, _, status = self.ask({"action": "forget", "ssid": "Zuhause"})
+        self.assertEqual((code, status["state"], status["message"]), (0, "done", "„Zuhause“ ist vergessen."))
+        self.assertEqual(list(self.nm.profiles), [cafe])
+        _, _, status = self.ask({"action": "forget", "ssid": "Gibt es nicht"})
+        self.assertEqual(status["message"], "„Gibt es nicht“ war nicht gespeichert.")
+        self.assertFalse([c for c in self.nm.commands if c[0] == "raspi-config"])  # forgetting switches nothing on
+
+    def test_bad_requests_are_refused(self):
+        for text in ("kaputt", '{"action": "format"}', json.dumps({"action": "connect", "ssid": "x" * 33}),
+                     json.dumps({"action": "connect", "ssid": "Zuhause", "password": "kurz"}),
+                     json.dumps({"action": "connect", "ssid": "Zuhause", "password": "mit Ümlaut-1"}),
+                     json.dumps({"action": "connect", "ssid": "Zeile\nzwei", "password": "richtig-geheim"}),
+                     json.dumps({"action": "scan", "country": "XX"}), "[]"):
+            code, out, status = self.ask(text)
+            self.assertEqual((code, status["state"]), (0, "failed"), text)
+            self.assertFalse(self.nmcli("connection", "add"), text)
+            self.assertFalse([c for c in self.nm.commands if c[0] == "raspi-config"], text)
+
+    def test_nothing_to_do_without_request(self):
+        with redirect_stdout(io.StringIO()):
+            code = install.main(["--root", str(self.root), "--wifi"], self.nm)
+        self.assertEqual((code, self.nm.commands), (0, []))
+        self.assertFalse((self.data / install.WIFI_STATUS).exists())
+
+    def test_request_link_is_not_followed(self):
+        victim = self.tmp / "fremde-datei"
+        victim.write_text(json.dumps({"action": "forget", "ssid": "Zuhause"}))
+        (self.data / install.WIFI_REQUEST).symlink_to(victim)
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--wifi"], self.nm)
+        self.assertEqual(code, 1)
+        self.assertIn("Sicherheitsgründen", out.getvalue())
+        self.assertFalse((self.data / install.WIFI_REQUEST).is_symlink())          # the link is removed ...
+        self.assertTrue(victim.exists())                                            # ... not what it points to
+        self.assertEqual(self.nm.commands, [])
+
+    def test_without_networkmanager(self):
+        self.nm.execute = lambda cmd, env: (_ for _ in ()).throw(FileNotFoundError(cmd[0]))
+        code, _, status = self.ask({"action": "scan"})
+        self.assertEqual((code, status["state"]), (0, "failed"))
+        self.assertIn("NetworkManager", status["message"])
 
 
 if __name__ == "__main__":

@@ -49,6 +49,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   erkannt. Funktioniert auch ohne Token.
 - **Uhren:** werden automatisch gestellt (beim Start, bei > 1 min Abweichung, täglich 3 Uhr –
   deckt Sommer-/Winterzeit ab). Ohne Internet stellt der Regler sie nicht selbst um.
+- **WLAN** (nur auf dem Raspberry Pi): Netze in der Nähe suchen, mit Passwort verbinden, gespeicherte
+  WLANs vergessen – siehe [WLAN einrichten](#wlan-einrichten).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -110,6 +112,35 @@ Adresse an – z. B. `http://flowthermpi.local`.
   `/etc/default/flowthermpi` eintragen, dann `sudo systemctl restart flowthermpi`.
 - **Uhrzeit:** Ein Raspberry Pi hat keine Batterie-Uhr. Die App stellt die Heizungsuhren erst, wenn
   der Pi seine Uhrzeit aus dem Internet hat – nach einem Stromausfall also nie auf eine falsche Zeit.
+
+## WLAN einrichten
+
+Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danach in der App, unter
+*Einrichtung › WLAN*:
+
+1. Netzwerkkabel am Pi einstecken, die App öffnen (z. B. `http://flowthermpi.local`), *Einrichtung › WLAN*.
+   Die App sucht die WLANs in der Nähe.
+2. Beim eigenen WLAN auf **Verbinden** tippen und das WLAN-Passwort eingeben (bei der FRITZ!Box der
+   „WLAN-Netzwerkschlüssel“ auf der Unterseite). Nach bis zu einer Minute meldet die App
+   „Der Pi ist jetzt im WLAN …“ und zeigt die neue Adresse.
+3. Kabel abziehen. Die App ist weiter unter `http://flowthermpi.local` erreichbar oder unter der angezeigten
+   Adresse.
+
+- Klappt das Verbinden nicht (Passwort falsch, WLAN außer Reichweite), entfernt der Pi den neuen Eintrag
+  wieder und geht zurück ins vorherige WLAN, falls es eins gab. Die App zeigt den Grund.
+- Frisches Raspberry Pi OS hat das WLAN aus, bis ein WLAN-Land gesetzt ist. Das erledigt die App bei der
+  ersten Suche (Deutschland).
+- **Vergessen** entfernt ein gespeichertes WLAN. Ist der Browser gerade über genau dieses WLAN verbunden und
+  steckt kein Kabel, lehnt die App das ab – sonst wäre der Pi nicht mehr erreichbar.
+- Versteckte WLANs: „Namen selbst eingeben“. Firmen-WLANs mit eigener Anmeldung (802.1X) gehen nicht.
+- **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt eine Anfrage in ihren Datenordner (nur für
+  sie lesbar). Der Dienst `flowthermpi-wifi` (root) prüft sie noch einmal, löscht sie sofort und steuert
+  NetworkManager (`nmcli`) – ohne Shell, mit genau drei Aktionen: suchen, verbinden, vergessen. Das
+  WLAN-Passwort steht nie im Status, im Log oder in Fehlermeldungen. Beim Anlegen der Verbindung steht es
+  einen Sekundenbruchteil in den Argumenten von `nmcli`, wie bei `nmcli device wifi connect … password …`.
+  Meldungen: `journalctl -u flowthermpi-wifi`.
+- Voraussetzung: Raspberry Pi OS ab Bookworm (NetworkManager). Den Reiter gibt es ab Version 0.3.0; ein Pi
+  mit 0.2.0 bekommt ihn über den Update-Knopf.
 
 ## Heizungen im Netz suchen
 
@@ -223,7 +254,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 Die Tests laufen gegen eine simulierte Heizung (`tests/fake_heater.py`), die das oben
-beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen.
+beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen. Die
+WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`).
 
 ## Ideen für später
 

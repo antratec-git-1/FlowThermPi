@@ -230,6 +230,7 @@ function showView(name) {
   if (name === "setup") sessionStorage.setItem("heizung.view", "setup");
   else sessionStorage.removeItem("heizung.view");
   document.body.className = "view-" + name;
+  if (name === "setup" && tab === "wifi") openWifiTab();
   touchSetup();
   window.scrollTo(0, 0);
 }
@@ -254,8 +255,11 @@ function render() {
     document.getElementById("pin-button").textContent = state.setup.pin ? "PIN ändern" : "PIN festlegen";
     document.getElementById("pin-warning").hidden = state.setup.pin;
   }
+  const wifiTab = document.querySelector('#tabs [data-tab="wifi"]');
+  if (state) wifiTab.hidden = !state.app.wifi;           // only on the Pi, set up with the installer
+  if (state && tab === "wifi" && !state.app.wifi) tab = "rooms";
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  for (const name of ["rooms", "plans", "devices", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  for (const name of ["rooms", "plans", "devices", "wifi", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
@@ -263,6 +267,7 @@ function render() {
   if (tab === "rooms") renderRooms(el);
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
   else if (tab === "about") renderAbout(el);
+  else if (tab === "wifi") renderWifi(el);
   else renderDevices(el);
 }
 
@@ -537,12 +542,12 @@ async function openSetup() {
 }
 
 async function closeSetup(auto) {
-  if ((editing || roomForm || deviceForm || calibForm || sensorForm) && !auto) {
+  if ((editing || roomForm || deviceForm || calibForm || sensorForm || (wifiForm && !wifiForm.job)) && !auto) {
     const yes = await ask({ title: "Einrichtung schließen?", text: "Nicht gespeicherte Änderungen gehen dabei verloren.",
       buttons: [{ label: "Weiter bearbeiten", value: null }, { label: "Schließen", value: "yes", cls: "primary" }] });
     if (!yes) return;
   }
-  editing = roomForm = deviceForm = calibForm = sensorForm = null;
+  editing = roomForm = deviceForm = calibForm = sensorForm = wifiForm = null;
   invalidate();
   showView("home");
   render();
@@ -555,7 +560,7 @@ function touchSetup() {  // the setup closes itself after SETUP_IDLE_MS without 
   if (view !== "setup") return;
   setupIdleTimer = setTimeout(() => {
     if (view !== "setup") return;
-    if (editing || roomForm || deviceForm || calibForm || dialog) return touchSetup();
+    if (editing || roomForm || deviceForm || calibForm || wifiForm || dialog) return touchSetup();
     closeSetup(true);
   }, SETUP_IDLE_MS);
 }
@@ -1510,6 +1515,221 @@ async function syncClock(heaterId) {
   await refresh();
 }
 
+// ------------------------------------------------------------------ WLAN ("Einrichtung › WLAN")
+const WIFI_FRESH_MS = 60 * 1000;   // an older list of networks is searched again when the tab is opened
+let wifi = null;          // what api/wifi answered: net (cable, WLAN), networks, job, via, hostname
+let wifiError = null;     // api/wifi could not be loaded
+let wifiScan = null;      // search started here: {running} | {error}
+let wifiForm = null;      // connect form: {ssid, hidden, open, password, show, error, job}
+let wifiSeen = null;      // id of the connection whose result was closed with "OK"
+let wifiTimer = null;     // polls every 2 s while the Pi connects
+let wifiFocus = false;    // after a failed attempt: cursor back into the password field
+
+function wifiConnecting() { return !!(wifi && wifi.job && ["waiting", "connecting"].includes(wifi.job.state)); }
+function wifiBusy() { return !!(wifi && wifi.busy) || wifiConnecting() || !!(wifiScan && wifiScan.running); }
+function wifiURL(host) { return `http://${host}${location.port ? ":" + location.port : ""}`; }
+function signalWord(s) { return s >= 70 ? "sehr guter Empfang" : s >= 50 ? "guter Empfang" : s >= 30 ? "mäßiger Empfang" : "schwacher Empfang"; }
+function signalBars(s) {
+  const n = s >= 70 ? 4 : s >= 50 ? 3 : s >= 30 ? 2 : 1;
+  return `<span class="bars" aria-hidden="true">${[1, 2, 3, 4].map(i => `<i${i <= n ? ' class="on"' : ""}></i>`).join("")}</span>`;
+}
+
+async function loadWifi() {
+  try { wifi = await api("GET", "api/wifi"); wifiError = null; }
+  catch (e) { wifiError = e.message; }
+  followWifi();
+  render();
+}
+
+function followWifi() {  // fast polling while the Pi connects; afterwards the result goes into the form or a note
+  const j = wifi && wifi.job;
+  const running = wifiConnecting();
+  if (running && !wifiTimer) wifiTimer = setInterval(() => { if (!document.hidden && view === "setup") loadWifi(); }, 2000);
+  if (!running && wifiTimer) { clearInterval(wifiTimer); wifiTimer = null; }
+  if (!running && j && wifiForm && wifiForm.job === j.id) {
+    if (j.state === "failed") {   // back to the form with the reason; the password is typed again
+      Object.assign(wifiForm, { job: null, error: j.message || "Verbinden hat nicht geklappt.", password: "" });
+      wifiSeen = j.id;
+      wifiFocus = true;
+    } else {
+      wifiForm = null;
+    }
+    invalidate();
+  }
+}
+
+async function openWifiTab() {  // fresh state – and a fresh search if the list is old
+  await loadWifi();
+  if (!wifi || !wifi.supported || wifiBusy()) return;
+  const age = wifi.scanned ? Date.now() - Date.parse(wifi.scanned) : Infinity;
+  if (!(age < WIFI_FRESH_MS)) scanWifi();
+}
+
+async function scanWifi() {
+  wifiScan = { running: true };
+  render();
+  try { wifi = (await api("POST", "api/wifi/scan", {})).wifi; wifiScan = null; }
+  catch (e) { wifiScan = { error: e.message }; }
+  render();
+}
+
+function openWifiForm(ssid, hidden = false) {
+  const n = !hidden && wifi && (wifi.networks || []).find(x => x.ssid === ssid);
+  wifiForm = { ssid: hidden ? "" : ssid, hidden, open: !!n && !n.security, password: "", show: false, error: null, job: null };
+  invalidate();
+  render();
+  const input = document.querySelector(".wifi-form input[data-wfield]");
+  if (input) input.focus();
+}
+
+async function connectWifi() {
+  const f = wifiForm;
+  if (!f || f.job || f.sending) return;
+  const ssid = f.hidden ? String(f.ssid || "").trim() : f.ssid;
+  if (!ssid) { f.error = "Bitte den Namen des WLAN eingeben."; invalidate(); return render(); }
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  Object.assign(f, { error: null, sending: true });
+  invalidate();
+  render();
+  try {
+    const res = await api("POST", "api/wifi/connect", { ssid, password: f.open ? "" : f.password, hidden: f.hidden });
+    wifi = res.wifi;
+    Object.assign(f, { ssid, job: wifi.job && wifi.job.id, password: "" });   // the password is not kept in the page
+  } catch (e) {
+    f.error = e.message;
+  }
+  f.sending = false;
+  invalidate();
+  followWifi();
+  render();
+}
+
+async function forgetWifi(ssid) {
+  const n = wifi && (wifi.networks || []).find(x => x.ssid === ssid);
+  const yes = await ask({
+    title: `„${ssid}“ vergessen?`,
+    text: "Der Pi verbindet sich dann nicht mehr von selbst mit diesem WLAN." + (n && n.active ? " Er trennt sich sofort davon" +
+      (wifi.via === "wifi" ? " – diese Seite ist danach nur noch über das Netzwerkkabel erreichbar." : ".") : ""),
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Vergessen", value: "yes", cls: "danger-solid" }],
+  });
+  if (!yes) return;
+  try {
+    const res = await api("POST", "api/wifi/forget", { ssid });
+    wifi = res.wifi;
+    toast(res.message || "Vergessen.");
+  } catch (e) { toast(e.message, true); }
+  invalidate();
+  render();
+}
+
+function wifiStatusHTML(w) {
+  const net = w.net, list = net ? net.interfaces : [];
+  const cable = list.find(i => i.type === "ethernet"), air = list.find(i => i.type === "wifi");
+  const here = type => w.via === type ? `<span class="tag ok">darüber bist du gerade verbunden</span>` : "";
+  const addr = i => i.ipv4.length ? ` · ${esc(i.ipv4[0])}` : "";
+  let lines = "";
+  if (net) {
+    const airText = !air ? "kein WLAN-Adapter gefunden"
+      : air.connected ? `verbunden mit „${esc(air.ssid || "?")}“${air.signal != null ? " · " + signalWord(air.signal) : ""}${addr(air)}`
+      : !net.country ? "aus – noch nicht eingerichtet"
+      : air.state.startsWith("connecting") ? "verbindet …" : "nicht verbunden";
+    lines = `<ul class="net-list">
+      <li><span class="dot ${cable && cable.connected ? "ok" : ""}"></span><span class="hname"><b>Netzwerkkabel</b>
+        <span class="muted">${cable && cable.connected ? "eingesteckt" + addr(cable) : "nicht eingesteckt"}</span></span>${here("ethernet")}</li>
+      <li><span class="dot ${air && air.connected ? "ok" : ""}"></span><span class="hname"><b>WLAN</b>
+        <span class="muted">${airText}</span></span>${here("wifi")}</li>
+    </ul>`;
+  } else {
+    lines = `<p class="muted">${wifiScan && wifiScan.running ? "Frage den Pi …" : "Noch nicht abgefragt – „Neu suchen“ drücken."}</p>`;
+  }
+  const j = w.job;
+  let note = "";
+  if (wifiConnecting() && !(wifiForm && wifiForm.job === j.id)) {   // started in another browser
+    note = `<div class="wifi-note"><p class="searching"><b>Verbinde mit „${esc(j.ssid)}“ …</b></p></div>`;
+  } else if (j && j.id !== wifiSeen && j.finished && Date.now() - Date.parse(j.finished) < 30 * 60 * 1000 &&
+             (j.state === "failed" || (air && air.connected && air.ssid === j.ssid))) {   // not once that WLAN is gone again
+    const ip = air && air.connected ? air.ipv4[0] : null;
+    note = j.state === "done" ? `<div class="wifi-note ok">
+        <p><b>✓ Der Pi ist jetzt im WLAN „${esc(j.ssid)}“.</b></p>
+        ${cable && cable.connected ? `<p>Du kannst das Netzwerkkabel jetzt abziehen. Die App ist danach über das WLAN erreichbar:
+          <b>${esc(wifiURL(w.hostname + ".local"))}</b>${ip ? ` oder <b>${esc(wifiURL(ip))}</b>` : ""}</p>` : ""}
+        <button class="small" data-action="wifi-ok">OK</button></div>`
+      : `<div class="wifi-note bad"><p><b>Verbinden mit „${esc(j.ssid)}“ hat nicht geklappt.</b></p>
+        <p>${esc(j.message || "")}</p><button class="small" data-action="wifi-ok">OK</button></div>`;
+  }
+  return `<div class="card wifi-status">
+    <h2>Verbindung des Pi</h2>
+    ${lines}${note}
+    <p class="hint">Im Heimnetz erreichbar unter <b>${esc(wifiURL(w.hostname + ".local"))}</b>${w.at ? ` · Stand ${esc(fmtTime(w.at))}` : ""}</p>
+  </div>`;
+}
+
+function wifiFormHTML(f, w) {
+  if (f.job || f.sending) {
+    return `<div class="device-form wifi-form"><p class="searching"><b>Verbinde mit „${esc(f.ssid)}“ …</b></p>
+      <p class="muted">Das dauert bis zu einer Minute.${w.via === "wifi" ? " Diese Seite kann dabei kurz die Verbindung verlieren." : ""}</p></div>`;
+  }
+  return `<div class="device-form wifi-form">
+    ${f.hidden ? `<h3>Verstecktes WLAN</h3>
+      <label>Name des WLAN (genau wie am Router)<input data-wfield="ssid" value="${esc(f.ssid)}" maxlength="32"
+        autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>` : `<h3>Mit „${esc(f.ssid)}“ verbinden</h3>`}
+    ${f.open ? `<p class="hint">Dieses WLAN ist offen, also ohne Passwort. Jeder in der Nähe kann dort mitlesen – ein WLAN mit
+        Passwort ist besser.</p>`
+      : `<label>WLAN-Passwort${f.hidden ? " (leer lassen, wenn es keins hat)" : ""}<input data-wfield="password"
+          type="${f.show ? "text" : "password"}" value="${esc(f.password)}" maxlength="64" autocomplete="off"
+          autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+        <label class="check"><input type="checkbox" data-wfield="show" ${f.show ? "checked" : ""}> Passwort anzeigen</label>
+        <p class="hint">Das Passwort steht meist auf der Rück- oder Unterseite des Routers, bei der FRITZ!Box als
+          „WLAN-Netzwerkschlüssel“. Auf Groß- und Kleinschreibung achten.</p>`}
+    ${w.via === "wifi" ? `<p class="hint warn">Du bist gerade über das WLAN mit dem Pi verbunden. Wechselt er in ein anderes
+      WLAN, ist diese Seite kurz weg. Danach wieder öffnen: ${esc(wifiURL(w.hostname + ".local"))}</p>` : ""}
+    ${f.error ? `<p class="error-text">${esc(f.error)}</p>` : ""}
+    <div class="row">
+      <button class="primary" data-action="wifi-connect">Verbinden</button>
+      <button data-action="wifi-cancel">Abbrechen</button>
+    </div>
+  </div>`;
+}
+
+function wifiNetworksHTML(w) {
+  const scanning = !!(wifiScan && wifiScan.running), busy = wifiBusy(), f = wifiForm, nets = w.networks;
+  const items = (nets || []).map(n => {
+    const tags = (n.active ? `<span class="tag ok">verbunden</span>` : n.saved ? `<span class="tag">gespeichert</span>` : "") +
+      (!n.security ? `<span class="tag warn">offen</span>` : "");
+    const formHere = f && !f.hidden && f.ssid === n.ssid;
+    const buttons = n.enterprise ? `<span class="muted wifi-no">Firmen-WLAN – hier nicht möglich</span>`
+      : (n.active || formHere ? "" : `<button class="small primary" data-action="wifi-pick" data-ssid="${esc(n.ssid)}" ${busy ? "disabled" : ""}>Verbinden</button>`) +
+        (n.saved ? `<button class="small" data-action="wifi-forget" data-ssid="${esc(n.ssid)}" ${busy ? "disabled" : ""}>Vergessen</button>` : "");
+    const form = formHere ? `<li class="wifi-form-row">${wifiFormHTML(f, w)}</li>` : "";
+    return `<li>${signalBars(n.signal)}<span class="hname"><b>${esc(n.ssid)}</b> <span class="muted">${signalWord(n.signal)}</span></span>
+      ${tags}<span class="wifi-buttons">${buttons}</span></li>${form}`;
+  }).join("");
+  const lost = f && !f.hidden && nets && !nets.some(n => n.ssid === f.ssid) ? wifiFormHTML(f, w) : "";   // gone from the list
+  return `<div class="card wifi-card">
+    <div class="card-head"><h2>WLAN-Netze in der Nähe</h2>
+      <button class="small" data-action="wifi-scan" ${busy ? "disabled" : ""}>${scanning ? "suche …" : "Neu suchen"}</button></div>
+    ${scanning && !nets ? `<p class="searching">Suche WLAN-Netze … das dauert ein paar Sekunden.</p>` : ""}
+    ${wifiScan && wifiScan.error ? `<p class="error-text">${esc(wifiScan.error)}</p>` : ""}
+    ${nets && !nets.length ? `<p class="muted">Kein WLAN gefunden. Ist der Router eingeschaltet und nicht zu weit weg?</p>` : ""}
+    ${items ? `<ul class="wifi-list">${items}</ul>` : ""}${lost}
+    ${f && f.hidden ? wifiFormHTML(f, w)
+      : `<p class="hint">Steht dein WLAN nicht in der Liste? <button class="small" data-action="wifi-hidden" ${busy ? "disabled" : ""}>Namen selbst eingeben</button></p>`}
+  </div>`;
+}
+
+function renderWifi(el) {
+  const w = wifi;
+  if (!w) return setHTML(el, `<div class="card"><p class="${wifiError ? "error-text" : "searching"}">${esc(wifiError || "Frage den Pi …")}</p></div>`);
+  if (!w.supported) return setHTML(el, `<div class="card"><p>Das WLAN lässt sich hier nur einrichten, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
+  setHTML(el, wifiStatusHTML(w) + wifiNetworksHTML(w));
+  if (wifiFocus) {
+    wifiFocus = false;
+    const input = el.querySelector('.wifi-form input[data-wfield="password"]');
+    if (input) input.focus();
+  }
+}
+
 // ------------------------------------------------------------------ events
 function planOf(t) { return state.plans.find(p => p.id === t.closest("[data-plan]").dataset.plan); }
 function dayOf(t) { return t.closest(".day").dataset.day; }
@@ -1540,6 +1760,7 @@ document.addEventListener("click", e => {
     tab = t.dataset.tab;
     localStorage.setItem("heizung.tab", tab);
     if (tab === "plans" && editing) renderEditor();
+    if (tab === "wifi") openWifiTab();
     render();
     return;
   }
@@ -1595,6 +1816,13 @@ document.addEventListener("click", e => {
     case "calib-reset": return saveCalib({ correction: 0 });
     case "update-check": return checkUpdates();
     case "update-start": return startUpdate();
+    case "wifi-scan": return scanWifi();
+    case "wifi-pick": return openWifiForm(t.dataset.ssid);
+    case "wifi-hidden": return openWifiForm("", true);
+    case "wifi-cancel": wifiForm = null; invalidate(); return render();
+    case "wifi-connect": return connectWifi();
+    case "wifi-forget": return forgetWifi(t.dataset.ssid);
+    case "wifi-ok": wifiSeen = wifi && wifi.job && wifi.job.id; return render();
   }
 });
 
@@ -1606,6 +1834,12 @@ document.addEventListener("change", e => {
     return renderEditor();
   }
   if (sensorForm && t.dataset.sfield) { sensorForm[t.dataset.sfield] = t.value; return; }
+  if (wifiForm && t.dataset.wfield === "show") {   // switch the field directly: a redraw would wait for the focus to leave
+    wifiForm.show = t.checked;
+    const pw = document.querySelector('.wifi-form input[data-wfield="password"]');
+    if (pw) pw.type = t.checked ? "text" : "password";
+    return;
+  }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {
@@ -1640,6 +1874,7 @@ document.addEventListener("input", e => {
     return;
   }
   if (e.target.dataset.field === "scan-network") scanNet = e.target.value;
+  if (wifiForm && ["ssid", "password"].includes(e.target.dataset.wfield)) { wifiForm[e.target.dataset.wfield] = e.target.value; return; }
   if (sensorForm && e.target.dataset.sfield) { sensorForm[e.target.dataset.sfield] = e.target.value; return; }
   if (deviceForm && e.target.closest(".device-form")) updateDeviceForm(e.target);
   if (roomForm && e.target.closest(".room-form")) updateRoomForm(e.target);
@@ -1655,6 +1890,7 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.key === "Enter" && calibForm && e.target.closest(".calib-form")) return saveCalib(null);
+  if (e.key === "Enter" && wifiForm && e.target.closest(".wifi-form")) return connectWifi();
   if (e.key === "Enter" && e.target.dataset.field === "scan-network") { e.target.blur(); return runScan(scanNet.trim() || null); }
   if (e.key === "Enter" && deviceForm && e.target.closest(".device-form")) saveDevice();
   if (e.key === "Enter" && roomForm && e.target.closest(".room-form") && e.target.dataset.field === "name") saveRoom();
