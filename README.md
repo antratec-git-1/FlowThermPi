@@ -192,7 +192,7 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
 - *Einrichtung › Fernwartung › Wann ist der Pi erreichbar?:* **Nur nach Freigabe** (Vorgabe) oder **Immer** – dann
   bleibt die Fernwartung dauerhaft an, und in der Heizungsansicht steht „Fernwartung ist eingeschaltet“. Ändern lässt
   sich das nur im Heimnetz.
-- Ein Pi, der schon vor dieser Version eingerichtet wurde, ist danach ebenfalls auf „Nur nach Freigabe“ und schaltet
+- Ein Pi, der schon vor Version 0.4.1 eingerichtet wurde, ist danach ebenfalls auf „Nur nach Freigabe“ und schaltet
   die Fernwartung gleich nach dem Update aus. Wer sie dort dauerhaft möchte, wählt im Heimnetz „Immer“.
 
 ### Was sonst noch gilt
@@ -216,8 +216,8 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
   bestimmt er selbst, ohne Shell. Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Die
   Einstellung und das Ende der Fernhilfe stehen in `/var/lib/flowthermpi/remote-settings.json`. Meldungen:
   `journalctl -u flowthermpi-remote`.
-- Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Den Reiter gibt es ab Version 0.4.0; ein Pi mit 0.3.0
-  bekommt ihn über den Update-Knopf.
+- Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Den Reiter gibt es ab Version 0.4.0, die Fernhilfe ab
+  0.4.1; ein älterer Pi bekommt beides über den Update-Knopf.
 
 ### Tailscale-Netz einrichten (einmal, vor dem ersten Pi)
 
