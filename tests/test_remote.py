@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -60,7 +61,14 @@ class Base(unittest.TestCase):
 
     def make_remote(self):
         remote = Remote(self.data, poll=0.01, root=self.root)
-        remote.watch_every = 0.02
+        remote.watch_every = remote.guard_every = 0.02
+        return remote
+
+    def guard(self, remote=None):
+        """remote.start() as when the app starts: one look at the Pi, and the guard of the Fernhilfe."""
+        remote = remote or self.remote
+        remote.start()
+        self.addCleanup(remote.stop)
         return remote
 
     def start_service(self):
@@ -131,11 +139,11 @@ class RemoteTest(Base):
         self.ts.sign_in()                                                            # on the helper's phone
         view = self.view_when(lambda v: v["tailscale"]["state"] == "Running" and not v["watching"], local="100.101.102.103")
         ts = view["tailscale"]
-        self.assertEqual((ts["name"], ts["ipv4"], ts["user"], ts["auth_url"], ts["qr"]),
-                         ("flowthermpi-a1b2c3d4", "100.101.102.103", "helfer@github", None, None))
+        self.assertEqual((ts["name"], ts["ipv4"], ts["tags"], ts["auth_url"], ts["qr"]),
+                         ("flowthermpi-a1b2c3d4", "100.101.102.103", ["tag:flowthermpi"], None, None))
         self.assertTrue(view["via_tailscale"])                                      # this browser comes from afar
         self.assertFalse(self.remote.view(local="192.168.1.20")["via_tailscale"])
-        self.assertEqual(self.remote.summary(), {"supported": True, "on": True})
+        self.assertTrue(self.remote.summary()["on"])
 
     def test_a_login_started_by_hand_is_not_offered(self):
         # „sudo tailscale up“ by hand before the app: that link would sign the Pi in under the plain name „flowthermpi“
@@ -263,9 +271,154 @@ class RemoteTest(Base):
         off = Remote(None)
         self.assertFalse(off.supported)
         self.assertEqual((off.view(), off.summary(), off.device), ({"supported": False}, {"supported": False}, None))
+        for action in (off.up, off.help, off.end, lambda: off.set_mode("always")):
+            with self.assertRaises(ActionError) as ctx:
+                action()
+            self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("Installationsbefehl", str(ctx.exception))
+
+    def test_fernhilfe_needs_the_setup(self):
+        self.start_service()
+        self.remote.refresh()
         with self.assertRaises(ActionError) as ctx:
-            off.up()
+            self.remote.help("192.168.1.20")
         self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("noch nicht eingerichtet", str(ctx.exception))
+        self.assertEqual((self.ts.installed, self.remote.summary()["until"]), (False, None))   # nothing installed
+
+
+class FernhilfeTest(Base):
+    """„Fernhilfe erlauben“: in the default mode the Pi is reachable only while the residents allow it."""
+
+    LAN, AFAR = "192.168.1.20", "100.101.102.103"   # the Pi's address the browser talks to: home network | Tailscale
+
+    def setUp(self):
+        super().setUp()
+        self.start_service()
+        self.remote.up(self.LAN)                                                     # „Fernwartung einrichten“
+        self.setup_done()
+        self.ts.sign_in()
+        self.view_when(lambda v: v["tailscale"]["state"] == "Running" and not v["watching"])
+
+    def state(self, remote=None):
+        return (remote or self.remote).view()["tailscale"]["state"]
+
+    def saved(self):
+        path = self.data / remote_module.SETTINGS
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        return json.loads(path.read_text())
+
+    def refused(self, action, status=403):
+        with self.assertRaises(ActionError) as ctx:
+            action()
+        self.assertEqual(ctx.exception.status, status)
+        return str(ctx.exception)
+
+    def test_the_setup_is_a_fernhilfe_too(self):
+        # the helper can try it right after the login – and later it switches off by itself
+        summary = self.remote.summary(self.LAN)
+        self.assertEqual((summary["mode"], summary["on"], summary["ready"], summary["afar"]), ("ask", True, True, False))
+        left = (datetime.fromisoformat(summary["until"]) - datetime.now().astimezone()).total_seconds()
+        self.assertTrue(7195 < left <= 7201, left)
+        self.assertEqual(self.saved(), {"mode": "ask", "until": summary["until"]})
+
+    def test_allowed_for_two_hours_then_off_by_itself(self):
+        self.remote.end(self.LAN)
+        self.assertEqual((self.state(), self.remote.summary()["until"]), ("Stopped", None))
+        self.remote.help_time = 0.4
+        self.guard()
+        before = len(self.ts.commands)
+        res = self.remote.help(self.LAN)                                             # „Fernhilfe erlauben“
+        self.assertTrue(res["remote"]["on"] and res["remote"]["until"])
+        self.assertRegex(res["message"], r"^Die Fernhilfe ist an – bis \d\d:\d\d Uhr\.$")
+        ups = [c for c in self.ts.commands[before:] if c[:2] == ("tailscale", "up")]
+        self.assertEqual((ups, self.ts.logins), ([("tailscale", "up")], 1))         # plain „up“ – no new login
+        self.until(lambda: self.state() == "Stopped")                               # the guard switched it off
+        self.until(lambda: self.saved()["until"] is None)
+        self.assertEqual((self.remote.summary()["until"], self.remote.summary()["on"]), (None, False))
+
+    def test_only_the_residents_allow_it(self):
+        self.remote.end(self.LAN)
+        for afar in (self.AFAR, "100.64.0.7", "fd7a:115c:a1e0::5"):                 # through Tailscale: the helper
+            self.assertIn("nur die Bewohner", self.refused(lambda: self.remote.help(afar)))   # cannot allow it
+        self.assertEqual((self.state(), self.saved()["until"]), ("Stopped", None))
+        self.remote.help(self.LAN)
+        until = self.saved()["until"]
+        self.refused(lambda: self.remote.help(self.AFAR))                            # … nor make it longer
+        self.refused(lambda: self.remote.up(self.AFAR))
+        self.assertIn("nur hier im Heimnetz", self.refused(lambda: self.remote.set_mode("always", self.AFAR)))
+        self.assertEqual((self.saved(), self.state()), ({"mode": "ask", "until": until}, "Running"))
+        res = self.remote.end(self.AFAR)                                             # ending works from afar too:
+        self.assertEqual((res["message"], self.state()), ("Die Fernhilfe ist beendet.", "Stopped"))   # helper is done
+
+    def test_switching_off_ends_it(self):
+        self.remote.down(self.LAN)                                                   # „Ausschalten“ (Einrichtung)
+        self.assertEqual((self.state(), self.saved()["until"]), ("Stopped", None))
+        self.remote.help(self.LAN)
+        self.remote.logout(self.LAN)                                                 # „Abmelden“
+        self.assertEqual((self.state(), self.saved()["until"]), ("NeedsLogin", None))
+        self.assertIn("noch nicht eingerichtet", self.refused(lambda: self.remote.help(self.LAN), 409))
+
+    def test_on_without_a_fernhilfe_is_switched_off(self):
+        # e.g. switched on by hand on the Pi, or the app was not running when the Fernhilfe ended
+        self.remote.end(self.LAN)
+        self.ts.tailscale(["up"])                                                    # „sudo tailscale up“ by hand
+        self.remote.refresh()
+        self.assertEqual(self.state(), "Running")
+        self.guard()
+        self.until(lambda: self.state() == "Stopped")
+
+    def test_a_restart_keeps_the_fernhilfe(self):
+        until = self.saved()["until"]
+        again = self.guard(self.make_remote())
+        time.sleep(0.3)
+        self.assertEqual((again.summary()["until"], self.state(again)), (until, "Running"))
+
+    def test_an_end_missed_while_the_app_was_down(self):
+        (self.data / remote_module.SETTINGS).write_text(json.dumps({"mode": "ask", "until": "2026-01-01T10:00:00+01:00"}))
+        again = self.guard(self.make_remote())
+        self.until(lambda: self.state(again) == "Stopped")
+        self.until(lambda: self.saved()["until"] is None)
+
+    def test_never_longer_than_one_fernhilfe(self):
+        # the Pi has no clock of its own: if it was ahead when the Fernhilfe began, it must not last a day
+        later = (datetime.now().astimezone() + timedelta(days=1)).isoformat(timespec="seconds")
+        (self.data / remote_module.SETTINGS).write_text(json.dumps({"mode": "ask", "until": later}))
+        again = self.make_remote()
+        again.help_time = 0.3
+        self.guard(again)
+        self.until(lambda: self.state(again) == "Stopped")
+
+    def test_a_failed_switch_on_leaves_nothing_open(self):
+        self.remote.end(self.LAN)
+        self.ts.account, self.ts.backend = None, "NeedsLogin"                        # removed from the tailnet meanwhile
+        self.assertIn("nicht angemeldet", self.refused(lambda: self.remote.help(self.LAN), 502))
+        self.assertEqual((self.saved()["until"], self.remote.summary()["until"]), (None, None))
+        self.assertEqual((self.ts.logins, self.ts.login), (1, None))                 # „on“ never opens a login
+
+    def test_always_reachable(self):
+        self.remote.end(self.LAN)
+        res = self.remote.set_mode("always", self.LAN)
+        self.assertEqual((res["remote"]["mode"], res["remote"]["until"], self.state()), ("always", None, "Running"))
+        self.assertIn("immer an", res["message"])                                    # on at once
+        self.guard()
+        time.sleep(0.3)
+        self.assertEqual(self.state(), "Running")                                    # the guard leaves it on
+        self.assertIn("dauerhaft", self.refused(lambda: self.remote.help(self.LAN), 409))
+        self.assertEqual(self.make_remote().summary()["mode"], "always")             # saved
+        res = self.remote.set_mode("ask", self.LAN)
+        self.assertEqual((res["remote"]["tailscale"]["state"], self.saved()), ("Stopped", {"mode": "ask", "until": None}))
+
+    def test_choosing_the_mode_again_changes_nothing(self):
+        until = self.saved()["until"]
+        self.assertIsNone(self.remote.set_mode("ask", self.LAN)["message"])
+        self.assertEqual((self.saved()["until"], self.state()), (until, "Running"))
+        self.refused(lambda: self.remote.set_mode("immer", self.LAN), 400)
+
+    def test_bad_settings_mean_ask(self):
+        for text in ("kaputt", '["always"]', '{"mode": "immer", "until": "morgen"}'):
+            (self.data / remote_module.SETTINGS).write_text(text)
+            self.assertEqual(self.make_remote().summary(), {**self.make_remote().summary(), "mode": "ask", "until": None})
 
 
 class RemoteApiTest(Base):
@@ -303,7 +456,8 @@ class RemoteApiTest(Base):
     def test_api_flow(self):
         state = self.call("GET", "/api/state")
         self.assertEqual((state["app"]["remote"], state["app"]["device"], state["remote"]),
-                         (True, "a1b2c3d4", {"supported": True, "on": False}))
+                         (True, "a1b2c3d4", {"supported": True, "on": False, "ready": False, "afar": False, "mode": "ask",
+                                             "until": None, "help_minutes": 120}))
         self.assertEqual(self.call("POST", "/api/remote/refresh")["remote"]["tailscale"], {"installed": False})
         self.call("POST", "/api/remote/up")
         view = self.until(lambda: (lambda v: v if v["job"]["state"] == "done" else None)(self.call("GET", "/api/remote")))
@@ -312,6 +466,21 @@ class RemoteApiTest(Base):
         self.until(lambda: self.call("GET", "/api/state")["remote"]["on"])
         self.assertEqual(self.call("POST", "/api/remote/down")["message"], "Die Fernwartung ist aus.")
         self.assertFalse(self.call("GET", "/api/state")["remote"]["on"])
+
+    def test_fernhilfe_in_the_residents_view(self):
+        self.call("POST", "/api/remote/up")
+        self.until(lambda: self.call("GET", "/api/remote")["job"]["state"] == "done")
+        self.ts.sign_in()
+        self.until(lambda: self.call("GET", "/api/state")["remote"]["on"])
+        self.call("PUT", "/api/setup/pin", {"pin": "4711"})
+        self.cookie = None                                                           # the residents have no PIN
+        self.assertEqual(self.call("POST", "/api/remote/help/end")["message"], "Die Fernhilfe ist beendet.")
+        state = self.call("GET", "/api/state")["remote"]
+        self.assertEqual((state["on"], state["until"], state["mode"], state["ready"]), (False, None, "ask", True))
+        res = self.call("POST", "/api/remote/help")
+        self.assertTrue(res["remote"]["on"] and res["remote"]["until"])
+        self.assertTrue(self.call("GET", "/api/state")["remote"]["until"])
+        self.assertTrue(self.call("PUT", "/api/remote/mode", {"mode": "always"}, expect=403)["pin_required"])
 
     def test_the_login_link_is_never_public(self):
         self.call("POST", "/api/remote/up")
@@ -328,6 +497,7 @@ class RemoteApiTest(Base):
         self.assertTrue(self.call("GET", "/api/remote", expect=403)["pin_required"])
         for path in ("/api/remote/refresh", "/api/remote/up", "/api/remote/down", "/api/remote/logout"):
             self.call("POST", path, {}, expect=403)
+        self.call("PUT", "/api/remote/mode", {"mode": "always"}, expect=403)
         self.assertEqual(self.ts.commands, [])
         self.assertFalse((self.data / install.REMOTE_REQUEST).exists())
 

@@ -2,12 +2,18 @@
 
 Der Pi kommt dabei in das private Tailscale-Netz dessen, der ihn anmeldet; von dort lässt sich die App öffnen –
 ohne Freigaben im Router. Die App darf am System nichts ändern. Sie legt nur remote-request.json in ihren
-Datenordner, darin steht nichts als eine von vier Aktionen (status, up, down, logout), und
+Datenordner, darin steht nichts als eine von fünf Aktionen (status, up, on, down, logout), und
 flowthermpi-remote.path startet daraufhin als root „install.py --remote“. Das installiert Tailscale beim ersten
-„up“ aus dessen eigenem Paketarchiv, meldet den Pi als flowthermpi-<Gerätenummer> an und schreibt Tailscales
-Zustand nach remote-status.json – solange eine Anmeldung offen ist, mit Anmelde-Link und QR-Code. Wer mit diesem
-Link die Anmeldung abschließt, bestimmt, in wessen Tailscale-Netz der Pi kommt. Der Link steht deshalb nur in der
-Einrichtung (hinter der PIN), nie in /api/state.
+„up“ aus dessen eigenem Paketarchiv, meldet den Pi als flowthermpi-<Gerätenummer> mit dem Tag tag:flowthermpi an
+und schreibt Tailscales Zustand nach remote-status.json – solange eine Anmeldung offen ist, mit Anmelde-Link und
+QR-Code. Wer mit diesem Link die Anmeldung abschließt, bestimmt, in wessen Tailscale-Netz der Pi kommt. Der Link
+steht deshalb nur in der Einrichtung (hinter der PIN), nie in /api/state.
+
+Fernhilfe: In der Einstellung „ask“ (Vorgabe) ist Tailscale nur an, solange die Bewohner es erlaubt haben –
+„Fernhilfe erlauben“ in der Heizungsansicht schaltet es für zwei Stunden ein („on“ schaltet nur ein, was schon
+eingerichtet ist), danach schaltet ein Wächter es wieder aus. Erlauben und verlängern geht nur im Heimnetz, nicht
+aus der Ferne; beenden geht überall. Mit „always“ bleibt die Fernwartung dauerhaft an. Einstellung und Ende der
+Fernhilfe stehen in remote-settings.json, damit sie einen Neustart überstehen.
 
 Den Reiter gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_REMOTE_DIR.
@@ -15,6 +21,7 @@ HEIZAPP_REMOTE_DIR.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -23,13 +30,14 @@ import secrets
 import socket
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .service import ActionError
 
 log = logging.getLogger("heizapp")
-REQUEST, STATUS = "remote-request.json", "remote-status.json"
+REQUEST, STATUS, SETTINGS = "remote-request.json", "remote-status.json", "remote-settings.json"
+MODES = ("ask", "always")    # Fernhilfe only when the residents allow it | always reachable
 STATES = ("NoState", "NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting", "Running")
 PICKUP = 15.0                # seconds: by then the root service has taken the request (it starts within a second)
 ANSWER = 90.0                # seconds for status, down and logout (logging out waits for Tailscale's servers)
@@ -37,8 +45,13 @@ UP_TIME = 25 * 60.0          # seconds for „up“: the first time it installs 
 WATCH_EVERY = 5.0            # seconds between two looks at the Pi while a login is open …
 WATCH_FOR = 15 * 60.0        # … for at most this long; after that the page offers „Neu prüfen“
 REFRESH_EVERY = 6 * 3600.0   # now and then the state is looked up again (someone may change it on the Pi itself)
+HELP_TIME = 2 * 3600.0       # seconds a Fernhilfe lasts
+GUARD_EVERY = 30.0           # seconds between two looks of the guard (it also wakes when a Fernhilfe ends)
+# where Tailscale's addresses come from: a browser talking to the Pi on one of them comes from afar
+TAILSCALE_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 MAX_STATUS = 1 << 20
 BUSY = {"up": "Die Fernwartung wird gerade eingerichtet – bitte einen Moment warten.",
+        "on": "Einen Moment bitte – die Fernhilfe wird gerade eingeschaltet.",
         "down": "Einen Moment bitte – die Fernwartung wird gerade ausgeschaltet.",
         "logout": "Einen Moment bitte – der Pi meldet sich gerade bei Tailscale ab.",
         "status": "Einen Moment bitte – der Pi wird gerade gefragt."}
@@ -52,6 +65,21 @@ TAG = re.compile(r"tag:[A-Za-z][A-Za-z0-9-]{0,62}")
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _later(seconds: float) -> str:
+    at = datetime.now().astimezone() + timedelta(seconds=seconds)
+    if at.microsecond:   # rounded up: a Fernhilfe never ends before the time it promised
+        at = at.replace(microsecond=0) + timedelta(seconds=1)
+    return at.isoformat(timespec="seconds")
+
+
+def _time(text: str | None) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+    return at if at and at.tzinfo else None
 
 
 def _text(value, limit: int = 200) -> str | None:
@@ -116,6 +144,7 @@ class Remote:
         self.folder = Path(folder) if folder else None
         self.poll, self.pickup, self.answer, self.up_time = poll, PICKUP, ANSWER, UP_TIME
         self.watch_every, self.watch_for, self.refresh_every = WATCH_EVERY, WATCH_FOR, REFRESH_EVERY
+        self.help_time, self.guard_every = HELP_TIME, GUARD_EVERY
         self.device = device_number(root) if self.folder else None
         self._lock = threading.Lock()                 # guards the fields below
         self._free = threading.Condition(self._lock)  # signalled when a request is answered
@@ -131,6 +160,10 @@ class Remote:
         self._refreshing = False
         self._tried = time.monotonic()   # last look at the Pi (start() looks at once)
         self._error: str | None = None   # why the last look at the Pi failed
+        # {"mode": "ask" | "always", "until": end of the Fernhilfe or None} – as saved in remote-settings.json
+        self._settings = self._load_settings() if self.folder else {"mode": "ask", "until": None}
+        self._wake = threading.Event()   # the guard looks at once (a Fernhilfe began or ended, the state changed)
+        self._halt = threading.Event()
         if self.folder:
             status = self._read_status()   # from before a restart of the app
             if status:
@@ -141,11 +174,17 @@ class Remote:
         return self.folder is not None
 
     def start(self) -> None:
-        """When the app starts: look at the Pi once, in the background."""
+        """When the app starts: look at the Pi once, in the background, and start the guard of the Fernhilfe."""
         if self.supported:
             with self._lock:
                 self._refreshing = True
             threading.Thread(target=self._quiet_refresh, name="remote-refresh", daemon=True).start()
+            threading.Thread(target=self._guard, name="remote-guard", daemon=True).start()
+
+    def stop(self) -> None:
+        """Ends the guard (for tests – in the app it runs as long as the app does)."""
+        self._halt.set()
+        self._wake.set()
 
     # ------------------------------------------------------------------ what the page shows
     def view(self, local: str | None = None) -> dict:
@@ -164,18 +203,27 @@ class Remote:
                 ts["qr"] = self._login[1] if own else None
             result = {"supported": True, "device": self.device, "hostname": self._hostname(), "tailscale": ts,
                       "at": self._at, "job": dict(self._job) if self._job else None, "busy": self._doing,
-                      "watching": self._watching, "error": self._error}
-        result["via_tailscale"] = bool(local and ts and local in ts.get("ips", []))
+                      "watching": self._watching, "error": self._error, "via_tailscale": self._from_afar(local),
+                      **self._help_view()}
         result["lan"] = socket.gethostname().split(".")[0].lower()   # name.local in the home network
         return result
 
-    def summary(self) -> dict:
-        """For everyone, also the residents' view: only whether remote maintenance is on – never the login link."""
+    def summary(self, local: str | None = None) -> dict:
+        """For everyone, also the residents' view: whether remote maintenance is on and until when the Fernhilfe
+        lasts – never the login link."""
         if not self.supported:
             return {"supported": False}
         self._refresh_if_old()
         with self._lock:
-            return {"supported": True, "on": bool(self._ts and self._ts.get("state") == "Running")}
+            return {"supported": True, "on": bool(self._ts and self._ts.get("state") == "Running"),
+                    "ready": self._ready(), "afar": self._from_afar(local), **self._help_view()}
+
+    def _help_view(self) -> dict:
+        """The Fernhilfe for the pages (call with the lock held): mode, its end while it lasts, how long one lasts."""
+        until = self._until()
+        active = until is not None and until > datetime.now().astimezone()
+        return {"mode": self._settings["mode"], "until": self._settings["until"] if active else None,
+                "help_minutes": round(self.help_time / 60)}
 
     # ------------------------------------------------------------------ the actions
     def refresh(self, local: str | None = None) -> dict:
@@ -196,23 +244,213 @@ class Remote:
 
     def up(self, local: str | None = None) -> dict:
         """Set up or switch on; answers at once, the page follows the job (GET /api/remote). The first time this
-        installs Tailscale, which takes a few minutes."""
-        rid = self._begin("up", job={"state": "waiting", "phase": None, "message": None, "started": _now(), "finished": None})
+        installs Tailscale, which takes a few minutes. In „ask“ mode it is a Fernhilfe: on for two hours."""
+        self._require()
+        with self._lock:
+            before, mine = self._open_help(local) if self._settings["mode"] == "ask" else (None, None)
+        try:
+            rid = self._begin("up", job={"state": "waiting", "phase": None, "message": None, "started": _now(),
+                                         "finished": None})
+        except BaseException:
+            self._reset_help(mine, before)
+            raise
         threading.Thread(target=self._follow, args=(rid,), name="remote-up", daemon=True).start()
         return {"remote": self.view(local)}
 
     def down(self, local: str | None = None) -> dict:
-        return self._act("down", local)
+        """Switch off – a Fernhilfe ends with it."""
+        return self._switch_off("down", local)
 
     def logout(self, local: str | None = None) -> dict:
-        """Leave the tailnet – also ends a login that is still open."""
-        return self._act("logout", local)
+        """Leave the tailnet – also ends a login that is still open, and a Fernhilfe."""
+        return self._switch_off("logout", local)
 
-    def _act(self, action: str, local: str | None) -> dict:
+    def help(self, local: str | None = None) -> dict:
+        """„Fernhilfe erlauben“ in the residents' view: the Pi is reachable for the next two hours, then the guard
+        switches it off. Pressed again, the two hours start anew. Only switches on what is set up („on“)."""
+        self._require()
+        with self._lock:
+            if self._settings["mode"] != "ask":
+                raise ActionError("Die Fernwartung ist hier dauerhaft eingeschaltet – eine Freigabe ist nicht nötig.", 409)
+            if not self._ready():
+                raise ActionError("Die Fernwartung ist auf diesem Pi noch nicht eingerichtet.", 409)
+            before, mine = self._open_help(local)
+        try:
+            status = self._ask("on")
+            if status.get("state") != "done":
+                raise ActionError(_text(status.get("message"), 300) or "Die Fernhilfe ließ sich nicht einschalten.", 502)
+        except BaseException:
+            self._reset_help(mine, before)
+            raise
+        result = self.summary(local)
+        until = _time(result["until"])
+        message = (f"Die Fernhilfe ist an – bis {until:%H:%M} Uhr." if result["on"] and until
+                   else _text(status.get("message"), 300))
+        return {"message": message, "remote": result}
+
+    def end(self, local: str | None = None) -> dict:
+        """„Beenden“: the Fernhilfe ends now. Also from afar – when the helper is done."""
+        self._require()
+        with self._lock:
+            if self._settings["mode"] != "ask":
+                raise ActionError("Die Fernwartung ist hier dauerhaft eingeschaltet. Ausschalten lässt sie sich in "
+                                  "der Einrichtung.", 409)
+        self._switch_off("down", local)
+        return {"message": "Die Fernhilfe ist beendet.", "remote": self.summary(local)}
+
+    def set_mode(self, mode, local: str | None = None) -> dict:
+        """Einrichtung: „ask“ – reachable only during a Fernhilfe – or „always“. Only in the home network: from afar,
+        nobody may give themselves more than the residents allowed."""
+        self._require()
+        if mode not in MODES:
+            raise ActionError("Unbekannte Einstellung für die Fernwartung.", 400)
+        with self._lock:
+            if self._from_afar(local):
+                raise ActionError("Das lässt sich nur hier im Heimnetz ändern, nicht aus der Ferne.", 403)
+            same = mode == self._settings["mode"]   # as it is: a Fernhilfe under way goes on
+            if not same:
+                self._store(mode=mode, until=None)
+            state = (self._ts or {}).get("state")
+        if same:
+            return {"message": None, "remote": self.view(local)}
+        self._wake.set()
+        message = ("Gespeichert: Die Fernwartung ist nur an, wenn die Bewohner sie erlauben." if mode == "ask"
+                   else "Gespeichert: Die Fernwartung ist immer an.")
+        if mode == "ask" and state in ("Running", "Starting"):
+            self._act("down")   # off now – the guard would do it a moment later
+            message += " Sie ist jetzt aus."
+        elif mode == "always" and state == "Stopped":
+            self._act("on")
+            message += " Sie ist jetzt eingeschaltet."
+        return {"message": message, "remote": self.view(local)}
+
+    def _act(self, action: str, local: str | None = None) -> dict:
         status = self._ask(action)
         if status.get("state") != "done":
             raise ActionError(_text(status.get("message"), 300) or "Das hat nicht geklappt.", 502)
         return {"message": _text(status.get("message"), 300), "remote": self.view(local)}
+
+    def _switch_off(self, action: str, local: str | None) -> dict:
+        with self._lock:   # a Fernhilfe ends first: if switching off fails, the guard tries again
+            ended = self._end_help()
+        result = self._act(action, local)
+        self._reset_help(ended, None)   # over – the guard has nothing left to do
+        return result
+
+    # ------------------------------------------------------------------ the Fernhilfe and its guard
+    def _open_help(self, local: str | None) -> tuple[str | None, str]:
+        """A Fernhilfe of two hours from now (call with the lock held) – saved before the Pi is switched on, so the
+        guard leaves it on. Returns (the end saved before, the new one)."""
+        if self._from_afar(local):
+            raise ActionError("Fernhilfe erlauben oder verlängern können nur die Bewohner, hier im Heimnetz – nicht "
+                              "aus der Ferne.", 403)
+        before = self._settings["until"]
+        self._store(until=_later(self.help_time))
+        self._wake.set()
+        return before, self._settings["until"]
+
+    def _reset_help(self, expected: str | None, value: str | None) -> None:
+        """The Fernhilfe ends at `value` instead – if it is still the one ending at `expected` (none began meanwhile).
+        After a failure that is the end saved before; after switching off, None: over."""
+        if expected is None:
+            return
+        with self._lock:
+            if self._settings["until"] == expected:
+                self._note(until=value)
+        self._wake.set()
+
+    def _end_help(self) -> str | None:
+        """A Fernhilfe that lasts ends now (call with the lock held). Returns its end as it is now, or None."""
+        until = self._until()
+        if until is None:
+            return None
+        if until > datetime.now().astimezone():
+            self._note(until=_now())
+        return self._settings["until"]
+
+    def _guard(self) -> None:
+        """In „ask“ mode Tailscale is on only during a Fernhilfe: the guard switches it off when one ends, and when
+        the Pi is found on without one (after a restart of the app, or switched on by hand)."""
+        while not self._halt.is_set():
+            self._wake.clear()   # before looking: what changes after this wakes the next wait at once
+            try:
+                wait = self._enforce()
+            except Exception:  # the guard must keep going
+                log.exception("Fernwartung: Fehler beim Wächter der Fernhilfe")
+                wait = self.guard_every
+            self._wake.wait(wait)
+
+    def _enforce(self) -> float:
+        """One look of the guard. Returns the seconds until the next one."""
+        now = datetime.now().astimezone()
+        with self._lock:
+            if self._settings["mode"] != "ask":
+                return self.guard_every
+            until = self._until()
+            if until and until - now > timedelta(seconds=self.help_time + 60):   # the clock went back: one
+                self._note(until=_later(self.help_time))                          # Fernhilfe at most
+                until = self._until()
+            if until and until > now:
+                return max(0.05, min(self.guard_every, (until - now).total_seconds()))   # wakes when it ends
+            on = (self._ts or {}).get("state") in ("Running", "Starting")
+            if until is None and not on:
+                return self.guard_every
+            ended = self._settings["until"]
+        try:
+            status = self._ask("down")
+        except ActionError as exc:
+            if exc.status != 409:   # 409: something else is under way – it is tried again in a moment
+                log.warning("Fernwartung: Ausschalten nach der Fernhilfe hat nicht geklappt: %s", exc)
+            return self.guard_every if exc.status == 409 else 10 * self.guard_every
+        if status.get("state") != "done":
+            log.warning("Fernwartung: Ausschalten nach der Fernhilfe hat nicht geklappt: %s", status.get("message"))
+            return 10 * self.guard_every
+        self._reset_help(ended, None)
+        log.info("Fernwartung: Fernhilfe zu Ende – Tailscale ist aus.")
+        return self.guard_every
+
+    def _until(self) -> datetime | None:
+        return _time(self._settings["until"])
+
+    def _ready(self) -> bool:
+        """Tailscale is set up: signed in, on or off (call with the lock held)."""
+        return bool(self._ts) and self._ts.get("state") in ("Running", "Stopped", "Starting")
+
+    def _from_afar(self, local: str | None) -> bool:
+        """The browser talks to the Pi through Tailscale (call with the lock held)."""
+        if not local:
+            return False
+        if self._ts and local in self._ts.get("ips", []):
+            return True
+        try:
+            address = ipaddress.ip_address(local)
+        except ValueError:
+            return False
+        return any(address in net for net in TAILSCALE_NETS)
+
+    def _load_settings(self) -> dict:
+        try:
+            raw = json.loads((self.folder / SETTINGS).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = None
+        raw = raw if isinstance(raw, dict) else {}
+        until = raw.get("until")
+        return {"mode": raw["mode"] if raw.get("mode") in MODES else "ask",
+                "until": until if isinstance(until, str) and TIME.fullmatch(until) and _time(until) else None}
+
+    def _store(self, **changes) -> None:
+        """Change the settings and save them (call with the lock held). If saving fails, nothing changes."""
+        settings = {**self._settings, **changes}
+        self._write(SETTINGS, settings, "Die Einstellung der Fernwartung ließ sich nicht speichern")
+        self._settings = settings
+
+    def _note(self, **changes) -> None:
+        """Like _store, for endings: they count even if saving fails (then only until the app restarts)."""
+        try:
+            self._store(**changes)
+        except ActionError as exc:
+            log.warning("Fernwartung: %s", exc)
+            self._settings = {**self._settings, **changes}
 
     # ------------------------------------------------------------------ looking at the Pi in the background
     def _hostname(self) -> str:
@@ -276,16 +514,19 @@ class Remote:
                 self._refreshing = False
 
     # ------------------------------------------------------------------ talking to the root service
-    def _begin(self, action: str, job: dict | None = None, wait: float = 10.0) -> str:
+    def _require(self) -> None:
         if not self.supported:
             raise ActionError("Fernwartung gibt es nur, wenn FlowThermPi mit dem Installationsbefehl auf dem Raspberry Pi "
                               "eingerichtet ist.", 409)
+
+    def _begin(self, action: str, job: dict | None = None, wait: float = 10.0) -> str:
+        self._require()
         rid = secrets.token_hex(8)
         deadline = time.monotonic() + wait
         with self._free:
-            while self._doing:   # a quick look at the Pi is under way: wait for it – anything else means „busy“
+            while self._doing:   # a look at the Pi or switching off is over in a moment: wait – anything else is „busy“
                 left = deadline - time.monotonic()
-                if self._doing != "status" or left <= 0:
+                if self._doing not in ("status", "down") or left <= 0:
                     raise ActionError(BUSY[self._doing], 409)
                 self._free.wait(left)
             self._doing, self._owner = action, rid
@@ -349,20 +590,23 @@ class Remote:
             time.sleep(self.poll)
 
     def _place(self, rid: str, request: dict) -> None:
-        """The request for the root service: written as a new file (0600) and renamed into place."""
-        tmp = self.folder / f".{REQUEST}.{secrets.token_hex(4)}.tmp"
+        """The request for the root service."""
+        self._write(REQUEST, {"id": rid, **request}, "Die Anfrage an den Dienst für die Fernwartung ließ sich nicht ablegen")
+
+    def _write(self, name: str, data: dict, failed: str) -> None:
+        """A file in the folder: written as a new file (0600) and renamed into place."""
+        tmp = self.folder / f".{name}.{secrets.token_hex(4)}.tmp"
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"id": rid, **request}, fh)
-            os.replace(tmp, self.folder / REQUEST)
+                json.dump(data, fh)
+            os.replace(tmp, self.folder / name)
         except OSError as exc:
             try:
                 tmp.unlink()
             except OSError:
                 pass
-            raise ActionError(f"Die Anfrage an den Dienst für die Fernwartung ließ sich nicht ablegen ({exc.strerror}).",
-                              500) from exc
+            raise ActionError(f"{failed} ({exc.strerror}).", 500) from exc
 
     def _withdraw(self, rid: str) -> bool:
         """Take our request back if the root service has not picked it up. True if it was still there."""
@@ -392,10 +636,13 @@ class Remote:
         """Take what the root service reported: Tailscale's state, the login's QR code, the job's progress."""
         ts, qr, device = _tailscale(status.get("tailscale")), status.get("qr"), status.get("device")
         login, state, at = status.get("login_url"), status.get("state"), _text(status.get("at"), 40)
+        follow = False
         with self._free:
             if isinstance(device, str) and re.fullmatch(r"[0-9a-f]{8}", device):
                 self.device = device   # as the Pi names itself in Tailscale
             if ts is not None:
+                if ts.get("state") != (self._ts or {}).get("state"):
+                    self._wake.set()   # e.g. on now: the guard decides whether that may be
                 self._ts, self._at = ts, at
                 if not ts.get("auth_url"):
                     self._login = None   # signed in, logged out or given up: no link is open any more
@@ -408,6 +655,10 @@ class Remote:
                     job.update(state="running", phase=phase if phase in ("installing", "connecting") else job["phase"])
                 elif state in ("done", "failed") and job["state"] not in ("done", "failed"):
                     job.update(state=state, phase=None, message=_text(status.get("message"), 300), finished=at or _now())
-                    if self._owner == job["id"]:   # in the same step, so the page never sees "done" but busy
+                    if self._owner == job["id"]:   # in the same step, so the page never sees "done" but busy …
                         self._doing = self._owner = None
                         self._free.notify_all()
+                    if not self._watching and self._waiting():   # … or "done" with a login nobody follows
+                        self._watching = follow = True
+        if follow:
+            threading.Thread(target=self._watch, name="remote-watch", daemon=True).start()

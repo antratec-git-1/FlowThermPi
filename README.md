@@ -18,6 +18,8 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   vorher lief: Heizplan bzw. die vorherige Temperatur; ohne beides 20 °C bzw. der Plan des Raums.
 - **Wieder nach Plan** erscheint, wenn ein Raum fest eingestellt ist, aber einen Heizplan hat.
 - Hinweise wie „Fenster offen – die Heizung macht eine Pause“ oder „Keine Verbindung zur Heizung“.
+- **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
+  sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 
 **Einrichtung** (Knopf oben rechts): Heizungen, Räume, Heizpläne, Kalibrierung, Uhren – alles
 Folgende. Mit **PIN festlegen** (4–8 Ziffern) wird sie geschützt; die einfache Ansicht bleibt
@@ -53,7 +55,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **WLAN** (nur auf dem Raspberry Pi): Netze in der Nähe suchen, mit Passwort verbinden, gespeicherte
   WLANs vergessen – siehe [WLAN einrichten](#wlan-einrichten).
 - **Fernwartung** (nur auf dem Raspberry Pi): den Pi mit Tailscale aus der Ferne erreichbar machen, um einem
-  Haushalt zu helfen, ohne hinzufahren – siehe [Fernwartung](#fernwartung-tailscale).
+  Haushalt zu helfen, ohne hinzufahren – von sich aus nur, solange die Bewohner es erlauben. Siehe
+  [Fernwartung](#fernwartung-tailscale).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -157,64 +160,95 @@ Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danac
 
 Damit man einem Haushalt helfen kann, ohne hinzufahren: Unter *Einrichtung › Fernwartung* kommt der Pi in das
 eigene private Netz bei [Tailscale](https://tailscale.com). Darüber öffnet man die App von überall, ohne Freigaben
-im Router. Die Fernwartung ist freiwillig; ohne sie bleibt alles im Heimnetz.
+im Router. Die Fernwartung ist freiwillig; ohne sie bleibt alles im Heimnetz. Und auch mit ihr ist der Pi von sich
+aus nur erreichbar, solange die Bewohner es erlauben – ähnlich wie bei einer Fernwartungs-Software für den PC.
 
-**Vorher, einmal:** ein eigenes Tailscale-Konto anlegen (z. B. mit dem GitHub-Login) und Tailscale auf dem eigenen
-Mac oder Handy installieren. Der Tarif *Personal* ist kostenlos und für private Nutzung gedacht (Stand November 2026:
-bis 6 Nutzer, bis 50 getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tailscale.com/pricing)).
+**Vorher, einmal:** ein eigenes Tailscale-Konto anlegen (z. B. mit dem GitHub-Login), Tailscale auf dem eigenen
+Mac oder Handy installieren und das [Tailscale-Netz einrichten](#tailscale-netz-einrichten-einmal-vor-dem-ersten-pi).
+Der Tarif *Personal* ist kostenlos und für private Nutzung gedacht (Stand November 2026: bis 6 Nutzer, bis 50
+getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tailscale.com/pricing)).
 
 1. Im Heimnetz die App öffnen, *Einrichtung › Fernwartung › Fernwartung einrichten*. Der Pi lädt Tailscale aus
    dessen offiziellem, signiertem Paketarchiv (`pkgs.tailscale.com`, etwa 30 MB). Das dauert ein paar Minuten; die
    Heizungen heizen dabei weiter.
 2. Die App zeigt einen QR-Code und einen Anmelde-Link. Mit dem Handy scannen und mit dem eigenen Tailscale-Konto
    anmelden. **Link und Code nicht weitergeben:** Wer sich damit anmeldet, holt den Pi in sein eigenes Netz.
-3. Danach zeigt die App „An – der Pi ist aus der Ferne erreichbar“ und die Adressen für unterwegs, z. B.
-   `http://flowthermpi-a1b2c3d4` (mit MagicDNS) oder `http://100.x.y.z`. Gleich danach das
-   [Tailscale-Netz einrichten](#tailscale-netz-einrichten-einmal-in-der-tailscale-verwaltung).
+3. Danach zeigt die App „An – Fernhilfe bis …“ und die Adressen für unterwegs, z. B. `http://flowthermpi-a1b2c3d4`
+   (mit MagicDNS) oder `http://100.x.y.z`. Zwei Stunden lang lässt sich das ausprobieren, dann schaltet sich die
+   Fernwartung von selbst aus – bis die Bewohner die nächste Fernhilfe erlauben.
+
+### Fernhilfe: nur, wenn die Bewohner es erlauben
+
+- Ruft ein Haushalt an, tippen die Bewohner in der Heizungsansicht ganz unten auf **Fernhilfe erlauben** und
+  bestätigen. Zwei Stunden lang ist der Pi dann aus der Ferne erreichbar; oben steht „Fernhilfe ist an – bis 16:30
+  Uhr“ mit **Beenden**. **Fernhilfe verlängern** lässt die zwei Stunden neu beginnen.
+- Auf dem eigenen Mac oder Handy Tailscale einschalten und die App unter der Adresse des Pis öffnen. Fertig?
+  **Beenden** – das geht auch aus der Ferne, in der Heizungsansicht oder unter *Einrichtung › Fernwartung*.
+- Nach zwei Stunden schaltet die App Tailscale von selbst aus (`tailscale down`), auch nach einem Neustart der App
+  oder des Pis – und ebenso, wenn jemand es auf dem Pi von Hand eingeschaltet hat.
+- Erlauben und verlängern geht nur im Heimnetz, nicht aus der Ferne (über Tailscale). So kann sich niemand selbst
+  mehr Zeit geben, als die Bewohner erlaubt haben.
+- Die Fernhilfe schaltet nur ein, was eingerichtet ist: Sie installiert nichts und startet keine neue Anmeldung.
+- *Einrichtung › Fernwartung › Wann ist der Pi erreichbar?:* **Nur nach Freigabe** (Vorgabe) oder **Immer** – dann
+  bleibt die Fernwartung dauerhaft an, und in der Heizungsansicht steht „Fernwartung ist eingeschaltet“. Ändern lässt
+  sich das nur im Heimnetz.
+- Ein Pi, der schon vor dieser Version eingerichtet wurde, ist danach ebenfalls auf „Nur nach Freigabe“ und schaltet
+  die Fernwartung gleich nach dem Update aus. Wer sie dort dauerhaft möchte, wählt im Heimnetz „Immer“.
+
+### Was sonst noch gilt
 
 - **Name:** Im Tailscale-Netz heißt der Pi `flowthermpi-` + **Gerätenummer** (die letzten 8 Zeichen seiner
   Seriennummer), damit sich mehrere Pis auseinanderhalten lassen. Die Gerätenummer steht unter *Einrichtung › Über*
   und *Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `flowthermpi.local`.
-- **Die Bewohner sehen es:** Solange die Fernwartung an ist, steht in der Heizungsansicht „Fernwartung ist
-  eingeschaltet“.
-- **Ausschalten** trennt den Pi vom Tailscale-Netz (`tailscale down`); angemeldet bleibt er. **Einschalten** geht
-  ohne neue Anmeldung, aber nur im Heimnetz. **Abmelden** (`tailscale logout`) nimmt ihn ganz heraus; danach lässt er
-  sich in der Tailscale-Verwaltung löschen.
+- **Die Bewohner sehen es:** Während einer Fernhilfe steht in der Heizungsansicht, bis wann sie läuft; bei „Immer“
+  steht dort „Fernwartung ist eingeschaltet“.
+- **Ausschalten** (bei „Nur nach Freigabe“: **Fernhilfe beenden**) trennt den Pi vom Tailscale-Netz
+  (`tailscale down`); angemeldet bleibt er. **Einschalten** geht ohne neue Anmeldung, aber nur im Heimnetz – bei „Nur
+  nach Freigabe“ als Fernhilfe für zwei Stunden. **Abmelden** (`tailscale logout`) nimmt ihn ganz heraus; danach
+  lässt er sich in der Tailscale-Verwaltung löschen.
 - **Updates:** Tailscale hält sich selbst aktuell (`tailscale set --auto-update`).
 - Der Pi übernimmt keine DNS-Einstellungen aus dem Tailscale-Netz (`--accept-dns=false`), damit Heizungen mit
   FRITZ!Box-Namen erreichbar bleiben. Er gibt nur sich selbst frei, nicht das Heimnetz (keine Subnet-Routen).
 - `--uninstall` lässt Tailscale installiert. Abmelden: `sudo tailscale logout`, entfernen: `sudo apt remove tailscale`.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage mit der gewünschten Aktion in
-  ihren Datenordner. Der Dienst `flowthermpi-remote` (root) kennt genau vier: nachsehen, einschalten (beim ersten Mal
-  mit Installieren und Anmelden), ausschalten, abmelden. Namen und Einstellungen bestimmt er selbst, ohne Shell.
-  Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Meldungen: `journalctl -u flowthermpi-remote`.
+  ihren Datenordner. Der Dienst `flowthermpi-remote` (root) kennt genau fünf: nachsehen, einschalten (beim ersten Mal
+  mit Installieren und Anmelden), nur einschalten (Fernhilfe), ausschalten, abmelden. Namen, Tag und Einstellungen
+  bestimmt er selbst, ohne Shell. Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Die
+  Einstellung und das Ende der Fernhilfe stehen in `/var/lib/flowthermpi/remote-settings.json`. Meldungen:
+  `journalctl -u flowthermpi-remote`.
 - Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Den Reiter gibt es ab Version 0.4.0; ein Pi mit 0.3.0
   bekommt ihn über den Update-Knopf.
 
-### Tailscale-Netz einrichten (einmal, in der Tailscale-Verwaltung)
+### Tailscale-Netz einrichten (einmal, vor dem ersten Pi)
 
 Von sich aus darf in einem Tailscale-Netz jedes Gerät jedes andere erreichen, also auch der Pi im einen Haushalt den
 Pi im anderen und den eigenen Mac. Deshalb in der Verwaltung ([login.tailscale.com](https://login.tailscale.com/admin)):
 
-1. **Access controls:** die Regel, nach der alle alles dürfen (`"src": ["*"]`, `"dst": ["*"]` bzw. `"*:*"`), löschen
-   und stattdessen diese beiden Abschnitte eintragen (die übrigen, etwa `ssh`, bleiben):
-   ```jsonc
-   {
-     "tagOwners": { "tag:flowthermpi": ["autogroup:admin"] },
-     "grants": [
-       // die eigenen Geräte untereinander (Mac, Handy …)
-       { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
-       // die eigenen Geräte zu den Pis: nur die App (Port 80) und SSH
-       { "src": ["autogroup:member"], "dst": ["tag:flowthermpi"], "ip": ["tcp:80", "tcp:22"] }
-     ]
-   }
-   ```
-   Für die Pis selbst gibt es keine Regel: Sie erreichen weder einander noch den Mac.
-2. **Jeden neuen Pi gleich nach der Anmeldung taggen:** *Machines* › beim Pi „…“ › *Edit ACL tags* ›
-   `tag:flowthermpi`. Bis dahin gehört er zum eigenen Konto und darf so viel wie Mac und Handy.
-3. **Ablauf ausschalten:** *Machines* › beim Pi „…“ › *Disable key expiry*. Sonst läuft seine Anmeldung nach etwa
-   sechs Monaten ab, und er muss vor Ort neu angemeldet werden. Ein Tag allein ändert daran nichts; die App zeigt
-   das Ablaufdatum, solange es eins gibt.
+**Access controls:** die Regel, nach der alle alles dürfen (`"src": ["*"]`, `"dst": ["*"]` bzw. `"*:*"`), löschen
+und stattdessen diese beiden Abschnitte eintragen (die übrigen, etwa `ssh`, bleiben):
+```jsonc
+{
+  "tagOwners": { "tag:flowthermpi": ["autogroup:admin"] },
+  "grants": [
+    // die eigenen Geräte untereinander (Mac, Handy …)
+    { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
+    // die eigenen Geräte zu den Pis: nur die App (Port 80) und SSH
+    { "src": ["autogroup:member"], "dst": ["tag:flowthermpi"], "ip": ["tcp:80", "tcp:22"] }
+  ]
+}
+```
+
+Für die Pis selbst gibt es keine Regel: Sie erreichen weder einander noch den Mac. Die Verbindung geht also nur in
+eine Richtung – von den eigenen Geräten zum Pi.
+
+Jeder Pi meldet sich selbst mit dem Tag `tag:flowthermpi` an (`--advertise-tags`). `tagOwners` erlaubt den Tag den
+Admins des Netzes – meldet ein Admin (etwa der Inhaber) den Pi mit dem QR-Code an, bekommt er den Tag gleich dabei.
+Von Hand taggen ist dann nicht nötig, und weil der Pi schon bei der ersten Anmeldung getaggt ist, läuft seine
+Anmeldung nicht ab. Ohne den Abschnitt `tagOwners` lässt Tailscale den Tag nicht zu, und die Anmeldung scheitert.
+
+Ein Pi, der vor dieser Version angemeldet wurde, hat den Tag nicht von selbst: einmal *Machines* › beim Pi „…“ ›
+*Edit ACL tags* › `tag:flowthermpi` und *Disable key expiry*. Ein nachträglich vergebener Tag allein beendet den
+Ablauf nicht; die App zeigt das Ablaufdatum, solange es eins gibt.
 
 ## Heizungen im Netz suchen
 

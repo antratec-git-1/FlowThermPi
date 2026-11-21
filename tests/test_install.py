@@ -619,10 +619,12 @@ class FakeTS(install.DryRun):
         self.installed = False
         self.daemon = True        # tailscaled answers (once installed)
         self.backend = "NoState"  # before the first „tailscale up“
-        self.prefs = {"hostname": "", "accept_dns": True, "auto_update": False, "want_running": False, "control": ""}
+        self.prefs = {"hostname": "", "accept_dns": True, "auto_update": False, "want_running": False, "control": "",
+                      "tags": ""}
         self.by_hand = None       # a setting someone made on the Pi by hand, e.g. "--ssh"
         self.login = None         # login link that is open
         self.account = None       # signed in as …
+        self.tags = []            # … with these tags (asked for at login and allowed by the tailnet)
         self.url_delay = 0        # this many looks until the login link is there (slow servers)
         self.apt_error = None     # what „apt-get install“ says when it fails
         self.logins = 0
@@ -635,6 +637,7 @@ class FakeTS(install.DryRun):
         """Someone opens the login link (on their phone) and signs in."""
         assert self.login, "no login open"
         self.account, self.login = account, None
+        self.tags = [t for t in self.prefs["tags"].split(",") if t]   # tagged at the first login: the key never expires
         self.backend = "Running" if self.prefs["want_running"] else "Stopped"
 
     def execute(self, cmd, env, timeout=None):
@@ -676,8 +679,13 @@ class FakeTS(install.DryRun):
                   "TailscaleIPs": None, "Self": me, "Health": [], "CurrentTailnet": None, "User": None}
         if self.account:
             me.update(DNSName=f"{me['HostName']}.tail1234.ts.net.", UserID=4711, Online=self.backend == "Running",
-                      TailscaleIPs=["100.101.102.103", "fd7a:115c:a1e0::1"], KeyExpiry="2027-05-20T10:00:00Z")
-            result.update(TailscaleIPs=me["TailscaleIPs"], User={"4711": {"ID": 4711, "LoginName": self.account}},
+                      TailscaleIPs=["100.101.102.103", "fd7a:115c:a1e0::1"])
+            if self.tags:   # a tagged device belongs to its tags, no longer to the account that signed it in
+                me.update(Tags=list(self.tags), UserID=1000)
+            else:
+                me["KeyExpiry"] = "2027-05-20T10:00:00Z"
+            user = {"ID": 1000, "LoginName": "tagged-devices"} if self.tags else {"ID": 4711, "LoginName": self.account}
+            result.update(TailscaleIPs=me["TailscaleIPs"], User={str(user["ID"]): user},
                           CurrentTailnet={"Name": self.account, "MagicDNSSuffix": "tail1234.ts.net", "MagicDNSEnabled": True})
         return result
 
@@ -695,7 +703,8 @@ class FakeTS(install.DryRun):
                                "To proceed, either re-run your command with --reset or use the command below to explicitly "
                                f"mention the current value of all non-default settings:\n\n\ttailscale up {self.by_hand}\n")
             self.prefs.update(hostname=flags.get("hostname", ""), accept_dns=flags.get("accept-dns") != "false",
-                              want_running=True, control="https://controlplane.tailscale.com")
+                              tags=flags.get("advertise-tags", ""), want_running=True,
+                              control="https://controlplane.tailscale.com")
             if self.account:
                 self.backend = "Running"
                 return 0, json.dumps({"BackendState": "Running"}, indent="\t") + "\n", ""
@@ -716,6 +725,7 @@ class FakeTS(install.DryRun):
             if not self.account:   # as tailscaled: without a finished login there is no key to log out – an open
                 return 0, "", ""   # login link stays valid
             self.account = self.login = None
+            self.tags = []
             self.backend = "NeedsLogin"
             return 0, "", ""
         return 1, "", f"tailscale: im Test unbekannt: {a}"
@@ -775,7 +785,8 @@ class RemoteFromAppTest(Base):
         self.assertEqual(install_cmd[0][-4:], ("install", "-y", "tailscale", "tailscale-archive-keyring"))
         self.assertTrue(self.ran("apt-get", "-o", "DPkg::Lock::Timeout=300", "update"))
         self.assertEqual(self.ran("tailscale", "up"), [("tailscale", "up", "--json", "--qr", "--timeout=8s",
-                                                        "--hostname=flowthermpi-a1b2c3d4", "--accept-dns=false")])
+                                                        "--hostname=flowthermpi-a1b2c3d4", "--accept-dns=false",
+                                                        "--advertise-tags=tag:flowthermpi")])
         self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # the device number from the serial
         self.assertFalse(self.ts.prefs["accept_dns"])                         # the Pi keeps the household's DNS
         self.assertTrue(self.ts.prefs["auto_update"] and status["auto_update"])
@@ -791,10 +802,11 @@ class RemoteFromAppTest(Base):
         code, _, status = self.ask("status")
         ts = status["tailscale"]
         self.assertEqual((code, status["state"], ts["state"], ts["auth_url"]), (0, "done", "Running", None))
-        self.assertEqual((ts["dns_name"], ts["ips"], ts["user"], ts["tailnet"]),
-                         ("flowthermpi-a1b2c3d4.tail1234.ts.net", ["100.101.102.103", "fd7a:115c:a1e0::1"],
-                          "helfer@github", "helfer@github"))
-        self.assertEqual((ts["version"], ts["key_expiry"], ts["magic_dns"]), ("1.90.8", "2027-05-20T10:00:00Z", True))
+        self.assertEqual((ts["dns_name"], ts["ips"], ts["tailnet"]),
+                         ("flowthermpi-a1b2c3d4.tail1234.ts.net", ["100.101.102.103", "fd7a:115c:a1e0::1"], "helfer@github"))
+        # the Pi asked for its tag at login: nobody has to tag it by hand, and its key does not expire
+        self.assertEqual((ts["tags"], ts["user"], ts["key_expiry"]), (["tag:flowthermpi"], "tagged-devices", None))
+        self.assertEqual((ts["version"], ts["magic_dns"]), ("1.90.8", True))
         self.assertNotIn("qr", status)
         self.assertEqual(len(self.ran("apt-get")), 2)                          # installed once, not again
 
@@ -826,7 +838,36 @@ class RemoteFromAppTest(Base):
         _, _, status = self.ask("up")
         self.assertEqual(status["state"], "failed")
         self.assertIn("von Hand geändert", status["message"])
-        self.assertIn("sudo tailscale up --hostname=flowthermpi-a1b2c3d4 --accept-dns=false", status["message"])
+        self.assertIn("sudo tailscale up --hostname=flowthermpi-a1b2c3d4 --accept-dns=false "
+                      "--advertise-tags=tag:flowthermpi", status["message"])
+
+    def test_on_only_switches_on(self):
+        # „Fernhilfe erlauben“ in the residents' view: it switches on what is set up – nothing else
+        _, _, status = self.ask("on")
+        self.assertEqual((status["state"], self.fetched, self.ran("apt-get")), ("failed", [], []))
+        self.assertIn("noch nicht eingerichtet", status["message"])
+        self.ask("up")
+        self.ts.sign_in()
+        self.ask("down")
+        _, out, status = self.ask("on")
+        self.assertEqual((status["state"], status["tailscale"]["state"], status["message"]),
+                         ("done", "Running", "Die Fernwartung ist an."), out)
+        self.assertEqual(self.ran("tailscale", "up")[-1], ("tailscale", "up"))   # plain „up“: every setting stays
+        self.assertEqual((self.ts.logins, len(self.ran("tailscale", "set"))), (1, 1))   # no new login, no settings
+        _, _, status = self.ask("on")                                         # already on: nothing to do
+        self.assertEqual((status["state"], status["tailscale"]["state"]), ("done", "Running"))
+
+    def test_on_never_opens_a_login(self):
+        self.ask("up")
+        self.ts.sign_in()
+        self.ask("logout")                                                    # e.g. removed from the tailnet
+        commands = len(self.ts.commands)
+        _, _, status = self.ask("on")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("nicht angemeldet", status["message"])
+        self.assertEqual((self.ts.logins, self.ts.login, status["tailscale"]["auth_url"]), (1, None, None))
+        self.assertNotIn("login_url", status)
+        self.assertFalse([c for c in self.ts.commands[commands:] if c[:2] == ("tailscale", "up")])
 
     def test_logout_ends_an_open_login(self):
         self.ask("up")
@@ -905,7 +946,7 @@ class RemoteFromAppTest(Base):
     def test_the_request_cannot_choose_anything(self):
         _, _, status = self.ask("up", hostname="fremder-name", flags=["--advertise-routes=192.168.0.0/16"])
         self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # extra fields are ignored
-        self.assertFalse([c for c in self.ts.commands if any("advertise" in part or "fremder" in part for part in c)])
+        self.assertFalse([c for c in self.ts.commands if any("routes" in part or "fremder" in part for part in c)])
         for text in ("kaputt", '{"action": "rm -rf /"}', '{"action": ["up"]}', '["up"]'):
             code, _, status = self.ask(text)
             self.assertEqual((code, status["state"]), (0, "failed"), text)

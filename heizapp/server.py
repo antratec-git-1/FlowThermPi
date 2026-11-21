@@ -74,6 +74,10 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
         ("POST", r"/api/remote/up", lambda m, b, r: t.up(r.local_ip()), SETUP),
         ("POST", r"/api/remote/down", lambda m, b, r: t.down(r.local_ip()), SETUP),
         ("POST", r"/api/remote/logout", lambda m, b, r: t.logout(r.local_ip()), SETUP),
+        ("PUT", r"/api/remote/mode", lambda m, b, r: t.set_mode(b.get("mode"), r.local_ip()), SETUP),
+        # Fernhilfe in the residents' view, without PIN: allowing works only in the home network, ending everywhere
+        ("POST", r"/api/remote/help", lambda m, b, r: t.help(r.local_ip()), PUBLIC),
+        ("POST", r"/api/remote/help/end", lambda m, b, r: t.end(r.local_ip()), PUBLIC),
     ]
 
 
@@ -135,7 +139,7 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
                              "installed": updater.installed["installed"], "updates": updater.supported,
                              "wifi": wifi.supported, "remote": remote.supported, "device": remote.device}
             result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
-            result["remote"] = remote.summary()   # residents see when remote maintenance is on
+            result["remote"] = remote.summary(self.local_ip())   # residents see when remote maintenance is on
             return result
 
         def local_ip(self) -> str | None:

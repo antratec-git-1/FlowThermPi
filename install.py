@@ -70,7 +70,8 @@ REMOTE_UNIT = f"/etc/systemd/system/{NAME}-remote.service"   # runs this script 
 REMOTE_PATH = f"/etc/systemd/system/{NAME}-remote.path"      # watches for the app's requests about it
 REMOTE_REQUEST = "remote-request.json"   # in DATA_DIR: placed by the app (Einrichtung › Fernwartung) – just an action
 REMOTE_STATUS = "remote-status.json"     # in DATA_DIR: Tailscale's state for the app, the login link while one is open
-REMOTE_ACTIONS = ("status", "up", "down", "logout")
+REMOTE_ACTIONS = ("status", "up", "on", "down", "logout")   # „on“: Fernhilfe from the residents' view
+REMOTE_TAG = f"tag:{NAME}"               # asked for at login: the tailnet's rules then say what reaches the Pi
 TAILSCALE_PACKAGES = "https://pkgs.tailscale.com/stable"   # Tailscale's own package archive, signed by Tailscale
 TAILSCALE_KEYRING = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
 TAILSCALE_SOURCE = "/etc/apt/sources.list.d/tailscale.list"
@@ -1115,7 +1116,9 @@ def wifi_from_app(args: argparse.Namespace, system: System) -> None:
 # REMOTE_ACTIONS, and flowthermpi-remote.path runs „install.py --remote“ as root. Tailscale is installed only when
 # „up“ asks for it, from Tailscale's own signed package archive; it then keeps itself up to date (auto-update).
 # The name in the tailnet is decided here (flowthermpi-<device number>), never by the app. Signing in works with
-# a login link that the app shows as a QR code: whoever completes it decides whose tailnet the Pi joins.
+# a login link that the app shows as a QR code: whoever completes it decides whose tailnet the Pi joins. The Pi
+# asks for REMOTE_TAG when it signs in, so nobody has to tag it by hand – and a device tagged at its first login
+# keeps its key without expiry. The tailnet must name owners for that tag (README, „Tailscale-Netz einrichten“).
 def device_number(root: Path) -> str | None:
     """Eight hex digits that tell this Pi from others: the end of its serial number, part of its name in Tailscale.
     The same as heizapp.remote.device_number (the app shows it, e.g. for a sticker on the Pi)."""
@@ -1307,8 +1310,9 @@ def install_tailscale(system: System, root: Path) -> None:
 def tailscale_login(system: System, hostname: str) -> dict:
     """„tailscale up“ with this Pi's settings. Returns what it printed – the login link and its QR code when the Pi
     still has to be signed in. It waits only a few seconds: the login goes on in tailscaled, and the app follows it."""
-    code, out, err = tailscale(system, "up", "--json", "--qr", f"--timeout={TAILSCALE_LOGIN_WAIT}s",
-                               f"--hostname={hostname}", "--accept-dns=false", timeout=TAILSCALE_LOGIN_WAIT + 60)
+    settings = (f"--hostname={hostname}", "--accept-dns=false", f"--advertise-tags={REMOTE_TAG}")
+    code, out, err = tailscale(system, "up", "--json", "--qr", f"--timeout={TAILSCALE_LOGIN_WAIT}s", *settings,
+                               timeout=TAILSCALE_LOGIN_WAIT + 60)
     found: dict = {}
     for item in json_objects(out):
         found.update({key: value for key, value in item.items() if isinstance(value, str) and value})
@@ -1316,14 +1320,18 @@ def tailscale_login(system: System, hostname: str) -> dict:
         reason = found.get("Error") or first_line(err or out) or f"Fehlercode {code}"
         if "non-default" in reason:   # someone changed Tailscale's settings by hand: „up“ wants them all repeated
             reason = (f"Auf dem Pi wurden Einstellungen von Tailscale von Hand geändert. Bitte dort per SSH anmelden: "
-                      f"sudo tailscale up --hostname={hostname} --accept-dns=false – und die eigenen Einstellungen dazu")
+                      f"sudo tailscale up {' '.join(settings)} – und die eigenen Einstellungen dazu")
         raise InstallError(f"Tailscale ließ sich nicht verbinden: {reason}")
     return found
 
 
-def remote_up(system: System, root: Path, status: dict, report) -> None:
+def remote_up(system: System, root: Path, status: dict, report, setup: bool = True) -> None:
+    """„up“ (Einrichtung): install Tailscale if needed, switch it on, sign the Pi in if needed. setup=False is „on“,
+    the residents' Fernhilfe: it only switches on what is set up – it never installs anything or opens a login."""
     state = tailscale_state(system)
     if not state["installed"]:
+        if not setup:
+            raise InstallError("Die Fernwartung ist auf diesem Pi noch nicht eingerichtet.")
         status["phase"] = "installing"
         report()
         install_tailscale(system, root)
@@ -1342,6 +1350,9 @@ def remote_up(system: System, root: Path, status: dict, report) -> None:
         if code == 0:
             state = tailscale_wait(system, lambda s: s.get("state") in ("Running", "NeedsLogin", "NeedsMachineAuth"), 20)
     if state.get("state") not in ("Running", "Starting", "NeedsMachineAuth"):
+        if not setup:
+            raise InstallError("Der Pi ist bei Tailscale nicht angemeldet. Neu anmelden lässt er sich in der "
+                               "Einrichtung › Fernwartung.")
         hostname = remote_name(root)
         say(f"• Melde den Pi als „{hostname}“ bei Tailscale an …")
         printed = tailscale_login(system, hostname)
@@ -1354,10 +1365,11 @@ def remote_up(system: System, root: Path, status: dict, report) -> None:
                 status["qr"] = printed["QR"]
         if state.get("state") == "NeedsLogin" and not state.get("auth_url"):
             raise InstallError("Tailscale hat keinen Anmelde-Link geschickt. Hat der Pi Internet? Bitte gleich noch einmal versuchen.")
-    code, out, err = tailscale(system, "set", "--auto-update=true", timeout=30)   # Tailscale keeps itself up to date
-    status["auto_update"] = code == 0
-    if code:
-        say(f"  Automatische Updates von Tailscale ließen sich nicht einschalten: {first_line(err or out)}")
+    if setup:
+        code, out, err = tailscale(system, "set", "--auto-update=true", timeout=30)   # Tailscale keeps itself up to date
+        status["auto_update"] = code == 0
+        if code:
+            say(f"  Automatische Updates von Tailscale ließen sich nicht einschalten: {first_line(err or out)}")
     status["message"] = {"Running": "Die Fernwartung ist an.",
                          "NeedsLogin": "Bitte den Pi jetzt bei Tailscale anmelden.",
                          "NeedsMachineAuth": "Der Pi wartet auf die Freigabe in der Tailscale-Verwaltung."}.get(
@@ -1365,8 +1377,8 @@ def remote_up(system: System, root: Path, status: dict, report) -> None:
 
 
 def run_remote(system: System, root: Path, action: str, status: dict, report) -> None:
-    if action == "up":
-        remote_up(system, root, status, report)
+    if action in ("up", "on"):
+        remote_up(system, root, status, report, setup=action == "up")
         say(f"✓ {status['message']}")
         return
     state = tailscale_state(system)

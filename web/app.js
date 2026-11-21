@@ -453,7 +453,7 @@ function renderHome() {
     now.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }) + " · " +
     now.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) + " Uhr";
   if (!state) return;
-  document.getElementById("remote-hint").hidden = !(state.remote && state.remote.on);   // residents know when someone can look in
+  renderHelp();
   const gs = groups().filter(g => g.heaters.length);
   setHTML(document.getElementById("tiles"), gs.length ? gs.map(homeTile).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>');
@@ -478,6 +478,72 @@ async function homeOff(g) {
     buttons: [{ label: "Nein", value: null }, { label: "Ja, ausschalten", value: "yes", cls: "danger-solid" }],
   });
   if (yes) homeMode(g, "off", "ausgeschaltet");
+}
+
+// ------------------------------------------------------------------ Fernhilfe in the residents' view
+let helpPending = false;   // „Fernhilfe erlauben“ or „Beenden“ pressed, the answer is still out
+
+function helpTime(minutes) {  // 120 -> "zwei Stunden"
+  const m = minutes || 120;
+  if (m % 60) return m === 1 ? "eine Minute" : `${m} Minuten`;
+  return m === 60 ? "eine Stunde" : m === 120 ? "zwei Stunden" : `${m / 60} Stunden`;
+}
+function clockOf(at) { return new Date(at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); }
+function helpUntil(r) {  // end of the Fernhilfe while it lasts, else null
+  return r && r.supported && r.mode === "ask" && r.until && Date.parse(r.until) > Date.now() ? r.until : null;
+}
+
+function renderHelp() {
+  const r = state.remote || {};
+  const until = helpUntil(r);
+  document.getElementById("remote-hint").hidden = !(r.on && !until);   // residents know when someone can look in
+  const bar = document.getElementById("help-bar"), foot = document.getElementById("help-foot");
+  const dis = helpPending ? "disabled" : "";
+  bar.hidden = !until;
+  if (until) setHTML(bar, `<p>${r.on ? `<b>Fernhilfe ist an</b> – bis ${esc(clockOf(until))} Uhr. Die Heizung kann jetzt aus
+      der Ferne eingestellt werden.` : `<b>Fernhilfe ist erlaubt</b> bis ${esc(clockOf(until))} Uhr – verbindet sich noch …`}</p>
+    <button class="big-btn" data-action="help-end" ${dis}>Beenden</button>`);
+  const offer = r.supported && r.mode === "ask" && r.ready && !r.afar;   // from afar nobody can allow it
+  foot.hidden = !offer;
+  if (offer) setHTML(foot, `<button class="big-btn quiet" data-action="help-start" ${dis}>${until ? "Fernhilfe verlängern …"
+      : "Fernhilfe erlauben …"}</button>
+    ${until ? "" : `<p>Damit sich die Heizung aus der Ferne einstellen lässt – für ${esc(helpTime(r.help_minutes))}.</p>`}`);
+}
+
+async function helpStart() {
+  const r = state.remote || {};
+  const longer = !!helpUntil(r);
+  const until = clockOf(Date.now() + (r.help_minutes || 120) * 60000);
+  const yes = await ask({
+    title: longer ? "Fernhilfe verlängern?" : "Fernhilfe erlauben?",
+    text: longer ? `Die Fernhilfe läuft dann bis etwa ${until} Uhr.`
+      : `Die Heizungs-App lässt sich dann ${helpTime(r.help_minutes)} lang aus der Ferne öffnen und einstellen, bis etwa ` +
+        `${until} Uhr. Danach endet die Fernhilfe von selbst – oder vorher mit „Beenden“.`,
+    buttons: [{ label: "Abbrechen", value: null }, { label: longer ? "Ja, verlängern" : "Ja, erlauben", value: "yes", cls: "primary" }],
+  });
+  if (yes) helpDo("api/remote/help");
+}
+
+async function helpEnd() {
+  const yes = await ask({
+    title: "Fernhilfe beenden?",
+    text: (state.remote && state.remote.afar ? "Du bist gerade aus der Ferne hier – diese Seite ist danach weg. " : "") +
+      "Die Heizungs-App lässt sich dann nicht mehr aus der Ferne öffnen.",
+    buttons: [{ label: "Nein", value: null }, { label: "Ja, beenden", value: "yes", cls: "primary" }],
+  });
+  if (yes) helpDo("api/remote/help/end");
+}
+
+async function helpDo(url) {
+  helpPending = true;
+  render();
+  try {
+    const res = await api("POST", url);
+    if (res.remote) state.remote = res.remote;
+    if (res.message) toast(res.message);
+  } catch (e) { toast(e.message, true); }
+  helpPending = false;
+  await refresh();
 }
 
 // ------------------------------------------------------------------ dialog (confirmations and PIN)
@@ -1754,7 +1820,7 @@ function renderWifi(el) {
 // ------------------------------------------------------------------ Fernwartung ("Einrichtung › Fernwartung")
 let remote = null;          // what api/remote answered: tailscale (state, name, addresses, login link), job, device
 let remoteError = null;     // api/remote could not be loaded
-let remotePending = null;   // a button pressed here whose answer is still out: "refresh" | "up" | "down" | "logout"
+let remotePending = null;   // a button pressed here whose answer is still out: "refresh" | "up" | "down" | "logout" | "mode"
 let remoteSeen = null;      // id of the setup whose failure was closed with "OK"
 let remoteTimer = null;     // polls every 2 s while the Pi installs, connects or waits for the login
 
@@ -1815,11 +1881,37 @@ async function remoteSetup() {
 function farAway() { return remote && remote.via_tailscale ? "Du bist gerade aus der Ferne hier – diese Seite ist danach weg. " : ""; }
 
 async function remoteOff() {
-  const yes = await ask({ title: "Fernwartung ausschalten?",
-    text: farAway() + "Der Pi ist dann nicht mehr aus der Ferne erreichbar. Wieder einschalten lässt sie sich nur hier im " +
-      "Heimnetz, in der Einrichtung. Angemeldet bleibt der Pi trotzdem.",
-    buttons: [{ label: "Abbrechen", value: null }, { label: "Ausschalten", value: "yes", cls: "danger-solid" }] });
+  const ask_ = remote && remote.mode === "ask";
+  const yes = await ask({ title: ask_ ? "Fernhilfe beenden?" : "Fernwartung ausschalten?",
+    text: farAway() + (ask_ ? "Der Pi ist dann nicht mehr aus der Ferne erreichbar, bis die Bewohner wieder Fernhilfe erlauben."
+      : "Der Pi ist dann nicht mehr aus der Ferne erreichbar. Wieder einschalten lässt sie sich nur hier im Heimnetz, in der " +
+        "Einrichtung.") + " Angemeldet bleibt der Pi trotzdem.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: ask_ ? "Beenden" : "Ausschalten", value: "yes", cls: "danger-solid" }] });
   if (yes) remoteDo("down");
+}
+
+async function remoteMode(mode) {
+  if (!remote || remote.mode === mode || remoteBusy()) return;
+  if (mode === "always") {
+    const yes = await ask({ title: "Immer erreichbar?",
+      text: "Der Pi ist dann dauerhaft aus der Ferne erreichbar, ohne dass die Bewohner es jedes Mal erlauben. Sie sehen in " +
+        "der Heizungsansicht nur den Hinweis „Fernwartung ist eingeschaltet“.",
+      buttons: [{ label: "Abbrechen", value: null }, { label: "Immer erreichbar", value: "yes", cls: "primary" }] });
+    if (!yes) return;
+  }
+  remotePending = "mode";
+  render();
+  try {
+    const res = await api("PUT", "api/remote/mode", { mode });
+    remote = res.remote;
+    if (res.message) toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+    try { remote = await api("GET", "api/remote"); } catch (_) { /* shown with the next look */ }
+  }
+  remotePending = null;
+  invalidate();
+  await refresh();
 }
 
 async function remoteLogout() {
@@ -1830,12 +1922,13 @@ async function remoteLogout() {
   if (yes) remoteDo("logout");
 }
 
-function remoteStateText(t) {   // [dot, words]
+function remoteStateText(t, r) {   // [dot, words]
   if (!t.installed) return ["", "Aus – noch nicht eingerichtet"];
   if (!t.daemon) return ["offline", "Tailscale läuft gerade nicht"];
+  const until = helpUntil(r);
   switch (t.state) {
-    case "Running": return ["ok", "An – der Pi ist aus der Ferne erreichbar"];
-    case "Stopped": return ["", "Aus – angemeldet, aber ausgeschaltet"];
+    case "Running": return ["ok", until ? `An – Fernhilfe bis ${clockOf(until)} Uhr` : "An – der Pi ist aus der Ferne erreichbar"];
+    case "Stopped": return ["", r.mode === "ask" ? "Aus – bis die Bewohner Fernhilfe erlauben" : "Aus – angemeldet, aber ausgeschaltet"];
     case "Starting": return ["on", "Verbindet …"];
     case "NeedsMachineAuth": return ["on", "Wartet auf die Freigabe in der Tailscale-Verwaltung"];
     case "NeedsLogin": return t.auth_url ? ["on", "Wartet auf die Anmeldung"] : ["", "Aus – nicht angemeldet"];
@@ -1843,12 +1936,14 @@ function remoteStateText(t) {   // [dot, words]
   }
 }
 
-function remoteButtonsHTML(t, busy) {
+function remoteButtonsHTML(t, busy, r) {
   const b = (action, label, cls = "") => `<button class="${cls}" data-action="${action}" ${busy ? "disabled" : ""}>${label}</button>`;
   if (!t.installed || !t.daemon) return b("remote-setup", "Fernwartung einrichten", "primary");
+  const ask_ = r.mode === "ask";
   switch (t.state) {
-    case "Running": return b("remote-off", "Ausschalten …") + b("remote-logout", "Abmelden …");
-    case "Stopped": return b("remote-on", "Einschalten", "primary") + b("remote-logout", "Abmelden …");
+    case "Running": return b("remote-off", ask_ ? "Fernhilfe beenden …" : "Ausschalten …") + b("remote-logout", "Abmelden …");
+    case "Stopped": return b("remote-on", ask_ ? `Für ${helpTime(r.help_minutes)} einschalten` : "Einschalten", "primary") +
+      b("remote-logout", "Abmelden …");
     case "Starting": case "NeedsMachineAuth": return b("remote-cancel", "Abbrechen");
     case "NeedsLogin": return t.auth_url ? "" : b("remote-setup", "Fernwartung einrichten", "primary");   // the login card has its own
     default: return "";
@@ -1875,13 +1970,15 @@ function remoteStatusHTML(r) {
   let body;
   if (remoteRunning()) {
     const installing = j.phase === "installing";
-    body = `<p class="searching"><b>${installing ? "Tailscale wird installiert …" : "Verbinde mit Tailscale …"}</b></p>
+    const signedIn = t && t.daemon && ["Stopped", "Running", "Starting"].includes(t.state);   // only switched on
+    body = `<p class="searching"><b>${installing ? "Tailscale wird installiert …" : signedIn ? "Schalte die Fernwartung ein …"
+        : "Verbinde mit Tailscale …"}</b></p>
       <p class="muted">${installing ? "Das dauert ein paar Minuten. Die Heizungen heizen dabei ganz normal weiter."
-        : "Gleich erscheint hier der Anmelde-Link."}</p>`;
+        : signedIn ? "Einen Moment bitte." : "Gleich erscheint hier der Anmelde-Link."}</p>`;
   } else if (!t) {
     body = `<p class="${r.error ? "error-text" : "searching"}">${esc(r.error || "Frage den Pi …")}</p>`;
   } else {
-    const [dot, words] = remoteStateText(t);
+    const [dot, words] = remoteStateText(t, r);
     body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b>
         ${!t.daemon && t.problem ? `<span class="muted">${esc(t.problem)}</span>` : ""}</span>
         ${r.via_tailscale ? `<span class="tag ok">darüber bist du gerade verbunden</span>` : ""}</li></ul>
@@ -1889,7 +1986,9 @@ function remoteStatusHTML(r) {
         nicht verwendet: „Fernwartung einrichten“ startet eine neue als „${esc(r.hostname)}“.</p>` : ""}
       ${t.daemon && ["Running", "Stopped"].includes(t.state) ? remoteFactsHTML(t) : ""}
       ${r.error ? `<p class="error-text">${esc(r.error)}</p>` : ""}
-      <div class="row">${remoteButtonsHTML(t, busy)}</div>`;
+      <div class="row">${remoteButtonsHTML(t, busy, r)}</div>
+      ${r.via_tailscale && helpUntil(r) ? `<p class="hint">Verlängern können nur die Bewohner, in der Heizungsansicht mit
+        „Fernhilfe verlängern“.</p>` : ""}`;
   }
   const failed = j && !remoteRunning() && j.state === "failed" && j.id !== remoteSeen && j.finished &&
     Date.now() - Date.parse(j.finished) < 30 * 60 * 1000;
@@ -1916,7 +2015,25 @@ function remoteLoginHTML(r) {
       : `<p class="muted">Noch nicht angemeldet. <button class="small" data-action="remote-refresh" ${busy ? "disabled" : ""}>Neu prüfen</button></p>`}
     <p class="hint warn">Wer sich mit diesem Link anmeldet, kann die Heizungs-App danach aus der Ferne öffnen. Link und Code
       deshalb nicht weitergeben.</p>
+    <p class="hint">Der Pi meldet sich mit dem Tag <b>tag:flowthermpi</b> an. Das klappt nur, wenn das Tailscale-Netz diesen
+      Tag kennt – einmal einzurichten, wie in der Anleitung unter „Tailscale-Netz einrichten“.</p>
     <div class="row"><button data-action="remote-cancel" ${busy ? "disabled" : ""}>Abbrechen</button></div>
+  </div>`;
+}
+
+function remoteModeHTML(r) {
+  const off = r.via_tailscale || remoteBusy() ? "disabled" : "";
+  const choice = (mode, title, text) => `<button class="choice ${r.mode === mode ? "active" : ""}" data-action="remote-mode"
+      data-mode="${mode}" aria-pressed="${r.mode === mode}" ${off}><b>${title}</b><span>${text}</span></button>`;
+  return `<div class="card remote-mode">
+    <h2>Wann ist der Pi erreichbar?</h2>
+    <div class="choices">
+      ${choice("ask", "Nur nach Freigabe (empfohlen)", `Die Bewohner tippen in der Heizungsansicht auf „Fernhilfe erlauben“. Dann
+        ist der Pi ${esc(helpTime(r.help_minutes))} lang erreichbar, danach schaltet er die Fernwartung von selbst aus.`)}
+      ${choice("always", "Immer", "Der Pi ist dauerhaft aus der Ferne erreichbar. Die Bewohner sehen in der Heizungsansicht " +
+        "„Fernwartung ist eingeschaltet“.")}
+    </div>
+    ${r.via_tailscale ? `<p class="hint">Das lässt sich nur im Heimnetz ändern, nicht aus der Ferne.</p>` : ""}
   </div>`;
 }
 
@@ -1925,8 +2042,9 @@ function remoteAboutHTML(r) {
     <h2>So funktioniert die Fernwartung</h2>
     <p>Der Pi kommt in dein privates Netz bei <b>Tailscale</b>. Von deinem Rechner oder Handy aus öffnest du die
       Heizungs-App dann von überall – ohne Freigaben im Router. Für private Nutzung ist Tailscale kostenlos.</p>
+    <p>Was aus der Ferne erreichbar ist, legen die Regeln deines Tailscale-Netzes fest. Mit denen aus der Anleitung sind
+      es nur die Heizungs-App und SSH – und der Pi selbst erreicht keines deiner Geräte.</p>
     <p>Im Heimnetz bleibt die App wie gewohnt unter <b>${esc(appURL(r.lan + ".local"))}</b> erreichbar.</p>
-    <p class="hint">Die Bewohner sehen in der Heizungsansicht, wenn die Fernwartung eingeschaltet ist.</p>
   </div>`;
 }
 
@@ -1935,7 +2053,7 @@ function renderRemote(el) {
   if (!r) return setHTML(el, `<div class="card"><p class="${remoteError ? "error-text" : "searching"}">${esc(remoteError || "Frage den Pi …")}</p></div>`);
   if (!r.supported) return setHTML(el, `<div class="card"><p>Fernwartung gibt es nur, wenn FlowThermPi mit dem
     Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
-  setHTML(el, remoteStatusHTML(r) + remoteLoginHTML(r) + remoteAboutHTML(r));
+  setHTML(el, remoteStatusHTML(r) + remoteLoginHTML(r) + remoteModeHTML(r) + remoteAboutHTML(r));
 }
 
 // ------------------------------------------------------------------ events
@@ -1957,6 +2075,8 @@ document.addEventListener("click", e => {
     case "home-off": return homeOff(groupFor(tile));
     case "home-plan": return homeMode(groupFor(tile), "auto", "läuft wieder nach Plan");
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
+    case "help-start": return helpStart();
+    case "help-end": return helpEnd();
   }
   if (t.dataset.subtab) {
     deviceTab = t.dataset.subtab;
@@ -2039,6 +2159,7 @@ document.addEventListener("click", e => {
     case "remote-logout": return remoteLogout();
     case "remote-cancel": return remoteDo("logout", { okText: "Anmeldung abgebrochen." });
     case "remote-ok": remoteSeen = remote && remote.job && remote.job.id; return render();
+    case "remote-mode": return remoteMode(t.dataset.mode);
   }
 });
 
