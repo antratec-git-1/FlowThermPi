@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_heater import EMPTY, FakeHeater  # noqa: E402
-from fake_shelly import HT_STATUS, FakeShelly  # noqa: E402
+from fake_shelly import FakePill, FakeShelly  # noqa: E402
 from heizapp import coap, discovery, plans, shelly  # noqa: E402
 from heizapp.device import AuthError, Heater, NotApplied, ReadOnlyError  # noqa: E402
 from heizapp.server import make_server  # noqa: E402
@@ -177,28 +177,56 @@ class DiscoveryTest(unittest.TestCase):
             a.close()
             b.close()
 
-    def test_sensor_scan_lists_only_temperature_sensors(self):
-        ht = FakeShelly()
+    def test_sensor_scan_lists_only_pills(self):
+        pill = FakePill(name="pill-1", probes={100: 21.4, 101: None}, update="2.0.3")
+        dht = FakePill(ident="shellypill-112233445566", mode="dht22")
+        locked = FakePill(ident="shellypill-665544332211", password=True)
+        ht = FakeShelly()                                                     # Shelly H&T Gen3: no longer listed
         plug = FakeShelly(ident="shellyplugsg3-112233445566", app="PlugSG3", status={"switch:0": {"id": 0, "output": True}})
-        locked = FakeShelly(ident="shellyhtg3-665544332211", password=True, name="Bad")
+        devices = (pill, dht, locked, ht, plug)
         with socket.socket() as s:   # an address where nothing listens
             s.bind(("127.0.0.1", 0))
             closed = s.getsockname()[1]
         try:
-            found = shelly.scan([("127.0.0.1", p) for p in (ht.port, plug.port, closed, locked.port)], timeout=0.5)
+            found = shelly.scan([("127.0.0.1", d.port) for d in devices] + [("127.0.0.1", closed)], timeout=0.5)
             by_id = {f["id"]: f for f in found}
-            self.assertEqual(set(by_id), {"shellyhtg3-aabbccddeeff", "shellyhtg3-665544332211"})   # no plug
-            f = by_id["shellyhtg3-aabbccddeeff"]
-            self.assertEqual((f["model"], f["address"]), ("Shelly H&T Gen3", f"127.0.0.1:{ht.port}"))
-            self.assertEqual((f["temp"], f["humidity"], f["battery"], f["usb"], f["protected"]), (21.4, 47.2, 88, True, False))
-            g = by_id["shellyhtg3-665544332211"]
-            self.assertEqual((g["name"], g["temp"], g["protected"]), ("Bad", None, True))
-            for dev in (ht, plug, locked):    # read only: nothing but GET requests
-                self.assertTrue(dev.requests and all(m == "GET" for m, _ in dev.requests), dev.requests)
+            self.assertEqual(set(by_id), {"shellypill-aabbccddeeff", "shellypill-112233445566", "shellypill-665544332211"})
+            p = by_id["shellypill-aabbccddeeff"]
+            self.assertEqual((p["model"], p["name"], p["address"], p["mode"], p["update"], p["protected"], p["offline"]),
+                             ("Shelly Pill", "pill-1", f"127.0.0.1:{pill.port}", "onewire", "2.0.3", False, False))
+            self.assertEqual(p["probes"], [{"channel": 100, "temp": 21.4, "humidity": None, "error": None},
+                                           {"channel": 101, "temp": None, "humidity": None, "error": "read"}])
+            self.assertEqual((by_id["shellypill-112233445566"]["mode"], by_id["shellypill-112233445566"]["probes"]),
+                             ("dht22", [{"channel": 100, "temp": 22.1, "humidity": 48.5, "error": None}]))
+            q = by_id["shellypill-665544332211"]
+            self.assertEqual((q["protected"], q["probes"]), (True, []))
+            for dev in devices:    # read only: nothing but GET requests
+                self.assertTrue(all(m == "GET" for m, _ in dev.requests), dev.requests)
+            self.assertEqual(ht.requests, [("GET", "/shelly")])              # an H&T is not even read
         finally:
-            for dev in (ht, plug, locked):
+            for dev in devices:
                 dev.close()
 
+
+    def test_pill_probes_as_on_the_real_device(self):
+        # firmware 1.8.99: the DS18B20 is the dynamic component "temperature:200", left out of Shelly.GetStatus
+        real = FakePill(probes={200: 25.4})
+        older = FakePill(ident="shellypill-112233445566", probes={200: 25.4}, in_status=True)
+        many = FakePill(ident="shellypill-665544332211", probes={200: 20.1, 201: 20.4, 202: None}, page=2)
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{real.port}/rpc/Shelly.GetStatus", timeout=2) as res:
+                self.assertEqual([k for k in json.load(res) if k.startswith("temperature")], [])
+            probe = {"channel": 200, "temp": 25.4, "humidity": None, "error": None}
+            self.assertEqual(shelly.readings("127.0.0.1", real.port)["probes"], [probe])
+            self.assertEqual(shelly.readings("127.0.0.1", older.port)["probes"], [probe])
+            self.assertEqual([(x["channel"], x["temp"], x["error"]) for x in shelly.readings("127.0.0.1", many.port)["probes"]],
+                             [(200, 20.1, None), (201, 20.4, None), (202, None, "read")])
+            self.assertTrue(any("offset=2" in path for _, path in many.requests), many.requests)   # second page read
+            for dev in (real, older, many):
+                self.assertTrue(all(m == "GET" for m, _ in dev.requests), dev.requests)
+        finally:
+            for dev in (real, older, many):
+                dev.close()
 
 class ApiTest(unittest.TestCase):
     """End to end: Service + HTTP API against two simulated heaters (one without token)."""
@@ -548,99 +576,214 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/logo.jpg", timeout=5) as res:   # picture on the "Über" tab
             self.assertEqual(res.headers["Content-Type"], "image/jpeg")
 
-    def test_sensor_search_sweep(self):
-        ht = FakeShelly()
+    PILL = "shellypill-aabbccddeeff"
+
+    def pill_search(self, *pills):
+        """„Fühler suchen“, with the sweep pointed at these simulated Pills."""
+        self.service._sensor_targets = lambda nets: [("127.0.0.1", p.port) for p in pills]
+        return self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+
+    def sensor(self, sensor_id):
+        return next(s for s in self.call("GET", "/api/state")["sensors"] if s["id"] == sensor_id)
+
+    def test_pill_search_sweep(self):
+        pill = FakePill(name="pill-1")
         try:
-            self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
-            res = self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+            res = self.pill_search(pill)
             self.assertEqual(res["networks"], ["192.168.5.0/24"])
-            self.assertEqual([(f["id"], f["temp"]) for f in res["sensors"]], [("shellyhtg3-aabbccddeeff", 21.4)])
+            self.assertEqual([(p["id"], p["mode"], [(x["channel"], x["temp"]) for x in p["probes"]]) for p in res["pills"]],
+                             [(self.PILL, "onewire", [(100, 21.4)])])
             self.call("POST", "/api/sensors/discover", {"network": "8.8.8"}, expect=400)   # not a home network
         finally:
-            ht.close()
+            pill.close()
 
     def test_sensor_save_assign_and_remove(self):
-        sid = "shellyhtg3-aabbccddeeff"
-        ht = FakeShelly(name="Shelly Wohnzimmer")
-        self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
-        self.call("POST", "/api/sensors", {"id": sid}, expect=404)            # the search has not seen it yet
-        self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
-        ht.close()                                                           # asleep again – saving still works
-        room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
-        self.call("POST", "/api/sensors", {"id": sid, "room": "r-gibtsnicht"}, expect=404)
-        self.call("POST", "/api/sensors", {"id": sid, "name": "", "room": room})
-        self.call("POST", "/api/sensors", {"id": sid}, expect=409)            # only once
-        state = self.call("GET", "/api/state")
-        s = state["sensors"][0]
-        self.assertEqual((s["id"], s["name"], s["room"], s["temp"], s["humidity"], s["usb"]),
-                         (sid, "Shelly Wohnzimmer", room, 21.4, 47.2, True))
-        self.assertTrue(s["measured_at"])
-        self.assertEqual(next(r for r in state["rooms"] if r["id"] == room)["sensors"], [sid])
-
-        awake = FakeShelly(status={**HT_STATUS, "temperature:0": {"id": 0, "tC": 19.5}})   # wakes up at a new address
+        one, two = f"{self.PILL}-100", f"{self.PILL}-101"
+        pill = FakePill(name="pill-1", probes={100: 21.4, 101: 19.8})
         try:
-            self.service._sensor_targets = lambda nets: [("127.0.0.1", awake.port)]
-            self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
-        finally:
-            awake.close()
-        s = self.call("GET", "/api/state")["sensors"][0]
-        self.assertEqual((s["temp"], s["host"]), (19.5, f"127.0.0.1:{awake.port}"))
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100}, expect=404)   # no search yet
+            self.pill_search(pill)
+            room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 102}, expect=404)   # no such probe
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100, "room": "r-gibtsnicht"}, expect=404)
+            res = self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100, "name": "", "room": room})
+            self.assertEqual((res["id"], res["message"]), (one, "Fühler „pill-1“ gespeichert."))
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100}, expect=409)   # only once
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 101})               # the second probe
+            state = self.call("GET", "/api/state")
+            a, b = sorted(state["sensors"], key=lambda s: s["channel"])
+            self.assertEqual((a["id"], a["name"], a["room"], a["temp"], a["online"], a["error"], a["mode"]),
+                             (one, "pill-1 · Fühler 1", room, 21.4, True, None, "onewire"))
+            self.assertEqual((b["id"], b["name"], b["room"], b["temp"]), (two, "pill-1 · Fühler 2", None, 19.8))
+            self.assertTrue(a["measured_at"])
+            self.assertEqual(next(r for r in state["rooms"] if r["id"] == room)["sensors"], [one])
 
-        self.call("PATCH", f"/api/sensors/{sid}", {"name": "Salon Fenster", "room": None})
-        s = self.call("GET", "/api/state")["sensors"][0]
-        self.assertEqual((s["name"], s["room"]), ("Salon Fenster", None))
-        self.call("PATCH", f"/api/sensors/{sid}", {"room": room})
-        self.call("DELETE", f"/api/rooms/{room}")                             # deleting the room unassigns the sensor
-        self.assertIsNone(self.call("GET", "/api/state")["sensors"][0]["room"])
-        self.call("DELETE", f"/api/sensors/{sid}")
-        self.assertEqual(self.call("GET", "/api/state")["sensors"], [])
-        self.call("DELETE", f"/api/sensors/{sid}", expect=404)
+            self.call("PATCH", f"/api/sensors/{one}", {"name": "Salon Fenster", "room": None})
+            self.assertEqual((self.sensor(one)["name"], self.sensor(one)["room"]), ("Salon Fenster", None))
+            self.call("PATCH", f"/api/sensors/{one}", {"room": room})
+            self.call("DELETE", f"/api/rooms/{room}")                         # deleting the room unassigns the sensor
+            self.assertIsNone(self.sensor(one)["room"])
+            self.call("DELETE", f"/api/sensors/{one}")
+            self.assertEqual([s["name"] for s in self.call("GET", "/api/state")["sensors"]], ["pill-1"])   # alone again
+            self.call("DELETE", f"/api/sensors/{one}", expect=404)
+        finally:
+            pill.close()
 
     def test_sensor_refresh(self):
-        sid = "shellyhtg3-aabbccddeeff"
-        ht = FakeShelly()
-        self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
-        self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
-        self.call("POST", "/api/sensors", {"id": sid})
-        ht.status = {**HT_STATUS, "temperature:0": {"id": 0, "tC": 23.0}}
-        res = self.call("POST", f"/api/sensors/{sid}/refresh")               # awake at its address
-        self.assertEqual((res["updated"], res["message"]), (True, "Shelly H&T Gen3: 23,0 °C"))
-        self.assertEqual(self.call("GET", "/api/state")["sensors"][0]["temp"], 23.0)
-        ht.close()
-        self.assertEqual(self.call("POST", f"/api/sensors/{sid}/refresh"), {"updated": False, "asleep": True})
-        moved = FakeShelly(status={**HT_STATUS, "temperature:0": {"id": 0, "tC": 20.5}})   # woke up at a new address
+        sid = f"{self.PILL}-100"
+        pill = FakePill(name="pill-1")
+        self.pill_search(pill)
+        self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100})
+        pill.probes[100] = 23.0
+        res = self.call("POST", f"/api/sensors/{sid}/refresh")               # at its address, at once
+        self.assertEqual((res["updated"], res["message"]), (True, "pill-1: 23,0 °C"))
+        self.assertEqual(self.sensor(sid)["temp"], 23.0)
+        pill.probes[100] = None                                              # the probe gives no value
+        self.assertIn("keinen Wert", self.call("POST", f"/api/sensors/{sid}/refresh", expect=409)["error"])
+        pill.probes = {}                                                     # unplugged
+        self.assertIn("meldet diesen Fühler nicht", self.call("POST", f"/api/sensors/{sid}/refresh", expect=409)["error"])
+        s = self.sensor(sid)
+        self.assertEqual((s["online"], s["temp"]), (True, 23.0))             # the last value stays
+        self.assertIn("meldet diesen Fühler nicht", s["error"])
+        pill.close()                                                         # gone, and not found anywhere else
+        self.service._sensor_targets = lambda nets: []
+        self.call("POST", f"/api/sensors/{sid}/refresh", expect=504)
+        s = self.sensor(sid)
+        self.assertEqual((s["online"], s["error"]), (False, "Die Pill antwortet nicht – ist sie am Netzteil und im WLAN?"))
+        self.assertTrue(s["offline_since"])
+        moved = FakePill(name="pill-1", probes={100: 20.5})                  # the router gave it a new address
         try:
             self.service._sensor_targets = lambda nets: [("127.0.0.1", moved.port)]
             self.assertTrue(self.call("POST", f"/api/sensors/{sid}/refresh")["updated"])
         finally:
             moved.close()
-        s = self.call("GET", "/api/state")["sensors"][0]
-        self.assertEqual((s["temp"], s["host"]), (20.5, f"127.0.0.1:{moved.port}"))
+        s = self.sensor(sid)
+        self.assertEqual((s["temp"], s["host"], s["online"], s["error"]), (20.5, f"127.0.0.1:{moved.port}", True, None))
         self.call("POST", "/api/sensors/gibtsnicht/refresh", expect=404)
 
+    def test_saved_pills_are_read_every_minute(self):
+        sid, svc = f"{self.PILL}-100", self.service
+        pill = FakePill()
+        self.pill_search(pill)
+        self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100})
+        svc._sensors_saved = svc._sensors_polled = time.monotonic()         # just read and saved
+        pill.probes[100] = 22.6
+        svc.poll_sensors()                                                   # within the minute: nothing
+        self.assertEqual(self.sensor(sid)["temp"], 21.4)
+        svc._sensors_polled -= 61                                            # a minute later: read …
+        svc.poll_sensors()
+        self.assertEqual(self.sensor(sid)["temp"], 22.6)
+        self.assertEqual(svc.store.data["sensors"][sid]["last"]["temp"], 21.4)   # … but data.json only every 15 min
+        svc._sensors_polled -= 61
+        svc._sensors_saved -= 15 * 60
+        pill.probes[100] = 22.9
+        svc.poll_sensors()
+        self.assertEqual(svc.store.data["sensors"][sid]["last"]["temp"], 22.9)
+
+        pill.close()                                                         # gone from its address
+        sweeps = []
+        svc._sensor_targets = lambda nets: sweeps.append(nets) or []
+        svc._sensors_polled -= 61
+        svc._sensors_searched = time.monotonic()                            # searched a moment ago: not again yet
+        svc.poll_sensors()
+        s = self.sensor(sid)
+        self.assertEqual((s["online"], s["temp"], sweeps), (False, 22.9, []))
+        since = s["offline_since"]
+        svc._sensors_polled -= 61
+        svc._sensors_searched -= 15 * 60
+        svc.poll_sensors()
+        self.assertEqual((len(sweeps), self.sensor(sid)["offline_since"]), (1, since))   # one sweep; still since then
+
+        moved = FakePill(probes={100: 20.1})                                 # found again at a new address
+        try:
+            svc._sensor_targets = lambda nets: [("127.0.0.1", moved.port)]
+            svc._sensors_polled -= 61
+            svc._sensors_searched -= 15 * 60
+            svc.poll_sensors()
+        finally:
+            moved.close()
+        s = self.sensor(sid)
+        self.assertEqual((s["online"], s["temp"], s["host"]), (True, 20.1, f"127.0.0.1:{moved.port}"))
+        self.assertEqual(svc.store.data["sensors"][sid]["host"], f"127.0.0.1:{moved.port}")   # kept at once
+
+    def test_pill_setup_mode_and_restart(self):
+        pill = FakePill(name="pill-1", probes={})                            # nothing plugged in yet
+        try:
+            self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "dht22"}, expect=404)    # not known yet
+            self.assertEqual(self.pill_search(pill)["pills"][0]["probes"], [])
+            self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "analog_in"}, expect=400)  # no room sensor
+            self.assertEqual(pill.calls, [])
+            res = self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "dht22"})
+            self.assertEqual((res["restart"], res["message"]), (False, "Die Pill ist auf DHT22 eingestellt."))
+            self.assertEqual(pill.calls, [("Pill.SetConfig", {"config": {"mode": "dht22"}})])
+            p = self.pill_search(pill)["pills"][0]
+            self.assertEqual((p["mode"], [(x["temp"], x["humidity"]) for x in p["probes"]]), ("dht22", [(22.1, 48.5)]))
+
+            pill.restart_required = True                                     # this time the mode needs a restart
+            res = self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "onewire"})
+            self.assertTrue(res["restart"])
+            self.assertIn("startet neu", res["message"])
+            self.assertEqual([c[0] for c in pill.calls[1:]], ["Pill.SetConfig", "Shelly.Reboot"])
+            self.assertEqual((pill.mode, pill.reboots), ("onewire", 1))
+            self.assertTrue(self.call("POST", f"/api/pills/{self.PILL}/restart")["restart"])   # e.g. after plugging in
+            self.assertEqual(pill.reboots, 2)
+        finally:
+            pill.close()
+        other = FakePill(ident="shellypill-0123456789ab")                    # another Pill now has its address
+        try:
+            self.service._found_pills[self.PILL]["pill"]["address"] = f"127.0.0.1:{other.port}"
+            self.call("POST", f"/api/pills/{self.PILL}/restart", expect=504)
+            self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "onewire"}, expect=504)
+            self.assertEqual(other.calls, [])                                # nothing written to the wrong device
+        finally:
+            other.close()
+        locked = FakePill(password=True)
+        try:
+            self.pill_search(locked)
+            self.assertIn("Passwort", self.call("POST", f"/api/pills/{self.PILL}/mode", {"mode": "onewire"},
+                                                expect=409)["error"])
+            self.call("PUT", "/api/setup/pin", {"pin": "1234"})              # setup only, like everything here
+            self.call("POST", f"/api/pills/{self.PILL}/restart", cookie="nicht-angemeldet", expect=403)
+        finally:
+            locked.close()
+
+    def test_old_ht_sensors_are_removed(self):
+        path = Path(self.tmp.name, "data.json")
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        pill_sensor = {"name": "Flur", "room": None, "pill": self.PILL, "channel": 100, "model": "Shelly Pill",
+                       "host": "192.168.1.30"}
+        data["sensors"] = {"shellyhtg3-aabbccddeeff": {"name": "Wohnzimmer", "room": None, "model": "Shelly H&T Gen3",
+                                                       "host": "192.168.1.31"},
+                           f"{self.PILL}-100": pill_sensor}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertLogs("heizapp", level="INFO") as logs:
+            service = Service(str(Path(self.tmp.name, "heizungen.conf")), str(path), poll_interval=3600)
+        self.assertEqual(service.store.data["sensors"], {f"{self.PILL}-100": pill_sensor})
+        self.assertEqual(list(json.loads(path.read_text(encoding="utf-8"))["sensors"]), [f"{self.PILL}-100"])
+        self.assertTrue(any("Wohnzimmer" in line and "H&T" in line for line in logs.output), logs.output)
+
     def test_sensor_compares_with_heaters_of_its_room(self):
-        sid = "shellyhtg3-aabbccddeeff"
+        sid = f"{self.PILL}-100"
         self.service.poll_all()
         room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
         self.call("PATCH", "/api/heaters/91110001", {"room": room})          # shows 21.5 °C
-        ht = FakeShelly()                                                     # measures 21.4 °C
+        pill = FakePill()                                                    # measures 21.4 °C
         try:
-            self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
-            self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
-            self.call("POST", "/api/sensors", {"id": sid, "room": room})
-            s = self.call("GET", "/api/state")["sensors"][0]
+            self.pill_search(pill)
+            self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100, "room": room})
+            s = self.sensor(sid)
             self.assertEqual(s["compare"], [{"heater": "91110001", "name": s["compare"][0]["name"], "temp": 21.5,
                                              "corr": 0.0, "deviation": 0.1, "ok": True}])
-            self.a.values["room_temp"] = 228                                  # the heater warms its own sensor
+            self.a.values["room_temp"] = 228                                 # the heater warms its own sensor
             self.service.poll_all()
-            self.call("POST", f"/api/sensors/{sid}/refresh")
-            c = self.call("GET", "/api/state")["sensors"][0]["compare"][0]
+            self.service.poll_sensors(force=True)                            # the next reading pairs them anew
+            c = self.sensor(sid)["compare"][0]
             self.assertEqual((c["temp"], c["deviation"], c["ok"]), (22.8, 1.4, False))
-            self.call("PATCH", "/api/heaters/92220002", {"room": room})      # joined later: no common reading yet
-            c = self.call("GET", "/api/state")["sensors"][0]["compare"]
+            self.call("PATCH", "/api/heaters/92220002", {"room": room})     # joined later: no common reading yet
+            c = self.sensor(sid)["compare"]
             self.assertEqual([(x["heater"], x["deviation"]) for x in c], [("91110001", 1.4), ("92220002", None)])
         finally:
-            ht.close()
+            pill.close()
 
     def test_heater_clocks_wait_until_own_clock_is_right(self):
         from heizapp import service as service_module   # e.g. a Raspberry Pi right after a power cut

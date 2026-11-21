@@ -177,6 +177,9 @@ dd { margin: 0; word-break: break-word; }
 .tile-now { display: flex; align-items: baseline; gap: 10px; }
 .now-temp { font-size: 56px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .now-label { font-size: 19px; color: var(--muted); }
+.tile-measure { display: grid; gap: 6px; }
+.tile-sensor { margin: 0; font-size: 19px; color: var(--muted); }
+.tile-sensor b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px;
             background: var(--bg); border-radius: 18px; padding: 10px; }
 .step { display: grid; justify-items: center; gap: 2px; min-height: 88px; padding: 8px 6px; border-radius: 16px;
@@ -254,8 +257,13 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .subtabs button[aria-selected="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .subtabs button[aria-selected="true"] .count { color: inherit; }
 .device-head button + button { margin-left: 6px; }
-.sensor-wait { margin: 8px 0 4px; padding: 8px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 14px; }
-.sensor-wait .searching { font-weight: 600; margin-right: 4px; }
+/* „Fühler suchen“: one block per Shelly Pill, its probes below */
+.pill-found { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.pill-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+.pill-head .hname .muted { font-size: 13px; margin-left: 4px; }
+.pill-found .scan-list { margin: 6px 0 0 17px; border-top: 0; }
+.pill-found .hint { margin: 6px 0 0 17px; }
+.pill-form label.check { font-size: 15px; }
 
 /* calibration: sensor vs. heaters of its room */
 .calib-compare { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }

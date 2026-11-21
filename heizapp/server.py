@@ -60,6 +60,8 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
         ("PATCH", rf"/api/sensors/{i}", lambda m, b, r: s.update_sensor(m[1], b), SETUP),
         ("DELETE", rf"/api/sensors/{i}", lambda m, b, r: s.delete_sensor(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/refresh", lambda m, b, r: s.refresh_sensor(m[1]), SETUP),
+        ("POST", rf"/api/pills/{i}/mode", lambda m, b, r: s.set_pill_mode(m[1], b.get("mode")), SETUP),
+        ("POST", rf"/api/pills/{i}/restart", lambda m, b, r: s.restart_pill(m[1]), SETUP),
         ("POST", r"/api/plans", lambda m, b, r: s.create_plan(b), SETUP),
         ("PUT", rf"/api/plans/{i}", lambda m, b, r: s.update_plan(m[1], b), SETUP),
         ("DELETE", rf"/api/plans/{i}", lambda m, b, r: s.delete_plan(m[1]), SETUP),

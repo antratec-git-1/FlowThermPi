@@ -120,11 +120,15 @@ class Service:
         self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="heizung")
         self._scan_lock = threading.Lock()   # one network search at a time
         self._sensor_lock = threading.Lock()   # one sweep of the sensor search at a time
-        self._found_sensors: dict[str, dict] = {}   # id -> {mono, at, sensor}: recent search results, for „Übernehmen“
+        self._found_pills: dict[str, dict] = {}    # Pill id -> {mono, at, heaters, pill}: recent search results
+        self._pill_status: dict[str, dict] = {}    # Pill id -> {online, since, error, mode, probes …}: last reading
+        self._sensor_live: dict[str, dict] = {}    # sensor id -> latest reading (data.json gets one every 15 min)
+        self._sensors_polled = self._sensors_saved = self._sensors_searched = 0.0
         self._last_heal = 0.0
         self._last_daily_sync = None
         self._clock_trusted = False
         self._clock_warned = False
+        self._drop_old_sensors()
         known = {m.get("last_host"): k for k, m in self.store.data["heaters"].items() if not k.startswith("host:")}
         for e in self.entries:
             e.key = known.get(e.label)
@@ -161,6 +165,7 @@ class Service:
             try:
                 self.poll_all()
                 self._heal()
+                self.poll_sensors()
                 now = self.now()
                 if now.hour == DAILY_SYNC_HOUR and self._last_daily_sync != now.date():
                     self._last_daily_sync = now.date()
@@ -526,9 +531,12 @@ class Service:
     def _sensor_targets(self, networks) -> list[tuple[str, int]]:
         return [(str(ip), shelly.PORT) for net in networks for ip in net.hosts()]
 
+    def _sweep(self, nets) -> list[dict]:
+        with self._sensor_lock:
+            return shelly.scan(self._sensor_targets(nets))
+
     def find_sensors(self, network=None) -> dict:
-        """One sweep of the sensor search mode: Shelly room sensors that are awake right now (read only).
-        The web page repeats it every few seconds while the search mode is open."""
+        """„Fühler suchen“: one sweep of the home network for Shelly Pills (read only)."""
         try:
             nets = [discovery.parse_network(network)] if str(network or "").strip() else \
                 discovery.local_networks([e.cfg.host for e in self.entries])
@@ -537,26 +545,22 @@ class Service:
         if not nets:
             raise ActionError("Das Heimnetz wurde nicht erkannt – bitte das Netz angeben, z. B. 192.168.178.")
         started = time.monotonic()
-        with self._sensor_lock:
-            sensors = shelly.scan(self._sensor_targets(nets))
-        sensors.sort(key=lambda f: tuple(int(x) for x in f["address"].split(":")[0].split(".")))
-        at = self.now().isoformat(timespec="seconds")
-        heater_temps = self._heater_temps()
-        for f in sensors:
-            old = self._found_sensors.get(f["id"])
-            if f["temp"] is None and old:   # asleep again or locked: keep readings and time of the earlier sweep
-                self._found_sensors[f["id"]] = {**old, "mono": time.monotonic(),
-                                                "sensor": {**old["sensor"], "address": f["address"]}}
-            else:
-                self._found_sensors[f["id"]] = {"mono": time.monotonic(), "at": at, "sensor": f, "heaters": heater_temps}
-        self._note_sensors(sensors, at, heater_temps)
-        if sensors:
+        pills = sorted(self._sweep(nets), key=lambda p: tuple(int(x) for x in p["address"].split(":")[0].split(".")))
+        at, heater_temps = self.now().isoformat(timespec="seconds"), self._heater_temps()
+        for p in pills:
+            self._found_pills[p["id"]] = {"mono": time.monotonic(), "at": at, "heaters": heater_temps, "pill": p}
+            self._note_pill(p, at, heater_temps, save=True)
+        if pills:
             log.info("Fühlersuche in %s: %s", ", ".join(map(str, nets)),
-                     ", ".join(f"{f['model']} {f['address']}" for f in sensors))
-        return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1), "sensors": sensors}
+                     ", ".join(f"{p['name'] or p['model']} {p['address']}" for p in pills))
+        return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1), "pills": pills}
 
-    # ------------------------------------------------------------------ room sensors (Shelly)
-    FOUND_KEEP = 30 * 60   # seconds a search result can still be saved (the sensor itself is asleep again by then)
+    # ------------------------------------------------------------------ room sensors (Shelly Pill)
+    FOUND_KEEP = 30 * 60          # seconds a search result can still be saved with „Übernehmen“
+    SENSOR_EVERY = 60.0           # seconds between two readings of the saved Pills (they never sleep)
+    SENSOR_SAVE_EVERY = 15 * 60   # seconds between two readings kept in data.json (shown again after a restart)
+    SENSOR_SEARCH_EVERY = 15 * 60  # a Pill gone from its address: search the home network for it at most this often
+    NOT_ANSWERING = "Die Pill antwortet nicht – ist sie am Netzteil und im WLAN?"
 
     def _heater_temps(self) -> dict:
         """Room temperature and correction (°C) of every heater that is online right now – for the comparison
@@ -565,22 +569,99 @@ class Service:
                        "corr": e.values["temp_corr"] / 10 if isinstance(e.values.get("temp_corr"), int) else None}
                 for e in self.entries if e.online and isinstance(e.values.get("room_temp"), int)}
 
-    def _note_sensors(self, found: list[dict], at: str, heater_temps: dict | None = None) -> None:
-        """Saved sensors that a search saw: remember their current address and readings, together with the
-        room temperature of the heaters in their room at that moment (the pair the calibration compares)."""
-        hits = [f for f in found if f["id"] in self.store.data["sensors"]]
-        if not hits:
+    def _drop_old_sensors(self) -> None:
+        """Sensors saved before the Pill (Shelly H&T): the app reads only Shelly Pills now, so they go."""
+        old = {sid: m for sid, m in self.store.data["sensors"].items() if not m.get("pill")}
+        if not old:
+            return
+        with self.store.edit() as d:
+            for sid in old:
+                d["sensors"].pop(sid, None)
+        for sid, m in old.items():
+            log.info("Fühler entfernt – die App liest nur noch Shelly Pills: %s (%s)",
+                     m.get("name") or m.get("device_name") or sid, m.get("model") or "unbekanntes Modell")
+
+    def _note_pill(self, pill: dict, at: str, heater_temps: dict | None = None, save: bool = False) -> None:
+        """A Pill answered: remember what it measures for its saved sensors, together with the room temperature
+        of the heaters in their rooms at that moment (the pair the calibration compares). With save, the
+        readings also go to data.json; a new address always does."""
+        probes = {p["channel"]: p for p in pill["probes"]}
+        self._pill_status[pill["id"]] = {
+            "online": True, "since": None, "mode": pill["mode"], "firmware": pill["firmware"], "update": pill["update"],
+            "probes": probes, "error": "Die Pill ist mit einem Passwort geschützt – ihre Messwerte lassen sich nicht "
+                                       "lesen." if pill["protected"] else None}
+        data = self.store.snapshot()
+        saved = {sid: m for sid, m in data["sensors"].items() if m.get("pill") == pill["id"]}
+        if not saved:
             return
         heater_temps = self._heater_temps() if heater_temps is None else heater_temps
-        with self.store.edit() as d:
-            for f in hits:
-                meta = d["sensors"][f["id"]]
-                meta.update(host=f["address"], model=f["model"], mac=f["mac"])
-                if f["temp"] is not None:
-                    in_room = [hid for hid, h in d["heaters"].items() if meta.get("room") and h.get("room") == meta["room"]]
-                    meta["last"] = {"temp": f["temp"], "humidity": f["humidity"], "battery": f["battery"],
-                                    "usb": f["usb"], "at": at,
-                                    "heaters": {hid: heater_temps[hid] for hid in in_room if hid in heater_temps}}
+        readings = {}
+        for sid, meta in saved.items():
+            p = probes.get(meta.get("channel"))
+            if p is None or p["temp"] is None:
+                continue
+            in_room = [hid for hid, h in data["heaters"].items() if meta.get("room") and h.get("room") == meta["room"]]
+            readings[sid] = {"temp": p["temp"], "humidity": p["humidity"], "at": at,
+                             "heaters": {hid: heater_temps[hid] for hid in in_room if hid in heater_temps}}
+        self._sensor_live.update(readings)
+        if save or any(m.get("host") != pill["address"] for m in saved.values()):
+            with self.store.edit() as d:
+                for sid in saved:
+                    meta = d["sensors"].get(sid)
+                    if meta is None:   # removed in the meantime
+                        continue
+                    meta.update(host=pill["address"], device_name=pill["name"], model=pill["model"], mac=pill["mac"])
+                    if save and sid in readings:
+                        meta["last"] = readings[sid]
+
+    def _pill_offline(self, pill_id: str) -> None:
+        old = self._pill_status.get(pill_id) or {}
+        since = old.get("since") if old.get("online") is False else self.now().isoformat(timespec="seconds")
+        self._pill_status[pill_id] = {**old, "online": False, "since": since, "error": self.NOT_ANSWERING}
+
+    def _read_pill(self, pill_id: str, address) -> dict | None:
+        """The Pill pill_id at its last address, or None if it does not answer there (or another device does)."""
+        host, _, port = str(address or "").partition(":")
+        port = int(port) if port.isdigit() else shelly.PORT
+        info = shelly.probe(host, port, timeout=1.5) if host else None
+        if not info or str(info.get("id")) != pill_id:
+            return None
+        pill = shelly.describe(host, port, info)
+        return None if pill["offline"] else pill
+
+    def _locate(self, ids: set, addresses: list) -> dict:
+        """Pills that did not answer at their last address: one sweep of the home network for them."""
+        nets = discovery.local_networks([e.cfg.host for e in self.entries]
+                                        + [str(a).partition(":")[0] for a in addresses if a])
+        return {p["id"]: p for p in self._sweep(nets) if p["id"] in ids} if nets else {}
+
+    def poll_sensors(self, force: bool = False) -> None:
+        """Read every saved Pill about once a minute. One that is gone from its address is searched for in the
+        home network, at most every 15 minutes (the router may have given it a new one)."""
+        now = time.monotonic()
+        if not force and now - self._sensors_polled < self.SENSOR_EVERY:
+            return
+        self._sensors_polled = now
+        pills = {}
+        for meta in self.store.snapshot()["sensors"].values():
+            if meta.get("pill"):
+                pills.setdefault(meta["pill"], meta.get("host"))
+        if not pills:
+            return
+        save = force or now - self._sensors_saved >= self.SENSOR_SAVE_EVERY
+        at, heater_temps = self.now().isoformat(timespec="seconds"), self._heater_temps()
+        found = dict(zip(pills, self._pool.map(lambda item: self._read_pill(*item), pills.items())))
+        missing = {pid for pid, p in found.items() if p is None}
+        if missing and (force or now - self._sensors_searched >= self.SENSOR_SEARCH_EVERY):
+            self._sensors_searched = now
+            found.update(self._locate(missing, list(pills.values())))
+        for pid, p in found.items():
+            if p is None:
+                self._pill_offline(pid)
+            else:
+                self._note_pill(p, at, heater_temps, save=save)
+        if save:
+            self._sensors_saved = now
 
     def _sensor(self, sensor_id: str) -> dict:
         meta = self.store.data["sensors"].get(sensor_id)
@@ -595,23 +676,26 @@ class Service:
         return room_id
 
     def add_sensor(self, body: dict) -> dict:
-        """Save a sensor from the search mode, optionally with name and room. Uses the search result,
-        because the sensor itself is usually asleep again when „Speichern“ is pressed."""
-        sensor_id = str(body.get("id") or "")
-        hit = self._found_sensors.get(sensor_id)
+        """„Übernehmen“: save one probe of a Pill from the search, optionally with name and room."""
+        pill_id, channel = str(body.get("pill") or ""), body.get("channel")
+        hit = self._found_pills.get(pill_id)
         if not hit or time.monotonic() - hit["mono"] > self.FOUND_KEEP:
-            raise ActionError("Diesen Fühler hat die Suche nicht gefunden – bitte zuerst „Fühler suchen“.", 404)
+            raise ActionError("Diese Pill hat die Suche nicht gefunden – bitte zuerst „Fühler suchen“.", 404)
+        p = hit["pill"]
+        if isinstance(channel, bool) or channel not in [x["channel"] for x in p["probes"]]:
+            raise ActionError("Diesen Fühler hat die Pill nicht gemeldet – steckt er? Dann erneut suchen.", 404)
+        sensor_id = f"{pill_id}-{channel}"
         if sensor_id in self.store.data["sensors"]:
             raise ActionError("Dieser Fühler ist schon gespeichert.", 409)
         name = self._clean_name(body.get("name"), allow_empty=True)
         room_id = self._room_or_none(body.get("room"))
-        f = hit["sensor"]
         with self.store.edit() as d:
-            d["sensors"][sensor_id] = {"name": name, "room": room_id, "device_name": f["name"], "host": f["address"],
-                                       "model": f["model"], "mac": f["mac"], "added": self.now().isoformat(timespec="seconds")}
-        self._note_sensors([f], hit["at"], hit.get("heaters"))
-        log.info("Fühler gespeichert: %s %s", f["model"], f["address"])
-        return {"id": sensor_id, "message": f"Fühler „{name or f['name'] or f['model']}“ gespeichert."}
+            d["sensors"][sensor_id] = {"name": name, "room": room_id, "pill": pill_id, "channel": channel,
+                                       "device_name": p["name"], "host": p["address"], "model": p["model"],
+                                       "mac": p["mac"], "added": self.now().isoformat(timespec="seconds")}
+        self._note_pill(p, hit["at"], hit["heaters"], save=True)
+        log.info("Fühler gespeichert: %s %s, Fühler %s", p["model"], p["address"], channel)
+        return {"id": sensor_id, "message": f"Fühler „{self._sensor_name(sensor_id, self.store.snapshot())}“ gespeichert."}
 
     def update_sensor(self, sensor_id: str, body: dict) -> dict:
         self._sensor(sensor_id)
@@ -626,46 +710,107 @@ class Service:
         return {"message": "Gespeichert."}
 
     def refresh_sensor(self, sensor_id: str) -> dict:
-        """„Aktualisieren“: read one saved sensor now – at its last address, else search the home network for it.
-        {"updated": False, "asleep": True} if it does not answer (it sleeps; the page retries for a minute)."""
+        """„Aktualisieren“: read the sensor's Pill now – at its last address, else search the home network for it."""
         meta = self._sensor(sensor_id)
-        host, _, port = str(meta.get("host") or "").partition(":")
-        port = int(port) if port.isdigit() else shelly.PORT
-        found = None
-        if host:
-            info = shelly.probe(host, port, timeout=1.5)
-            if info and str(info.get("id")) == sensor_id:
-                found = shelly.describe(host, port, info)
-        if found is None:   # asleep, or it got a new address from the router
-            nets = discovery.local_networks([e.cfg.host for e in self.entries] + [host])
-            if nets:
-                with self._sensor_lock:
-                    found = next((f for f in shelly.scan(self._sensor_targets(nets)) if f["id"] == sensor_id), None)
-        if found is not None and found["protected"]:
-            raise ActionError("Der Fühler ist mit einem Passwort geschützt – seine Messwerte lassen sich nicht lesen.", 409)
-        if found is None or found["temp"] is None:
-            return {"updated": False, "asleep": True}
-        at = self.now().isoformat(timespec="seconds")
-        heater_temps = self._heater_temps()
-        self._found_sensors[sensor_id] = {"mono": time.monotonic(), "at": at, "sensor": found, "heaters": heater_temps}
-        self._note_sensors([found], at, heater_temps)
-        name = meta.get("name") or meta.get("device_name") or found["model"]
-        return {"updated": True, "message": f"{name}: {found['temp']:.1f} °C".replace(".", ",")}
+        pill = self._read_pill(meta["pill"], meta.get("host")) \
+            or self._locate({meta["pill"]}, [meta.get("host")]).get(meta["pill"])
+        if pill is None:
+            self._pill_offline(meta["pill"])
+            raise ActionError(self.NOT_ANSWERING, 504)
+        self._note_pill(pill, self.now().isoformat(timespec="seconds"), save=True)
+        if pill["protected"]:
+            raise ActionError("Die Pill ist mit einem Passwort geschützt – ihre Messwerte lassen sich nicht lesen.", 409)
+        probe = next((p for p in pill["probes"] if p["channel"] == meta.get("channel")), None)
+        if probe is None:
+            raise ActionError("Die Pill meldet diesen Fühler nicht – steckt er? Sonst die Pill unter „Einrichten“ "
+                              "neu starten.", 409)
+        if probe["temp"] is None:
+            raise ActionError("Der Fühler liefert gerade keinen Wert – steckt er richtig in der Pill?", 409)
+        name = self._sensor_name(sensor_id, self.store.snapshot())
+        return {"updated": True, "message": f"{name}: {probe['temp']:.1f} °C".replace(".", ",")}
 
     def delete_sensor(self, sensor_id: str) -> dict:
         self._sensor(sensor_id)
         with self.store.edit() as d:
             d["sensors"].pop(sensor_id)
+        self._sensor_live.pop(sensor_id, None)
         log.info("Fühler entfernt: %s", sensor_id)
         return {"message": "Fühler entfernt."}
 
+    def _pill_address(self, pill_id: str) -> tuple[str, int]:
+        """Where the Pill was seen last (search or saved sensors) – checked again before anything is written."""
+        hit = self._found_pills.get(pill_id)
+        address = hit["pill"]["address"] if hit else next(
+            (m["host"] for m in self.store.snapshot()["sensors"].values() if m.get("pill") == pill_id and m.get("host")),
+            None)
+        if not address:
+            raise ActionError("Diese Pill kennt die App nicht – bitte zuerst „Fühler suchen“.", 404)
+        host, _, port = address.partition(":")
+        port = int(port) if port.isdigit() else shelly.PORT
+        info = shelly.probe(host, port, timeout=2.0)
+        if not info or str(info.get("id")) != pill_id:   # gone, or another device has taken the address
+            raise ActionError("Die Pill antwortet nicht unter ihrer letzten Adresse – bitte erneut „Fühler suchen“.", 504)
+        return host, port
+
+    def set_pill_mode(self, pill_id: str, mode) -> dict:
+        """„Einrichten“: tell the Pill what is plugged in, and restart it if it needs that. Writes to the Pill."""
+        if mode not in shelly.MODES:
+            raise ActionError("Bitte wählen, was in der Pill steckt: DS18B20 oder DHT22.")
+        host, port = self._pill_address(pill_id)
+        try:
+            restart = shelly.set_mode(host, port, mode)
+            if restart:
+                shelly.restart(host, port)
+        except shelly.ShellyError as exc:
+            raise ActionError(str(exc), exc.status) from None
+        hit = self._found_pills.get(pill_id)
+        if hit:
+            hit["pill"]["mode"] = mode
+        log.info("Pill %s eingerichtet: %s%s", pill_id, shelly.MODES[mode], ", Neustart" if restart else "")
+        text = f"Die Pill ist auf {shelly.MODES[mode]} eingestellt."
+        return {"restart": restart,
+                "message": text + (" Sie startet neu – in etwa 15 Sekunden ist sie wieder da." if restart else "")}
+
+    def restart_pill(self, pill_id: str) -> dict:
+        """Restart a Pill, e.g. after plugging in a probe it has not found yet. Writes to the Pill."""
+        host, port = self._pill_address(pill_id)
+        try:
+            shelly.restart(host, port)
+        except shelly.ShellyError as exc:
+            raise ActionError(str(exc), exc.status) from None
+        log.info("Pill %s neu gestartet", pill_id)
+        return {"restart": True, "message": "Die Pill startet neu – in etwa 15 Sekunden ist sie wieder da."}
+
     CALIB_TOLERANCE = 0.5   # °C – the deviation the user accepts (heater vs. room sensor)
+
+    @staticmethod
+    def _probe_number(sensor_id: str, data: dict) -> int | None:
+        """1, 2, … if the sensor's Pill has more than one saved probe (so their default names differ), else None."""
+        meta = data["sensors"][sensor_id]
+        channels = sorted(m.get("channel") for m in data["sensors"].values() if m.get("pill") == meta.get("pill"))
+        return channels.index(meta.get("channel")) + 1 if len(channels) > 1 else None
+
+    def _sensor_name(self, sensor_id: str, data: dict) -> str:
+        meta = data["sensors"][sensor_id]
+        if meta.get("name"):
+            return meta["name"]
+        number = self._probe_number(sensor_id, data)
+        return (meta.get("device_name") or meta.get("model") or sensor_id) + (f" · Fühler {number}" if number else "")
 
     def _sensor_views(self, data: dict, heaters: list[dict]) -> list[dict]:
         views = []
         for sensor_id, meta in data["sensors"].items():
-            last = meta.get("last") or {}
+            saved, live = meta.get("last") or {}, self._sensor_live.get(sensor_id) or {}
+            last = live if live and str(live.get("at") or "") >= str(saved.get("at") or "") else saved
             room = meta.get("room") if meta.get("room") in data["rooms"] else None
+            status = self._pill_status.get(meta.get("pill")) or {}
+            error = status.get("error")
+            if status.get("online") and not error:
+                probe = (status.get("probes") or {}).get(meta.get("channel"))
+                if probe is None:
+                    error = "Die Pill meldet diesen Fühler nicht – steckt er? Sonst die Pill unter „Einrichten“ neu starten."
+                elif probe.get("temp") is None:
+                    error = "Der Fühler liefert gerade keinen Wert – steckt er richtig in der Pill?"
             pairs = last.get("heaters") or {}
             compare = []
             for h in (h for h in heaters if room and h["room"] == room):
@@ -675,13 +820,14 @@ class Service:
                 compare.append({"heater": h["id"], "name": h["name"], "temp": then.get("temp"), "corr": then.get("corr"),
                                 "deviation": deviation,
                                 "ok": None if deviation is None else abs(deviation) <= self.CALIB_TOLERANCE + 1e-9})
-            views.append({"id": sensor_id, "name": meta.get("name") or meta.get("device_name") or meta.get("model") or sensor_id,
-                          "custom_name": meta.get("name") or "", "device_name": meta.get("device_name"),
-                          "room": meta.get("room") if meta.get("room") in data["rooms"] else None,
-                          "host": meta.get("host"), "model": meta.get("model"), "mac": meta.get("mac"),
-                          "temp": last.get("temp"), "humidity": last.get("humidity"), "battery": last.get("battery"),
-                          "usb": last.get("usb"), "measured_at": last.get("at"), "compare": compare,
-                          "tolerance": self.CALIB_TOLERANCE})
+            views.append({"id": sensor_id, "name": self._sensor_name(sensor_id, data), "custom_name": meta.get("name") or "",
+                          "device_name": meta.get("device_name"), "room": room, "host": meta.get("host"),
+                          "model": meta.get("model"), "mac": meta.get("mac"), "pill": meta.get("pill"),
+                          "channel": meta.get("channel"), "probe_number": self._probe_number(sensor_id, data),
+                          "mode": status.get("mode"), "firmware": status.get("firmware"), "update": status.get("update"),
+                          "online": status.get("online"), "offline_since": status.get("since"), "error": error,
+                          "temp": last.get("temp"), "humidity": last.get("humidity"), "measured_at": last.get("at"),
+                          "compare": compare, "tolerance": self.CALIB_TOLERANCE})
         return sorted(views, key=lambda v: v["name"].lower())
 
     def _adopt(self, found: dict) -> list[dict]:

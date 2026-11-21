@@ -28,10 +28,11 @@ let deviceFilter = localStorage.getItem("heizung.deviceFilter") || "all";  // "a
 let calibForm = null;    // calibration in "Geräte": {id, measured}
 let scan = null;         // network search in "Geräte": {running} | {data} | {error}
 let scanNet = "";        // network typed for "Anderes Netz"
-let sensorSearch = null; // sensor search mode in "Geräte": {running, startedAt, found: {id: sensor}, networks, error}
-let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, name, room, placeholder}
+let sensorSearch = null; // „Fühler suchen“ in "Geräte": {running, waiting, data: {networks, seconds, pills}, error}
+let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, pill, channel, name, room, placeholder}
+let pillForm = null;     // „Einrichten“ of a Pill: {pill, at: "search"|sensor id, mode}
 let deviceTab = localStorage.getItem("heizung.deviceTab") === "sensors" ? "sensors" : "heaters";  // sub-tab of "Geräte"
-const sensorWait = {};   // "Aktualisieren" waiting for a sleeping sensor: id -> {until}
+const pillRestart = {};  // Pill id -> true while it restarts after „Einrichten“
 const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
 let updateCheck = null;  // "Nach Updates suchen" in "Über": {running} | {result} | {error}
 let updateRun = loadUpdateRun();   // update started in this browser: {from: build, at}; survives the reload
@@ -48,6 +49,10 @@ function esc(s) {
 function deg(t) { return t == null || Number.isNaN(t) ? "–" : t.toFixed(1).replace(".", ",") + " °C"; }
 function avg(list) { return list.reduce((a, b) => a + b, 0) / list.length; }
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
+function localTime(iso) {  // "2026-11-21T20:06:59" – the server's local time, as the API sends it – as a Date
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)/.exec(iso || "");
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
 function fmtTime(iso) {
   return iso ? new Date(iso).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "–";
 }
@@ -310,9 +315,8 @@ function tempWord(t) { return t == null ? "aus" : degShort(t); }   // null = gap
 function uhr(min) { const h = Math.floor(min / 60) % 24, m = min % 60; return m ? `${h}:${String(m).padStart(2, "0")} Uhr` : `${h} Uhr`; }
 
 function serverNow() {  // the server's local time (the heaters' clocks follow it), advanced since the last refresh
-  const m = state && /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)/.exec(state.now);
-  if (!m) return new Date();
-  return new Date(new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() + (Date.now() - stateAt));
+  const t = state && localTime(state.now);
+  return t ? new Date(t.getTime() + (Date.now() - stateAt)) : new Date();
 }
 function weekMinute(d) { return ((d.getDay() + 6) % 7) * 1440 + d.getHours() * 60 + d.getMinutes(); }  // Monday 0:00 = 0
 
@@ -411,10 +415,31 @@ function homeStatus(g, online, mode, target, writable) {
   return { text, tone: "" };
 }
 
+const SENSOR_FRESH_MS = 15 * 60 * 1000;   // an older reading stays off the home page (the setup shows why)
+
+function homeSensors(g) {  // the room's sensors with a fresh reading, for its home tile
+  if (g.kind !== "room") return [];
+  const now = serverNow().getTime();
+  return (state.sensors || []).filter(s => {
+    const at = localTime(s.measured_at);
+    return s.room === g.id && s.temp != null && at && now - at.getTime() <= SENSOR_FRESH_MS;
+  });
+}
+
+function homeSensorsHTML(list) {  // "Fühler: 21,3 °C · 48 % Luftfeuchte", one line per sensor
+  return list.map(s => {
+    const label = s.custom_name ? `Fühler „${esc(s.custom_name)}“` : list.length < 2 ? "Fühler"
+      : /Fühler/.test(s.name) ? esc(s.name) : `Fühler ${esc(s.name)}`;   // "pill-1 · Fühler 2" names itself
+    const humidity = s.humidity == null ? "" : ` · ${Math.round(s.humidity)} % Luftfeuchte`;
+    return `<p class="tile-sensor">${label}: <b>${esc(deg(s.temp))}</b>${humidity}</p>`;
+  }).join("");
+}
+
 function homeTile(g) {
   const key = keyOf(g);
   const online = g.heaters.filter(h => h.online);
   const temps = online.map(h => h.room_temp).filter(t => t != null);
+  const sensors = homeSensors(g);
   const writable = online.some(h => h.writable);
   const p = pending[key];
   const target = p ? p.temp : currentTarget(g);
@@ -440,7 +465,10 @@ function homeTile(g) {
     </div>`;
   return `<article class="tile ${isOff ? "is-off" : ""} ${busy.has(key) ? "busy" : ""}" data-kind="${g.kind}" data-id="${esc(g.id)}">
     <div class="tile-head"><h2>${esc(g.name)}</h2>${heating && !isOff ? '<span class="heat-badge">heizt gerade</span>' : ""}</div>
-    <div class="tile-now"><span class="now-temp">${deg(temps.length ? avg(temps) : null)}</span><span class="now-label">im Raum</span></div>
+    <div class="tile-measure">
+      <div class="tile-now"><span class="now-temp">${deg(temps.length ? avg(temps) : null)}</span><span class="now-label">${sensors.length ? "an der Heizung" : "im Raum"}</span></div>
+      ${homeSensorsHTML(sensors)}
+    </div>
     ${setter}
     <p class="say ${say.tone}">${esc(say.text)}</p>
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
@@ -622,12 +650,12 @@ async function openSetup() {
 }
 
 async function closeSetup(auto) {
-  if ((editing || roomForm || deviceForm || calibForm || sensorForm || (wifiForm && !wifiForm.job)) && !auto) {
+  if ((editing || roomForm || deviceForm || calibForm || sensorForm || pillForm || (wifiForm && !wifiForm.job)) && !auto) {
     const yes = await ask({ title: "Einrichtung schließen?", text: "Nicht gespeicherte Änderungen gehen dabei verloren.",
       buttons: [{ label: "Weiter bearbeiten", value: null }, { label: "Schließen", value: "yes", cls: "primary" }] });
     if (!yes) return;
   }
-  editing = roomForm = deviceForm = calibForm = sensorForm = wifiForm = null;
+  editing = roomForm = deviceForm = calibForm = sensorForm = pillForm = wifiForm = null;
   invalidate();
   showView("home");
   render();
@@ -640,7 +668,7 @@ function touchSetup() {  // the setup closes itself after SETUP_IDLE_MS without 
   if (view !== "setup") return;
   setupIdleTimer = setTimeout(() => {
     if (view !== "setup") return;
-    if (editing || roomForm || deviceForm || calibForm || wifiForm || dialog) return touchSetup();
+    if (editing || roomForm || deviceForm || calibForm || sensorForm || pillForm || wifiForm || dialog) return touchSetup();
     closeSetup(true);
   }, SETUP_IDLE_MS);
 }
@@ -1095,99 +1123,113 @@ async function runScan(network) {
   await refresh();
 }
 
-// ------------------------------------------------------------------ sensor search mode ("Fühler suchen")
-const SENSOR_SEARCH_MS = 3 * 60 * 1000;   // the search mode ends itself after 3 minutes
+// ------------------------------------------------------------------ room sensors: Shelly Pill („Fühler suchen“)
+const PILL_MODES = { onewire: "DS18B20 – Temperaturfühler (bis zu 5)", dht22: "DHT22 – Temperatur und Luftfeuchte" };
+const PILL_RESTART_MS = 15 * 1000;   // a Pill is back about 15 seconds after a restart
 
-function mmss(ms) { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
-
-function sensorText(f) {  // "21,3 °C · 45 % Luftfeuchte · am USB-Netzteil"
-  if (f.protected) return "mit Passwort geschützt – Messwerte nicht lesbar";
+function sensorText(f) {  // "21,3 °C · 45 % Luftfeuchte"
   const parts = [];
   if (f.temp != null) parts.push(deg(f.temp));
   if (f.humidity != null) parts.push(`${Math.round(f.humidity)} % Luftfeuchte`);
-  if (f.usb) parts.push("am USB-Netzteil");
-  else if (f.battery != null) parts.push(`Batterie ${f.battery} %`);
-  return parts.join(" · ") || (f.asleep ? "schläft schon wieder" : "");
+  return parts.join(" · ");
+}
+
+function pillModeText(mode) {
+  return mode === "onewire" ? "DS18B20" : mode === "dht22" ? "DHT22" : mode ? `andere Betriebsart (${mode})` : "–";
+}
+
+function foundPill(id) {
+  return sensorSearch && sensorSearch.data ? sensorSearch.data.pills.find(p => p.id === id) : null;
+}
+
+function pillProbesHTML(p, saved) {  // one row per probe the Pill reports, each with „Übernehmen“
+  if (p.protected) return '<p class="hint">Mit einem Passwort geschützt – die App kann die Messwerte nicht lesen.</p>';
+  if (!["onewire", "dht22"].includes(p.mode)) {
+    return `<p class="hint">Die Pill steht auf einer anderen Betriebsart (${esc(p.mode || "unbekannt")}). Für einen
+      Raumfühler „Einrichten“ drücken und DS18B20 oder DHT22 wählen.</p>`;
+  }
+  if (!p.probes.length) {
+    return `<p class="hint">Kein Fühler erkannt. Den Fühler in die Buchse der Pill stecken, dann „Einrichten“ →
+      „Pill neu starten“.</p>`;
+  }
+  const many = p.probes.length > 1;
+  return `<ul class="heater-list scan-list">${p.probes.map((x, i) => {
+    const sid = `${p.id}-${x.channel}`;
+    const status = saved[sid] ? `<span class="tag">in der App: ${esc(saved[sid].name)}</span>`
+      : sensorForm && sensorForm.mode === "new" && sensorForm.id === sid ? '<span class="tag">wird übernommen …</span>'
+      : x.temp == null ? ""
+      : `<button class="small primary" data-action="sensor-adopt" data-pill="${esc(p.id)}" data-channel="${x.channel}">Übernehmen</button>`;
+    return `<li><span class="dot ${x.temp == null ? "offline" : "ok"}"></span><span class="hname"><b>${many ? `Fühler ${i + 1}` : "Fühler"}</b>
+      <span class="muted">${esc(x.temp == null ? "liefert keinen Wert – steckt er richtig?" : sensorText(x))}</span></span>${status}</li>`;
+  }).join("")}</ul>`;
 }
 
 function sensorPanelHTML() {
   const s = sensorSearch;
-  const found = Object.values(s.found).sort((a, b) => a.address.localeCompare(b.address, "de", { numeric: true }));
-  const saved = Object.fromEntries((state.sensors || []).map(x => [x.id, x]));
-  const items = found.map(f => `<li><span class="dot ok"></span><span class="hname"><b>${esc(f.name || f.model)}</b>
-      <span class="muted">${esc([f.address, sensorText(f)].filter(Boolean).join(" · "))}</span></span>
-      ${saved[f.id] ? `<span class="tag">in der App: ${esc(saved[f.id].name)}</span>`
-        : sensorForm && sensorForm.mode === "new" && sensorForm.id === f.id ? '<span class="tag">wird übernommen …</span>'
-        : `<button class="small primary" data-action="sensor-adopt" data-id="${esc(f.id)}">Übernehmen</button>`}</li>`).join("");
-  const list = items ? `<ul class="heater-list scan-list">${items}</ul>` : "";
+  if (s.running) {
+    return `<div class="scan"><div class="scan-head"><strong class="searching">${s.waiting ? "Die Pill startet neu …" : "Suche läuft …"}</strong>
+      <span class="muted">${s.waiting ? "Danach sucht die App von selbst noch einmal." : "Die App fragt jede Adresse im Heimnetz – das dauert ein paar Sekunden."}</span></div></div>`;
+  }
   if (s.error) {
     return `<div class="scan"><div class="scan-head"><strong>Fühler suchen</strong>
-      <button class="small" data-action="sensor-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p>${list}</div>`;
+      <button class="small" data-action="sensor-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
   }
-  if (s.running) {
-    return `<div class="scan sensor-search">
-      <div class="scan-head"><strong class="searching">Suchmodus läuft</strong>
-        <span class="muted">${s.networks ? esc(s.networks.join(", ")) + " · " : ""}noch ${mmss(s.startedAt + SENSOR_SEARCH_MS - Date.now())} min</span>
-        <button class="small" data-action="sensor-stop">Beenden</button></div>
-      <ol class="steps">
-        <li>Rückwand des Fühlers abnehmen.</li>
-        <li>Den Knopf dahinter <b>kurz</b> drücken. Der Fühler wacht auf und erscheint nach ein paar Sekunden hier.</li>
-      </ol>
-      <p class="hint">Nicht lange drücken: Nach 5 Sekunden startet der Einrichtungs-Hotspot, nach 10 Sekunden wird der
-        Fühler auf Werkseinstellungen zurückgesetzt. Der Fühler muss schon im WLAN sein.</p>
-      ${list || '<p class="scan-wait">Noch kein Fühler gefunden …</p>'}
-    </div>`;
-  }
-  return `<div class="scan"><div class="scan-head"><strong>Suche beendet</strong>
-      <span class="muted">${found.length ? `${found.length} Fühler gefunden` : "kein Fühler gefunden"}</span>
+  const d = s.data;
+  const saved = Object.fromEntries((state.sensors || []).map(x => [x.id, x]));
+  const pills = d.pills.map(p => `<div class="pill-found">
+      <div class="pill-head"><span class="dot ${p.protected ? "offline" : "ok"}"></span><span class="hname"><b>${esc(p.name || p.model)}</b>
+        <span class="muted">${esc([p.address, `Fühlerart: ${pillModeText(p.mode)}`].join(" · "))}</span></span>
+        ${p.protected || (pillForm && pillForm.at === "search" && pillForm.pill === p.id) ? ""
+          : `<button class="small" data-action="pill-setup" data-pill="${esc(p.id)}">Einrichten</button>`}</div>
+      ${pillForm && pillForm.at === "search" && pillForm.pill === p.id ? pillFormHTML(pillForm) : pillProbesHTML(p, saved)}
+    </div>`).join("");
+  const summary = d.pills.length ? `${d.pills.length} Pill${d.pills.length === 1 ? "" : "s"} gefunden` : "keine Pill gefunden";
+  return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
+      <span class="muted">${esc(d.networks.join(", "))} · ${String(d.seconds).replace(".", ",")} s · ${summary}</span>
       <button class="small" data-action="sensor-search">Erneut suchen</button>
       <button class="small" data-action="sensor-close">Schließen</button></div>
-    ${list || `<p class="hint">Ist der Fühler im WLAN? Er antwortet nur, solange er wach ist – während der Suche den Knopf
-      hinter der Rückwand kurz drücken.</p>`}
+    ${pills || `<p class="hint">Ist die Pill am USB-Netzteil und im WLAN? Eine neue Pill zuerst mit der Shelly-App ins WLAN
+      bringen. Läuft die App in Docker oder in einem anderen Netz, findet sie die Pill nicht.</p>`}
   </div>`;
 }
 
-async function runSensorSearch() {  // repeats a quick sweep until a button ends it, the setup closes or 3 minutes are over
-  const s = sensorSearch = { running: true, startedAt: Date.now(), found: {}, networks: null, error: null };
+async function runSensorSearch() {  // one sweep of the home network – a Pill never sleeps, so one is enough
+  const s = sensorSearch = { running: true };
   render();
-  while (sensorSearch === s && s.running && view === "setup" && Date.now() - s.startedAt < SENSOR_SEARCH_MS) {
-    const t0 = Date.now();
-    try {
-      const d = await api("POST", "api/sensors/discover", {});
-      s.networks = d.networks;
-      for (const f of d.sensors) {
-        const old = s.found[f.id];   // a sensor that is falling asleep again keeps its last readings
-        s.found[f.id] = old && f.temp == null && !f.protected ? Object.assign({}, old, { address: f.address }) : f;
-        if (!old && sensorSearch === s) toast(`Fühler gefunden: ${f.name || f.model} (${f.address})`);
-      }
-    } catch (e) {
-      s.error = e.message;
-      break;
-    }
-    if (sensorSearch !== s) return;
-    render();
-    await new Promise(r => setTimeout(r, Math.max(0, 2000 - (Date.now() - t0))));
+  try {
+    s.data = await api("POST", "api/sensors/discover", {});
+  } catch (e) {
+    s.error = e.message;
   }
   s.running = false;
-  if (sensorSearch === s) render();
+  if (sensorSearch !== s) return;
+  invalidate();
+  await refresh();
 }
 
 function sensorTileHTML(s, roomOptions) {
   const editingThis = sensorForm && sensorForm.mode === "edit" && sensorForm.id === s.id;
+  const setupThis = !editingThis && pillForm && pillForm.at === s.id;
   const room = state.rooms.find(r => r.id === s.room);
-  return `<div class="device ${busy.has("sensor:" + s.id) ? "busy" : ""}" data-sensor="${esc(s.id)}">
-    <div class="device-head"><span class="dot"></span><strong class="dname">${esc(s.name)}</strong>
+  const reading = busy.has("sensor:" + s.id);
+  const dot = s.online === false ? "offline" : s.online && !s.error ? "ok" : "";
+  const since = s.online === false && s.offline_since ? ` (seit ${fmtTime(s.offline_since)})` : "";
+  return `<div class="device ${reading ? "busy" : ""}" data-sensor="${esc(s.id)}">
+    <div class="device-head"><span class="dot ${dot}"></span><strong class="dname">${esc(s.name)}</strong>
       <span class="muted">${esc(room ? room.name : "kein Raum")}</span>
-      ${editingThis ? "" : `<button class="small" data-action="sensor-refresh" ${sensorWait[s.id] ? "disabled" : ""}>${sensorWait[s.id]
-        ? "wartet …" : "Aktualisieren"}</button><button class="small" data-action="sensor-edit">Bearbeiten</button>`}</div>
-    ${sensorWait[s.id] && sensorWait[s.id].asleep ? `<p class="sensor-wait"><span class="searching">Warte auf den Fühler …</span>
-      Er schläft gerade: Knopf hinter der Rückwand <b>kurz</b> drücken. Noch ${mmss(sensorWait[s.id].until - Date.now())} min.
-      <button class="small" data-action="sensor-refresh-cancel">Abbrechen</button></p>` : ""}
-    ${editingThis ? sensorFormHTML(sensorForm) : `<dl>
+      ${editingThis || setupThis ? "" : `<button class="small" data-action="sensor-refresh" ${reading ? "disabled" : ""}>${reading
+        ? "liest …" : "Aktualisieren"}</button><button class="small" data-action="sensor-edit">Bearbeiten</button>`}</div>
+    ${editingThis ? sensorFormHTML(sensorForm) : setupThis ? pillFormHTML(pillForm) : `<dl>
       <dt>Raum</dt><dd><select data-action="sensor-room" aria-label="Raum">${roomOptions(s.room)}</select></dd>
       <dt>Messwert</dt><dd>${s.temp == null ? "–" : esc(sensorText(s))}${s.measured_at
-        ? ` <span class="muted">(gemessen ${esc(fmtTime(s.measured_at))})</span>` : ""}</dd>
-      <dt>Gerät</dt><dd>${esc([s.model, s.host].filter(Boolean).join(" · ") || "–")}</dd>
+        ? ` <span class="muted">(gemessen ${esc(fmtTime(s.measured_at))})</span>` : ""}${s.error
+        ? `<br><span class="error-text">${esc(s.error + since)}</span>` : ""}</dd>
+      <dt>Gerät</dt><dd>${esc([s.model, s.device_name, s.host].filter(Boolean).join(" · ") || "–")}
+        ${pillRestart[s.pill] ? '<span class="tag">startet neu …</span>'
+          : `<button class="small" data-action="pill-setup" data-pill="${esc(s.pill || "")}">Einrichten</button>`}</dd>
+      <dt>Fühlerart</dt><dd>${esc(pillModeText(s.mode))}${s.probe_number ? ` · Fühler ${s.probe_number}` : ""}</dd>
+      ${s.update ? `<dt>Firmware</dt><dd>${esc(s.firmware || "–")} <span class="muted">(Update ${esc(s.update)} verfügbar –
+        in der Shelly-App einspielen)</span></dd>` : ""}
       <dt>Kennung</dt><dd>${esc(s.id)}</dd>
     </dl>${sensorCompareHTML(s)}`}</div>`;
 }
@@ -1208,40 +1250,94 @@ function sensorCompareHTML(s) {  // calibration, step 1: the sensor next to the 
     <p class="hint">Messung ${s.measured_at ? esc(fmtTime(s.measured_at)) : "–"}: Fühler und Heizungen zum selben Zeitpunkt.
       Abweichung = Heizung − Fühler; bis ±${String(s.tolerance).replace(".", ",")} °C passt es.</p>
     <table><thead><tr><th></th><th class="num">Ist</th><th class="num">Abweichung</th><th></th></tr></thead>
-      <tbody><tr class="ref"><td>Fühler</td><td class="num">${deg(s.temp)}</td><td></td><td></td></tr>${rows}</tbody></table>
-    ${missing ? '<p class="hint">Fehlt ein Wert, „Aktualisieren“ drücken – dann misst die App Fühler und Heizungen neu zusammen.</p>' : ""}
+      <tbody><tr class="ref"><td>Fühler</td><td class="num">${s.temp == null ? "–" : deg(s.temp)}</td><td></td><td></td></tr>${rows}</tbody></table>
+    ${missing ? '<p class="hint">Fehlt ein Wert, kommt er mit der nächsten Messung (jede Minute) – oder gleich mit „Aktualisieren“.</p>' : ""}
   </div>`;
 }
 
-async function refreshSensor(id) {  // read now; if it sleeps, keep trying for a minute while the user wakes it
-  if (sensorWait[id]) return;
-  const w = sensorWait[id] = { until: Date.now() + 60 * 1000, asleep: false };
+async function refreshSensor(id, quiet = false) {  // read now – the Pill never sleeps, so this is one request
+  const key = "sensor:" + id;
+  if (busy.has(key)) return;
+  busy.add(key);
   render();
-  while (sensorWait[id] === w && Date.now() < w.until && view === "setup") {
-    const t0 = Date.now();
-    try {
-      const res = await api("POST", `api/sensors/${encodeURIComponent(id)}/refresh`);
-      if (res.updated) {
-        if (sensorWait[id] === w) delete sensorWait[id];
-        toast(res.message);
-        invalidate();
-        return refresh();
-      }
-    } catch (e) {
-      if (sensorWait[id] === w) delete sensorWait[id];
-      toast(e.message, true);
-      return render();
-    }
-    if (sensorWait[id] !== w) return;    // cancelled
-    w.asleep = true;
-    render();
-    await new Promise(r => setTimeout(r, Math.max(0, 2000 - (Date.now() - t0))));
+  try {
+    const res = await api("POST", `api/sensors/${encodeURIComponent(id)}/refresh`);
+    if (!quiet) toast(res.message);
+  } catch (e) {
+    if (!quiet) toast(e.message, true);
+  } finally {
+    busy.delete(key);
   }
-  if (sensorWait[id] === w) {
-    delete sensorWait[id];
-    if (view === "setup") toast("Der Fühler hat nicht geantwortet. Knopf hinter der Rückwand kurz drücken, dann nochmal „Aktualisieren“.", true);
-    render();
+  invalidate();
+  await refresh();
+}
+
+function pillFormHTML(f) {
+  const working = busy.has("pillform");
+  const choices = Object.entries(PILL_MODES).map(([mode, label]) => `<label class="check"><input type="radio"
+      name="pill-mode" data-pfield="mode" value="${mode}" ${f.mode === mode ? "checked" : ""}> ${esc(label)}</label>`).join("");
+  return `<div class="device-form pill-form">
+    <h3>Pill einrichten</h3>
+    <p class="hint">Was steckt in der Pill? Die App stellt die Pill darauf ein. Nach einem Wechsel melden gespeicherte
+      Fühler dieser Pill womöglich nichts mehr.</p>
+    ${choices}
+    <div class="row">
+      <button class="primary" data-action="pill-mode-save" ${working ? "disabled" : ""}>${working ? "einen Moment …" : "Speichern"}</button>
+      <button data-action="pill-restart" ${working ? "disabled" : ""}>Pill neu starten</button>
+      <button data-action="pill-cancel">Abbrechen</button>
+    </div>
+    <p class="hint">Fühler eingesteckt, aber nicht erkannt? „Pill neu starten“ – nach etwa 15 Sekunden sieht die App
+      wieder nach.</p>
+  </div>`;
+}
+
+function openPillForm(pillId, at) {  // at: "search" (search result) or the id of the saved sensor whose tile shows it
+  const p = foundPill(pillId) || (state.sensors || []).find(s => s.pill === pillId);
+  if (!p) return;
+  sensorForm = null;
+  pillForm = { pill: pillId, at, mode: ["onewire", "dht22"].includes(p.mode) ? p.mode : "onewire" };
+  invalidate();
+  render();
+}
+
+async function pillAction(kind) {  // writes to the Pill: what is plugged in, or a restart
+  const f = pillForm;
+  if (!f || busy.has("pillform")) return;
+  if (kind === "restart") {
+    const yes = await ask({ title: "Pill neu starten?", text: "Die Pill ist etwa 15 Sekunden nicht erreichbar und sucht dabei die eingesteckten Fühler.",
+      buttons: [{ label: "Nein", value: null }, { label: "Ja, neu starten", value: "yes", cls: "primary" }] });
+    if (!yes) return;
   }
+  busy.add("pillform");
+  render();
+  let res = null;
+  try {
+    res = await api("POST", `api/pills/${encodeURIComponent(f.pill)}/${kind === "mode" ? "mode" : "restart"}`,
+      kind === "mode" ? { mode: f.mode } : {});
+    pillForm = null;
+    toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete("pillform");
+  }
+  invalidate();
+  if (res) await lookAgain(f.pill, res.restart);
+  else render();
+}
+
+async function lookAgain(pillId, restarting) {  // after „Einrichten“: search again, or read its saved sensors again
+  if (restarting) {
+    pillRestart[pillId] = true;
+    if (sensorSearch) sensorSearch = { running: true, waiting: true };
+    render();
+    await new Promise(r => setTimeout(r, PILL_RESTART_MS));
+    delete pillRestart[pillId];
+    if (view !== "setup") return;
+  }
+  if (sensorSearch) return runSensorSearch();
+  for (const s of (state.sensors || []).filter(x => x.pill === pillId)) await refreshSensor(s.id, true);
+  render();
 }
 
 function sensorFormHTML(f) {
@@ -1249,7 +1345,7 @@ function sensorFormHTML(f) {
   const rooms = ['<option value="">– kein Raum –</option>'].concat(state.rooms.map(r =>
     `<option value="${esc(r.id)}" ${r.id === f.room ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
   return `<div class="device-form sensor-form">
-    ${f.mode === "new" ? `<h3>Fühler übernehmen</h3><p class="hint">${esc(f.placeholder)} · ${esc(f.id)}</p>` : ""}
+    ${f.mode === "new" ? `<h3>Fühler übernehmen</h3><p class="hint">${esc(f.placeholder)} · ${esc(f.where)}</p>` : ""}
     <label>Name<input data-sfield="name" value="${esc(f.name)}" placeholder="${esc(f.placeholder)}" maxlength="40"
       autocomplete="off"></label>
     <label>Raum<select data-sfield="room">${rooms}</select></label>
@@ -1262,16 +1358,19 @@ function sensorFormHTML(f) {
   </div>`;
 }
 
-function openSensorForm(sensorId, foundId = null) {
+function openSensorForm(sensorId, pillId = null, channel = null) {
+  pillForm = null;
   if (sensorId) {
     const s = (state.sensors || []).find(x => x.id === sensorId);
     if (!s) return;
     sensorForm = { mode: "edit", id: s.id, name: s.custom_name, room: s.room || "",
-                   placeholder: s.device_name || s.model || s.id };
+                   placeholder: (s.device_name || s.model || s.id) + (s.probe_number ? ` · Fühler ${s.probe_number}` : "") };
   } else {
-    const f = sensorSearch && sensorSearch.found[foundId];
-    if (!f) return;
-    sensorForm = { mode: "new", id: f.id, name: "", room: "", placeholder: f.name || f.model };
+    const p = foundPill(pillId);
+    const i = p ? p.probes.findIndex(x => x.channel === channel) : -1;
+    if (i < 0) return;
+    sensorForm = { mode: "new", id: `${p.id}-${channel}`, pill: p.id, channel, name: "", room: "", where: p.address,
+                   placeholder: (p.name || p.model) + (p.probes.length > 1 ? ` · Fühler ${i + 1}` : "") };
   }
   invalidate();
   render();
@@ -1287,7 +1386,7 @@ async function saveSensor() {
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   render();
   try {
-    const res = f.mode === "new" ? await api("POST", "api/sensors", Object.assign({ id: f.id }, body))
+    const res = f.mode === "new" ? await api("POST", "api/sensors", Object.assign({ pill: f.pill, channel: f.channel }, body))
                                  : await api("PATCH", `api/sensors/${encodeURIComponent(f.id)}`, body);
     sensorForm = null;
     toast(res.message || "Gespeichert.");
@@ -1303,7 +1402,7 @@ async function saveSensor() {
 async function deleteSensor() {
   const f = sensorForm;
   if (!f) return;
-  const yes = await ask({ title: "Fühler entfernen?", text: "Die App vergisst den Fühler. Am Fühler selbst ändert sich nichts.",
+  const yes = await ask({ title: "Fühler entfernen?", text: "Die App vergisst den Fühler. An der Pill selbst ändert sich nichts.",
     buttons: [{ label: "Nein", value: null }, { label: "Ja, entfernen", value: "yes", cls: "danger-solid" }] });
   if (!yes) return;
   try {
@@ -1367,8 +1466,10 @@ function renderDevices(el) {
   if (deviceTab === "sensors") {
     return setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Raumfühler</h2>
       <button class="small primary" data-action="sensor-search" ${sensorSearch && sensorSearch.running ? "disabled" : ""}>Fühler suchen</button></div>
-      <p class="hint">Findet Shelly-Fühler wie den Shelly H&amp;T Gen3 im WLAN und zeigt ihre Messwerte. Dabei wird nur gelesen.
-      Gefundene Fühler mit „Übernehmen“ speichern und einem Raum zuordnen.</p>
+      <p class="hint">Als Raumfühler dient die <b>Shelly Pill</b> am USB-Netzteil, mit eingestecktem Temperaturfühler
+      (DS18B20) oder einem DHT22. Sie schläft nie – die App liest sie jede Minute. „Fühler suchen“ findet Pills im WLAN;
+      gefundene Fühler mit „Übernehmen“ speichern und einem Raum zuordnen. Eine neue Pill zuerst mit der Shelly-App ins
+      WLAN bringen.</p>
       ${sensorSearch ? sensorPanelHTML() : ""}
       ${sensorForm && sensorForm.mode === "new" ? `<div class="device">${sensorFormHTML(sensorForm)}</div>` : ""}
       ${(state.sensors || []).map(s => sensorTileHTML(s, roomOptions)).join("")}
@@ -2126,12 +2227,14 @@ document.addEventListener("click", e => {
     case "scan-close": scan = null; return render();
     case "scan-add": return openDeviceForm(null, { address: t.dataset.address, hostname: t.dataset.hostname });
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
-    case "sensor-stop": if (sensorSearch) sensorSearch.running = false; return render();
-    case "sensor-close": sensorSearch = null; return render();
-    case "sensor-adopt": return openSensorForm(null, t.dataset.id);
+    case "sensor-close": sensorSearch = null; if (pillForm && pillForm.at === "search") pillForm = null; return render();
+    case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
     case "sensor-edit": return openSensorForm(t.closest(".device").dataset.sensor);
     case "sensor-refresh": return refreshSensor(t.closest(".device").dataset.sensor);
-    case "sensor-refresh-cancel": delete sensorWait[t.closest(".device").dataset.sensor]; return render();
+    case "pill-setup": return openPillForm(t.dataset.pill, t.closest(".device") ? t.closest(".device").dataset.sensor : "search");
+    case "pill-mode-save": return pillAction("mode");
+    case "pill-restart": return pillAction("restart");
+    case "pill-cancel": pillForm = null; invalidate(); return render();
     case "sensor-cancel": sensorForm = null; invalidate(); return render();
     case "sensor-save": return saveSensor();
     case "sensor-delete": return deleteSensor();
@@ -2171,6 +2274,7 @@ document.addEventListener("change", e => {
     return renderEditor();
   }
   if (sensorForm && t.dataset.sfield) { sensorForm[t.dataset.sfield] = t.value; return; }
+  if (pillForm && t.dataset.pfield) { pillForm[t.dataset.pfield] = t.value; return; }
   if (wifiForm && t.dataset.wfield === "show") {   // switch the field directly: a redraw would wait for the focus to leave
     wifiForm.show = t.checked;
     const pw = document.querySelector('.wifi-form input[data-wfield="password"]');

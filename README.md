@@ -18,6 +18,9 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   vorher lief: Heizplan bzw. die vorherige Temperatur; ohne beides 20 °C bzw. der Plan des Raums.
 - **Wieder nach Plan** erscheint, wenn ein Raum fest eingestellt ist, aber einen Heizplan hat.
 - Hinweise wie „Fenster offen – die Heizung macht eine Pause“ oder „Keine Verbindung zur Heizung“.
+- **Raumfühler:** Hat der Raum einen [Fühler](#raumfühler-shelly-pill), steht unter der großen Zahl zusätzlich
+  „Fühler: 21,3 °C“ (beim DHT22 mit Luftfeuchte); die große Zahl heißt dann „an der Heizung“. Ein Messwert, der älter
+  als 15 Minuten ist, erscheint dort nicht.
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 
@@ -44,6 +47,9 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   mindestens 5 Minuten läuft), sonst mit dem aktuellen Wert. „Korrektur auf 0 setzen“ nimmt sie zurück.
   Richtig messen: Thermometer in der Raummitte auf 1–1,3 m Höhe, Raum seit 1–2 Stunden auf
   Solltemperatur, über 30–60 Minuten mehrmals ablesen und mitteln.
+- **Raumfühler** (Tab „Geräte“ → „Fühler“): Shelly Pills im Heimnetz suchen, ihre Fühler einem Raum zuweisen und
+  einstellen, was in der Pill steckt (DS18B20 oder DHT22). Der Fühler zeigt seine Temperatur neben der der Heizungen
+  seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
 - **Geräte-Liste filtern:** Im Tab „Geräte“ nach Raum filtern (Alle / je Raum / Nicht zugeordnet,
   jeweils mit Anzahl); die Auswahl merkt sich die App.
 - **Heizplan aus Heizung auslesen** (Tab „Geräte“): liest alle drei Planplätze einer Heizung
@@ -271,33 +277,47 @@ verbunden, steht dort nur *Trennen*: erst Trennen, dann Verbinden, und die Heizu
 SmartHeat4U mit demselben QR-Code neu koppeln.
 
 
-## Raumfühler suchen
+## Raumfühler: Shelly Pill
 
-In der Einrichtung unter „Geräte“ → Untertab „Fühler“ → **Fühler suchen** startet einen Suchmodus
-für Shelly-Fühler (z. B. **Shelly H&T Gen3**, ab Shelly-Generation 2). Der Fühler muss schon im WLAN
-sein (Einrichtung über seinen Hotspot `ShellyHTG3-…` und `http://192.168.33.1`). Er schläft fast immer
-und antwortet nur, solange er wach ist: Während der Suche den Knopf hinter der Rückwand **kurz**
-drücken (5 s = Hotspot, 10 s = Werkseinstellungen). Die App fragt dafür alle 2 Sekunden jede Adresse
-des Heimnetzes nach `GET /shelly` (rund 3 s für ein /24-Netz) und liest gefundene Fühler einmal mit
-`Shelly.GetStatus` aus: Temperatur, Luftfeuchte, Batterie oder USB. Es wird nur gelesen; nach
-3 Minuten endet der Suchmodus von selbst.
+Als Raumfühler dient die **Shelly Pill** („The Pill by Shelly“, Modell S3SN-0U53X) am USB-C-Netzteil. In ihre
+3,5-mm-Buchse kommt ein Temperaturfühler **DS18B20** (bis zu fünf über den 1→5-Verteiler) oder ein **DHT22** für
+Temperatur und Luftfeuchte (zum Beispiel über das 5-Terminal-Add-on). Die Pill schläft nie: Die App liest gespeicherte
+Fühler jede Minute und hat ihre Werte immer parat. Die Pill gibt es in der App ab Version 0.4.2. Den Shelly H&T
+unterstützt sie nicht mehr; einen gespeicherten H&T entfernt sie beim Start (mit einem Eintrag im Log).
 
-**Speichern und Raum:** Bei einem gefundenen Fühler **Übernehmen** drücken, optional einen Namen
-eintragen, einen Raum wählen, speichern. Das klappt auch noch, wenn der Fühler schon wieder schläft:
-Die App nimmt die Daten aus der Suche (bis 30 Minuten danach). Gespeicherte Fühler stehen unter
-„Raumfühler“ (Raum direkt umstellbar, „Bearbeiten“ für Name und Entfernen) und auf der Raumkachel
-mit ihrem letzten Messwert. Neue Messwerte und eine neue IP übernimmt die App bei jeder Suche, in
-der der Fühler wach ist; laufend empfängt sie noch keine Werte.
+**Vorher, einmal:** die Pill mit der Shelly-App ins WLAN bringen (oder über ihren Hotspot `ShellyPill-…` und
+`http://192.168.33.1`), den Fühler einstecken und die Pill ans Netzteil hängen.
 
-**Aktualisieren** (bei jedem gespeicherten Fühler) liest ihn sofort aus – unter seiner letzten Adresse,
-sonst sucht die App ihn im Heimnetz. Schläft er, wartet die Seite bis zu einer Minute und bittet darum,
-den Knopf hinter der Rückwand kurz zu drücken; sobald er aufwacht, stehen die neuen Werte da.
+**Fühler suchen:** In der Einrichtung unter „Geräte“ → Untertab „Fühler“ → **Fühler suchen**. Die App fragt jede
+Adresse des Heimnetzes einmal nach `GET /shelly` (rund 3 s für ein /24-Netz) und liest jede gefundene Pill mit
+`Shelly.GetStatus`, `Pill.GetConfig` und `Shelly.GetComponents` aus: was eingestellt ist (DS18B20 oder DHT22) und was
+jeder eingesteckte Fühler misst. Die Pill meldet jeden Fühler als eigene Komponente (der erste DS18B20 heißt
+`temperature:200`), aber nur in `Shelly.GetComponents`. Dabei wird nur gelesen.
+
+**Übernehmen und Raum:** Bei einem gefundenen Fühler **Übernehmen** drücken, optional einen Namen eintragen, einen Raum
+wählen, speichern. Jeder Fühler einer Pill wird ein eigener Fühler in der App, mit eigenem Raum. Gespeicherte Fühler
+stehen unter „Raumfühler“ (Raum direkt umstellbar, „Bearbeiten“ für Name und Entfernen), auf der Raumkachel der
+Einrichtung mit ihrem letzten Messwert und auf der Startseite in der Kachel ihres Raums. **Aktualisieren** liest sofort. Antwortet eine Pill nicht mehr unter ihrer Adresse, sucht die
+App sie im Heimnetz (höchstens alle 15 Minuten) und übernimmt die neue Adresse.
+
+**Einrichten** (bei jeder gefundenen Pill und bei jedem gespeicherten Fühler): Hier stellt man ein, was in der Pill
+steckt – DS18B20 oder DHT22 (`Pill.SetConfig`, Betriebsart `onewire` bzw. `dht22`). Braucht die Pill dafür einen
+Neustart, startet die App sie neu. **Pill neu starten** (`Shelly.Reboot`) hilft, wenn ein eingesteckter Fühler nicht
+erkannt wird; nach etwa 15 Sekunden sieht die App wieder nach. Nur hier schickt die App etwas an die Pill, und vorher
+prüft sie, dass unter der Adresse noch dieselbe Pill antwortet. Eine Pill mit Passwort kann die App weder lesen noch
+einrichten.
 
 **Kalibrierung – Vergleich:** Ist der Fühler einem Raum zugeordnet, zeigt er unter „Kalibrierung“ seine
 Isttemperatur neben der Isttemperatur jeder Heizung des Raums und die Abweichung (Heizung − Fühler).
-Beide Werte stammen vom selben Zeitpunkt: Bei jedem Auslesen des Fühlers (Suche, „Aktualisieren“)
+Beide Werte stammen vom selben Zeitpunkt: Bei jedem Auslesen des Fühlers (jede Minute, Suche, „Aktualisieren“)
 merkt sich die App die Raumtemperatur der Heizungen dieses Moments. Bis ±0,5 °C gilt als „passt“,
 sonst „zeigt zu viel“ oder „zeigt zu wenig“. Die Heizung meldet ihren Wert schon mit ihrer Korrektur.
+
+**Gut zu wissen:**
+- In `data.json` landet ein Messwert höchstens alle 15 Minuten (und bei Suche, Übernehmen und Aktualisieren). Das
+  schont die Speicherkarte des Pi; die Anzeige ist trotzdem jede Minute aktuell.
+- Firmware-Updates der Pill spielt man in der Shelly-App ein. Die App zeigt nur an, dass eines bereitsteht.
+- DS18B20 und DHT22 messen laut Datenblatt auf ±0,5 °C genau.
 
 ## Konfiguration: `heizungen.conf`
 
@@ -364,7 +384,8 @@ python3 -m unittest discover -s tests -v
 Die Tests laufen gegen eine simulierte Heizung (`tests/fake_heater.py`), die das oben
 beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen. Die
 WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`), die
-Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto.
+Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto. Die
+Raumfühler laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`).
 
 ## Ideen für später
 
