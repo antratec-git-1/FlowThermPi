@@ -49,7 +49,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Solltemperatur, über 30–60 Minuten mehrmals ablesen und mitteln.
 - **Raumfühler** (Tab „Geräte“ → „Fühler“): Shelly Pills im Heimnetz suchen, ihre Fühler einem Raum zuweisen und
   einstellen, was in der Pill steckt (DS18B20 oder DHT22). Der Fühler zeigt seine Temperatur neben der der Heizungen
-  seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
+  seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Ein **Kalibrierlauf** (zum Beispiel einen Tag
+  lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
 - **Geräte-Liste filtern:** Im Tab „Geräte“ nach Raum filtern (Alle / je Raum / Nicht zugeordnet,
   jeweils mit Anzahl); die Auswahl merkt sich die App.
 - **Heizplan aus Heizung auslesen** (Tab „Geräte“): liest alle drei Planplätze einer Heizung
@@ -313,6 +314,25 @@ Beide Werte stammen vom selben Zeitpunkt: Bei jedem Auslesen des Fühlers (jede 
 merkt sich die App die Raumtemperatur der Heizungen dieses Moments. Bis ±0,5 °C gilt als „passt“,
 sonst „zeigt zu viel“ oder „zeigt zu wenig“. Die Heizung meldet ihren Wert schon mit ihrer Korrektur.
 
+**Kalibrierlauf:** Genauer als ein einzelner Vergleich. Den Fühler in die Raummitte auf 1–1,5 m Höhe legen, nicht in
+die Sonne und nicht neben Fenster oder Heizung. Dann unter „Kalibrierung“ die Dauer wählen (6 Stunden bis 3 Tage,
+empfohlen 1 Tag) und **Kalibrierlauf starten**.
+- Jede Minute paart die App den Messwert des Fühlers mit jeder Heizung des Raums. Es zählen nur ruhige Minuten: Die
+  Heizung antwortet, sie meldet kein offenes Fenster, kein Boost, sie ist nicht aus (Standby, Urlaub), und Betriebsart,
+  Solltemperatur und Fenster sind seit mindestens einer Stunde unverändert. Was nicht zählt, zeigt die App mit Grund an.
+- Für jede ruhige Minute rechnet sie aus, welche Korrektur die Heizung genau auf den Wert des Fühlers gebracht hätte
+  (Fühler − Heizung + ihre Korrektur in diesem Moment, auf 0,1 °C). Der Vorschlag ist der Median aller Minuten.
+  Ausreißer wie Sonne auf dem Fühler zählen so kaum, und eine zwischendurch geänderte Korrektur stört nicht. Daneben
+  steht, wie weit die mittlere Hälfte der Minuten auseinanderliegt: „gleichmäßig“, „schwanken etwas“ oder „schwanken
+  stark“. Über 1 °C ist der Vorschlag unsicher.
+- Nach der gewählten Dauer endet der Lauf von selbst. **Jetzt auswerten** geht früher, sobald eine Heizung 2 Stunden
+  ruhig gemessen ist. **Abbrechen** verwirft einen laufenden Lauf, **Schließen** ein Ergebnis.
+- In die Heizung kommt ein Vorschlag erst mit **Übernehmen** (mit Rückfrage), wie beim Kalibrieren von Hand. Eine nur
+  lesbare Heizung (ohne Token) und eine Korrektur außerhalb von ±9,9 °C übernimmt die App nicht.
+- Der Lauf übersteht einen Neustart der App; sie sichert ihn mit den Messwerten in `data.json`. Solange es ihn gibt,
+  bleibt der Fühler in seinem Raum. Wird der Raum gelöscht, endet der Lauf. Für einen ganzen Tag gehört die App auf
+  den Pi – ein Rechner, der schläft, misst nicht.
+
 **Gut zu wissen:**
 - In `data.json` landet ein Messwert höchstens alle 15 Minuten (und bei Suche, Übernehmen und Aktualisieren). Das
   schont die Speicherkarte des Pi; die Anzeige ist trotzdem jede Minute aktuell.
@@ -385,7 +405,7 @@ Die Tests laufen gegen eine simulierte Heizung (`tests/fake_heater.py`), die das
 beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen. Die
 WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`), die
 Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto. Die
-Raumfühler laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`).
+Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`).
 
 ## Ideen für später
 

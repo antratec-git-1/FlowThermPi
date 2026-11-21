@@ -13,7 +13,7 @@ import threading
 import time
 import unittest
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -782,6 +782,173 @@ class ApiTest(unittest.TestCase):
             self.call("PATCH", "/api/heaters/92220002", {"room": room})     # joined later: no common reading yet
             c = self.sensor(sid)["compare"]
             self.assertEqual([(x["heater"], x["deviation"]) for x in c], [("91110001", 1.4), ("92220002", None)])
+        finally:
+            pill.close()
+
+    # ------------------------------------------------------------------ calibration run („Kalibrierlauf“)
+    def calib_room(self, pill, *heaters):
+        """A room with these heaters and the Pill's probe 100 as its sensor; returns (room, sensor id)."""
+        room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
+        for hid in heaters:
+            self.call("PATCH", f"/api/heaters/{hid}", {"room": room})
+        self.pill_search(pill)
+        self.call("POST", "/api/sensors", {"pill": self.PILL, "channel": 100, "room": room})
+        return room, f"{self.PILL}-100"
+
+    def minute(self):
+        """One minute of the app: heaters read, then the Pills (and with them the calibration)."""
+        self.service.poll_all()
+        self.service.poll_sensors(force=True)
+
+    def test_calibration_run_proposes_and_applies(self):
+        self.service.CALIB_SETTLE, self.service.CALIB_MIN_MINUTES = 0, 3
+        pill = FakePill(probes={100: 20.3})                          # heater 91110001 shows 21.5 °C: 1.2 too much
+        try:
+            _room, sid = self.calib_room(pill, "91110001")
+            base = f"/api/sensors/{sid}/calibration"
+            self.call("POST", base + "/finish", expect=404)              # nothing runs yet
+            self.call("POST", base, {"hours": 0}, expect=400)
+            self.call("POST", base, {"hours": 24})
+            self.call("POST", base, {}, expect=409)                      # one run per sensor
+            c = self.sensor(sid)["calibration"]
+            self.assertEqual((c["running"], c["can_finish"], [(h["id"], h["minutes"]) for h in c["heaters"]]),
+                             (True, False, [("91110001", 0)]))
+            self.call("POST", base + "/finish", expect=409)              # not enough calm minutes yet
+            for n, temp in enumerate((20.3, 20.2, 20.4, 20.3, 25.0)):    # sun on the sensor once: the median stays
+                if n == 2:                                               # corrected by hand meanwhile: no matter
+                    self.call("POST", "/api/heaters/91110001/calibrate", {"correction": -0.5})
+                pill.probes[100] = temp
+                self.minute()
+            c = self.sensor(sid)["calibration"]
+            h = c["heaters"][0]
+            self.assertEqual((h["minutes"], h["estimate"], h["proposal"], h["current"], h["change"], h["uncertain"]),
+                             (5, -1.2, -1.2, -0.5, -0.7, False))
+            self.assertEqual((c["can_finish"], h["can_apply"]), (True, False))
+            self.call("POST", base + "/apply", {"heater": "91110001"}, expect=409)   # still running
+            self.call("POST", base + "/finish")
+            h = self.sensor(sid)["calibration"]["heaters"][0]
+            self.assertTrue(h["can_apply"])
+            res = self.call("POST", base + "/apply", {"heater": "91110001"})
+            self.assertIn("-1,2 °C", res["message"])
+            self.assertEqual(self.a.values["temp_corr"], -12)            # written into the heater
+            h = self.sensor(sid)["calibration"]["heaters"][0]
+            self.assertEqual((h["can_apply"], h["applied"]["old"], h["applied"]["new"]), (False, -0.5, -1.2))
+            self.call("POST", base + "/apply", {"heater": "91110001"}, expect=409)   # once is enough
+            self.call("POST", base + "/apply", {"heater": "92220002"}, expect=404)   # not part of it
+            self.assertEqual(self.call("DELETE", base)["message"], "Kalibrierung geschlossen.")
+            self.assertIsNone(self.sensor(sid)["calibration"])
+            self.assertNotIn("calibration", json.loads(Path(self.tmp.name, "data.json").read_text())["sensors"][sid])
+        finally:
+            pill.close()
+
+    def test_calibration_counts_only_calm_minutes(self):
+        self.service.CALIB_MIN_MINUTES = 1
+        pill = FakePill(probes={100: 21.0})
+        try:
+            _room, sid = self.calib_room(pill, "91110001")
+            self.call("POST", f"/api/sensors/{sid}/calibration", {"hours": 6})
+            self.service.CALIB_SETTLE = 3600
+            self.minute()                                                # set up just now: not settled yet
+            self.a.values["open_window"] = 1
+            self.minute()
+            self.a.values.update(open_window=0, operating_mode=2)          # boost
+            self.minute()
+            self.a.values["operating_mode"] = 4                          # „Aus“ (standby)
+            self.minute()
+            self.a.values["operating_mode"] = 0
+            entry = next(e for e in self.service.entries if e.key == "91110001")
+            entry.online = False                                         # did not answer this minute
+            self.service.poll_sensors(force=True)
+            pill.probes[100] = None                                      # the sensor gave no value
+            self.minute()
+            pill.probes[100] = 21.0
+            self.service.CALIB_SETTLE = 0
+            self.minute()                                                # the one calm minute
+            c = self.sensor(sid)["calibration"]
+            h = c["heaters"][0]
+            self.assertEqual(h["skipped"], {"settling": 1, "window": 1, "boost": 1, "off": 1, "offline": 1})
+            self.assertEqual((h["minutes"], h["estimate"], c["missing"]), (1, -0.5, 1))
+            # unchanged for two hours: calm; a new setpoint starts the hour of settling again
+            self.service.CALIB_SETTLE = 3600
+            entry.steady_since -= 2 * 3600
+            self.minute()
+            self.assertEqual(self.sensor(sid)["calibration"]["heaters"][0]["minutes"], 2)
+            self.a.values["setpoint"] += 5
+            self.minute()
+            h = self.sensor(sid)["calibration"]["heaters"][0]
+            self.assertEqual((h["minutes"], h["skipped"]["settling"]), (2, 2))
+        finally:
+            pill.close()
+
+    def test_calibration_flags_what_it_cannot_apply(self):
+        self.service.CALIB_SETTLE, self.service.CALIB_MIN_MINUTES = 0, 2
+        self.b.values["room_temp"] = 205                                 # 92220002 has no token: read only
+        pill = FakePill(probes={100: 20.0})
+        try:
+            _room, sid = self.calib_room(pill, "91110001", "92220002")
+            base = f"/api/sensors/{sid}/calibration"
+            self.call("POST", base, {})
+            for temp in (19.0, 20.0, 21.0, 22.0):                        # restless: the middle half spans 2 °C
+                pill.probes[100] = temp
+                self.minute()
+            self.call("POST", base + "/finish")
+            rows = {h["id"]: h for h in self.sensor(sid)["calibration"]["heaters"]}
+            a, b = rows["91110001"], rows["92220002"]
+            self.assertEqual((a["can_apply"], a["uncertain"], a["spread"]), (True, True, 2.0))
+            self.assertEqual((b["can_apply"], b["why"]), (False, "nur lesbar – für die Korrektur wird ihr Token gebraucht"))
+            self.call("POST", base + "/apply", {"heater": "92220002"}, expect=409)
+            self.call("DELETE", base)
+            self.b.values["room_temp"] = 58                              # shows 5.8 °C: 14 °C off – the sensor lies elsewhere
+            pill.probes[100] = 20.0
+            self.call("POST", base, {})
+            self.minute()
+            self.minute()
+            self.call("POST", base + "/finish")
+            b = {h["id"]: h for h in self.sensor(sid)["calibration"]["heaters"]}["92220002"]
+            self.assertEqual((b["can_apply"], b["proposal"]), (False, 14.2))
+            self.assertTrue(b["why"].startswith("außerhalb von ±9,9 °C"))
+            self.call("PUT", "/api/setup/pin", {"pin": "1234"})          # setup only, like everything here
+            self.call("POST", base + "/apply", {"heater": "91110001"}, cookie="nicht-angemeldet", expect=403)
+            self.call("DELETE", base, cookie="nicht-angemeldet", expect=403)
+        finally:
+            pill.close()
+
+    def test_calibration_keeps_the_sensor_in_its_room(self):
+        pill = FakePill()
+        try:
+            room, sid = self.calib_room(pill, "91110001")
+            other = self.call("POST", "/api/rooms", {"name": "Küche"})["id"]
+            self.call("POST", f"/api/sensors/{sid}/calibration", {})
+            self.call("PATCH", f"/api/sensors/{sid}", {"room": other}, expect=409)
+            self.call("PATCH", f"/api/sensors/{sid}", {"name": "Tisch", "room": room})   # same room: fine
+            self.call("DELETE", f"/api/rooms/{room}")                    # the run ends with its room
+            self.assertIsNone(self.sensor(sid)["calibration"])
+            self.call("POST", f"/api/sensors/{sid}/calibration", {}, expect=409)        # no room
+            self.call("PATCH", f"/api/sensors/{sid}", {"room": other})
+            self.call("POST", f"/api/sensors/{sid}/calibration", {}, expect=409)        # no heater in it
+            self.call("PATCH", "/api/heaters/91110001", {"room": other})
+            self.call("POST", f"/api/sensors/{sid}/calibration", {})
+            self.call("DELETE", f"/api/sensors/{sid}")                   # the run goes with its sensor
+            self.assertEqual(self.service._calib_runs, {})
+        finally:
+            pill.close()
+
+    def test_calibration_survives_a_restart_and_ends_on_time(self):
+        self.service.CALIB_SETTLE = 0
+        pill = FakePill(probes={100: 21.0})
+        try:
+            _room, sid = self.calib_room(pill, "91110001")
+            self.call("POST", f"/api/sensors/{sid}/calibration", {"hours": 1})
+            self.minute()                                                # saved at once (forced reading)
+            data_path = Path(self.tmp.name, "data.json")
+            again = Service(str(Path(self.tmp.name, "heizungen.conf")), str(data_path), poll_interval=3600)
+            self.assertEqual(again._calib_runs[sid]["heaters"]["91110001"]["bins"], {"-5": 1})
+            again.now = lambda: datetime.now() + timedelta(hours=2)      # the hour is over
+            c = again._calib_view(again._calib_runs[sid], [], again.now().isoformat(timespec="seconds"))
+            self.assertFalse(c["running"])
+            again._calib_tick({}, save=False)                            # the next minute closes it for good
+            saved = json.loads(data_path.read_text(encoding="utf-8"))["sensors"][sid]["calibration"]
+            self.assertEqual(saved["finished"], saved["until"])
         finally:
             pill.close()
 

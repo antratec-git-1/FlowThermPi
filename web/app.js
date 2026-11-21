@@ -31,6 +31,7 @@ let scanNet = "";        // network typed for "Anderes Netz"
 let sensorSearch = null; // „Fühler suchen“ in "Geräte": {running, waiting, data: {networks, seconds, pills}, error}
 let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, pill, channel, name, room, placeholder}
 let pillForm = null;     // „Einrichten“ of a Pill: {pill, at: "search"|sensor id, mode}
+const calibHours = {};   // Kalibrierlauf: sensor id -> duration (hours) chosen before „starten“
 let deviceTab = localStorage.getItem("heizung.deviceTab") === "sensors" ? "sensors" : "heaters";  // sub-tab of "Geräte"
 const pillRestart = {};  // Pill id -> true while it restarts after „Einrichten“
 const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
@@ -1235,8 +1236,9 @@ function sensorTileHTML(s, roomOptions) {
 }
 
 function sensorCompareHTML(s) {  // calibration, step 1: the sensor next to the heaters of its room, measured together
-  if (!s.room) return '<div class="calib-compare"><p class="hint">Für den Vergleich mit den Heizungen den Fühler einem Raum zuordnen.</p></div>';
-  if (!s.compare.length) return '<div class="calib-compare"><p class="hint">In diesem Raum ist noch keine Heizung.</p></div>';
+  const run = s.calibration ? calibRunHTML(s) : "";   // a run whose room has no heater any more: still to close
+  if (!s.room) return `<div class="calib-compare"><p class="hint">Für den Vergleich mit den Heizungen den Fühler einem Raum zuordnen.</p>${run}</div>`;
+  if (!s.compare.length) return `<div class="calib-compare"><p class="hint">In diesem Raum ist noch keine Heizung.</p>${run}</div>`;
   const rows = s.compare.map(c => {
     const verdict = c.deviation == null ? '<span class="muted">kein gemeinsamer Messwert</span>'
       : c.ok ? '<span class="tag ok">passt</span>'
@@ -1252,7 +1254,156 @@ function sensorCompareHTML(s) {  // calibration, step 1: the sensor next to the 
     <table><thead><tr><th></th><th class="num">Ist</th><th class="num">Abweichung</th><th></th></tr></thead>
       <tbody><tr class="ref"><td>Fühler</td><td class="num">${s.temp == null ? "–" : deg(s.temp)}</td><td></td><td></td></tr>${rows}</tbody></table>
     ${missing ? '<p class="hint">Fehlt ein Wert, kommt er mit der nächsten Messung (jede Minute) – oder gleich mit „Aktualisieren“.</p>' : ""}
+    ${calibRunHTML(s)}
   </div>`;
+}
+
+// calibration, step 2: the „Kalibrierlauf“ – calm minutes over hours or days, then one proposal per heater
+const CALIB_HOURS = [[6, "6 Stunden"], [12, "12 Stunden"], [24, "1 Tag (empfohlen)"], [48, "2 Tage"], [72, "3 Tage"]];
+const CALIB_SKIPPED = { settling: "nach Umstellen", window: "Fenster offen", boost: "Boost", off: "ausgeschaltet",
+                        offline: "Heizung offline" };
+
+function fmtMinutes(min) {  // 135 -> "2 Std. 15 Min."
+  const total = Math.max(0, Math.round(min)), h = Math.floor(total / 60), m = total % 60;
+  return h ? `${h} Std.${m ? ` ${m} Min.` : ""}` : `${m} Min.`;
+}
+
+function fmtWhen(iso) {  // the server's local time as „heute 22:10 Uhr“, „morgen 08:00 Uhr“ or „23.11. 08:00 Uhr“
+  const t = localTime(iso);
+  if (!t) return "–";
+  const day0 = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((day0(t) - day0(serverNow())) / 86400000);
+  const two = n => String(n).padStart(2, "0");
+  const day = days === 0 ? "heute" : days === 1 ? "morgen" : days === -1 ? "gestern" : `${two(t.getDate())}.${two(t.getMonth() + 1)}.`;
+  return `${day} ${two(t.getHours())}:${two(t.getMinutes())} Uhr`;
+}
+
+function skippedText(skipped) {  // „35 Min. nach Umstellen, 3 Min. Fenster offen“ – or ""
+  return esc(Object.entries(skipped || {}).filter(([, n]) => n > 0)
+    .map(([why, n]) => `${fmtMinutes(n)} ${CALIB_SKIPPED[why] || why}`).join(", "));
+}
+
+function spreadText(h, warn) {  // how far the middle half of the calm minutes lies apart
+  const word = h.spread <= warn / 2 ? "gleichmäßig" : h.spread <= warn ? "schwanken etwas" : "schwanken stark";
+  return `Messwerte ${word} <span class="nowrap">(${h.spread.toFixed(1).replace(".", ",")} °C)</span>`;
+}
+
+function calibRunHTML(s) {
+  const c = s.calibration, rules = state.calib_rules || {};
+  const working = busy.has("crun:" + s.id), off = working ? "disabled" : "";
+  const settle = rules.settle_minutes ? ` und frühestens ${fmtMinutes(rules.settle_minutes)} nach dem letzten Umstellen` : "";
+  if (!c) {
+    const hours = calibHours[s.id] || rules.hours || 24;
+    const options = CALIB_HOURS.filter(([h]) => h <= (rules.max_hours || 72))
+      .map(([h, label]) => `<option value="${h}" ${h === hours ? "selected" : ""}>${label}</option>`).join("");
+    return `<div class="calib-run">
+      <h4>Kalibrierlauf</h4>
+      <p class="hint">Genauer als ein einzelner Vergleich: Die App misst eine Zeit lang jede Minute den Fühler und die
+        Heizungen dieses Raums und schlägt danach für jede Heizung eine Korrektur vor. Es zählen nur ruhige Minuten –
+        Fenster zu, kein Boost, nicht ausgeschaltet${settle}. Den Fühler dafür in die Raummitte auf 1–1,5 m Höhe legen,
+        nicht in die Sonne und nicht neben Fenster oder Heizung.</p>
+      <div class="row">
+        <label class="inline">Dauer <select data-action="crun-hours" ${off}>${options}</select></label>
+        <button class="primary" data-action="crun-start" ${off}>${working ? "starte …" : "Kalibrierlauf starten"}</button>
+      </div>
+    </div>`;
+  }
+  if (c.running) {
+    const left = (localTime(c.until) - serverNow()) / 60000;
+    const rows = c.heaters.map(h => {
+      const dev = h.estimate == null || h.current == null ? null : Math.round((h.current - h.estimate) * 10) / 10;
+      const verdict = dev == null ? '<span class="muted">noch kein Wert</span>'
+        : `<span class="nowrap">${fmtDelta(dev)}</span> ${Math.abs(dev) <= s.tolerance + 1e-9 ? '<span class="tag ok">passt</span>'
+          : `<span class="tag warn">zeigt ${dev > 0 ? "zu viel" : "zu wenig"}</span>`}`;
+      const skipped = skippedText(h.skipped);
+      return `<li><div class="calib-line"><b>${esc(h.name)}</b><span>${verdict}</span></div>
+        <div class="muted">${h.minutes ? `${fmtMinutes(h.minutes)} ruhig gemessen` : "noch keine ruhige Minute"}${h.proposal != null
+          ? " – genug für einen Vorschlag" : ""}${skipped ? `; nicht gezählt: ${skipped}` : ""}</div></li>`;
+    }).join("");
+    return `<div class="calib-run">
+      <h4>Kalibrierlauf läuft</h4>
+      <p class="hint">Seit ${esc(fmtWhen(c.started))}, bis ${esc(fmtWhen(c.until))}${left > 0 ? ` (noch ${fmtMinutes(left)})` : ""}.
+        Die Heizungen heizen dabei ganz normal; geändert wird an ihnen nichts.</p>
+      <ul class="calib-list">${rows}</ul>
+      <p class="hint">Abweichung bisher = Heizung − Fühler, der mittlere Wert aller ruhigen Minuten.${c.missing
+        ? ` Der Fühler hatte ${fmtMinutes(c.missing)} lang keinen Messwert.` : ""}</p>
+      <div class="row">
+        <button data-action="crun-finish" ${c.can_finish && !working ? "" : "disabled"}>Jetzt auswerten</button>
+        <button data-action="crun-discard" ${off}>Abbrechen</button>
+      </div>
+      ${c.can_finish ? "" : `<p class="hint">„Jetzt auswerten“ geht, sobald eine Heizung ${fmtMinutes(rules.min_minutes ?? 120)} ruhig gemessen ist.</p>`}
+    </div>`;
+  }
+  const warn = rules.spread_warn ?? 1;
+  const rows = c.heaters.map(h => {
+    const corr = h.applied ? `Korrektur <span class="nowrap">${fmtDelta(h.applied.old)}</span> → <b class="nowrap">${fmtDelta(h.applied.new)}</b>`
+      : h.proposal == null ? "" : `Korrektur <span class="nowrap">${h.current == null ? "–" : fmtDelta(h.current)}</span> → <b class="nowrap">${fmtDelta(h.proposal)}</b>`;
+    const action = h.applied ? '<span class="tag ok">übernommen</span>'
+      : h.can_apply && h.change === 0 ? '<span class="tag ok">passt schon</span>'
+      : h.can_apply ? `<button class="small primary" data-action="crun-apply" data-heater="${esc(h.id)}" ${off}>Übernehmen</button>` : "";
+    return `<li><div class="calib-line"><b>${esc(h.name)}</b>${action}</div>
+      ${corr ? `<div>${corr}</div>` : ""}
+      <div class="muted">${h.minutes ? `${fmtMinutes(h.minutes)} ruhig gemessen` : "keine ruhige Minute"}${h.spread != null
+        ? `, ${spreadText(h, warn)}` : ""}</div>
+      ${!h.applied && h.why ? `<div class="${h.proposal == null ? "muted" : "warn-line"}">${esc(h.why)}</div>` : ""}</li>`;
+  }).join("");
+  const shaky = c.heaters.some(h => h.uncertain && !h.applied);
+  return `<div class="calib-run">
+    <h4>Kalibrierlauf ausgewertet</h4>
+    <p class="hint">Gemessen ${esc(fmtWhen(c.started))} bis ${esc(fmtWhen(c.finished))}. Vorschlag je Heizung = die Korrektur,
+      mit der sie im Mittel (Median) aller ruhigen Minuten genau den Wert des Fühlers zeigt – einzelne Ausreißer, etwa Sonne
+      auf dem Fühler, zählen kaum. In die Heizung kommt er erst mit „Übernehmen“.</p>
+    <ul class="calib-list">${rows}</ul>
+    ${shaky ? `<p class="hint warn">Schwanken die Messwerte stark (mittlere Hälfte über ${String(warn).replace(".", ",")} °C auseinander),
+      ist der Vorschlag unsicher: lieber den Platz des Fühlers prüfen (Sonne, Zugluft, Nähe zur Heizung) und noch einmal messen.</p>` : ""}
+    <div class="row"><button data-action="crun-discard" ${off}>Schließen</button></div>
+  </div>`;
+}
+
+async function calibRun(sensorId, what, heaterId) {  // start, finish („Jetzt auswerten“), discard (abbrechen/schließen), apply
+  const s = (state.sensors || []).find(x => x.id === sensorId), c = s && s.calibration, key = "crun:" + sensorId;
+  if (!s || busy.has(key)) return;
+  const base = `api/sensors/${encodeURIComponent(sensorId)}/calibration`;
+  let method = "POST", url = base, body;
+  if (what === "start") {
+    body = { hours: calibHours[sensorId] || (state.calib_rules || {}).hours || 24 };
+  } else if (what === "finish") {
+    url = base + "/finish";
+  } else if (what === "discard") {
+    method = "DELETE";
+    if (c && (c.running || c.heaters.some(h => h.can_apply && h.change !== 0))) {
+      const yes = await ask(c.running
+        ? { title: "Kalibrierlauf abbrechen?", text: "Die bisherigen Messungen gehen verloren. An den Heizungen ändert sich nichts.",
+            buttons: [{ label: "Weiter messen", value: null }, { label: "Ja, abbrechen", value: "yes", cls: "danger-solid" }] }
+        : { title: "Ergebnis schließen?", text: "Vorschläge, die noch nicht übernommen sind, gehen verloren.",
+            buttons: [{ label: "Nein", value: null }, { label: "Ja, schließen", value: "yes", cls: "danger-solid" }] });
+      if (!yes) return;
+    }
+  } else if (what === "apply") {
+    const h = c && c.heaters.find(x => x.id === heaterId);
+    if (!h || !h.can_apply) return;
+    const diff = Math.round((h.proposal - (h.current ?? 0)) * 10) / 10;
+    const yes = await ask({ title: `${h.name}: Korrektur übernehmen?`,
+      text: `Die Korrektur der Heizung ändert sich von ${fmtDelta(h.current ?? 0)} auf ${fmtDelta(h.proposal)} – sie zeigt danach ` +
+        `${Math.abs(diff).toFixed(1).replace(".", ",")} °C ${diff < 0 ? "weniger" : "mehr"} an, wie der Fühler. ` +
+        "Ändern lässt sich das jederzeit wieder unter „Kalibrieren“ bei der Heizung.",
+      buttons: [{ label: "Abbrechen", value: null }, { label: "Übernehmen", value: "yes", cls: "primary" }] });
+    if (!yes) return;
+    url = base + "/apply";
+    body = { heater: heaterId };
+  }
+  busy.add(key);
+  render();
+  try {
+    toast((await api(method, url, body)).message);
+    if (what === "start") delete calibHours[sensorId];
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
 }
 
 async function refreshSensor(id, quiet = false) {  // read now – the Pill never sleeps, so this is one request
@@ -2238,6 +2389,10 @@ document.addEventListener("click", e => {
     case "sensor-cancel": sensorForm = null; invalidate(); return render();
     case "sensor-save": return saveSensor();
     case "sensor-delete": return deleteSensor();
+    case "crun-start": return calibRun(t.closest(".device").dataset.sensor, "start");
+    case "crun-finish": return calibRun(t.closest(".device").dataset.sensor, "finish");
+    case "crun-discard": return calibRun(t.closest(".device").dataset.sensor, "discard");
+    case "crun-apply": return calibRun(t.closest(".device").dataset.sensor, "apply", t.dataset.heater);
     case "dev-edit": return openDeviceForm(t.closest(".device").dataset.heater);
     case "dev-cancel": deviceForm = null; return render();
     case "dev-save": return saveDevice();
@@ -2289,6 +2444,7 @@ document.addEventListener("change", e => {
       return patch(`api/heaters/${encodeURIComponent(t.closest(".device").dataset.heater)}`, { room: t.value || null }, "Raum zugeordnet.");
     case "sensor-room":
       return patch(`api/sensors/${encodeURIComponent(t.closest(".device").dataset.sensor)}`, { room: t.value || null }, "Raum zugeordnet.");
+    case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });
 

@@ -11,7 +11,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 from . import coap, discovery, plans, shelly
@@ -29,6 +29,7 @@ DAILY_SYNC_HOUR = 3    # daily clock sync; also covers summer/winter time change
 DEFAULT_ON_TEMP = 200  # 0.1 °C: "Einschalten" without a remembered temperature and without a plan
 LOST_AFTER = 180       # seconds offline before the app looks for the heater at another address
 HEAL_EVERY = 900       # at most one automatic network search per 15 minutes
+STEADY_GAP = 300       # seconds offline after which a heater counts as changed (the room may have cooled meanwhile)
 MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Boost",
                "boost_off": "Boost beendet", "off": "Aus (Frostschutz)", "on": "Eingeschaltet"}
 
@@ -87,6 +88,10 @@ class HeaterState:
         self.refresh_lock = threading.Lock()
         # recent readings (time, room_temp in 0.1 °C, temp_corr at that time) for the calibration average
         self.temps: deque[tuple[float, int, int | None]] = deque(maxlen=1000)
+        # mode, setpoint and window as last seen, and since when (time.time()): a calibration run counts a minute
+        # as calm only a while after one of them changed
+        self.steady: tuple | None = None
+        self.steady_since: float | None = None
 
     def room_temp_average(self, window: float = AVG_WINDOW) -> tuple[float, int, int] | None:
         """Average room temperature (0.1 °C) over the last `window` seconds, only from readings taken with
@@ -129,6 +134,11 @@ class Service:
         self._clock_trusted = False
         self._clock_warned = False
         self._drop_old_sensors()
+        self._calib_lock = threading.Lock()
+        # sensor id -> calibration run; data.json gets the tally every 15 minutes and at every start, end or change
+        self._calib_runs: dict[str, dict] = json.loads(json.dumps({
+            sid: m["calibration"] for sid, m in self.store.data["sensors"].items()
+            if isinstance(m.get("calibration"), dict) and m["calibration"].get("until")}))
         known = {m.get("last_host"): k for k, m in self.store.data["heaters"].items() if not k.startswith("host:")}
         for e in self.entries:
             e.key = known.get(e.label)
@@ -207,7 +217,11 @@ class Service:
                 e.online, e.error = True, f"unerwartete Antwort: {exc}"
             else:
                 e.values.update(vals)
-                e.online, e.error, e.last_seen, e.offline_since = True, None, time.time(), None
+                now = time.time()
+                steady = (e.values.get("operating_mode"), e.values.get("setpoint"), e.values.get("open_window"))
+                if steady != e.steady or (e.offline_since is not None and now - e.offline_since > STEADY_GAP):
+                    e.steady, e.steady_since = steady, now
+                e.online, e.error, e.last_seen, e.offline_since = True, None, now, None
                 if isinstance(vals.get("room_temp"), int):
                     e.temps.append((e.last_seen, vals["room_temp"], e.values.get("temp_corr")))
             finally:
@@ -581,10 +595,10 @@ class Service:
             log.info("Fühler entfernt – die App liest nur noch Shelly Pills: %s (%s)",
                      m.get("name") or m.get("device_name") or sid, m.get("model") or "unbekanntes Modell")
 
-    def _note_pill(self, pill: dict, at: str, heater_temps: dict | None = None, save: bool = False) -> None:
+    def _note_pill(self, pill: dict, at: str, heater_temps: dict | None = None, save: bool = False) -> dict:
         """A Pill answered: remember what it measures for its saved sensors, together with the room temperature
         of the heaters in their rooms at that moment (the pair the calibration compares). With save, the
-        readings also go to data.json; a new address always does."""
+        readings also go to data.json; a new address always does. Returns the readings (sensor id -> reading)."""
         probes = {p["channel"]: p for p in pill["probes"]}
         self._pill_status[pill["id"]] = {
             "online": True, "since": None, "mode": pill["mode"], "firmware": pill["firmware"], "update": pill["update"],
@@ -593,7 +607,7 @@ class Service:
         data = self.store.snapshot()
         saved = {sid: m for sid, m in data["sensors"].items() if m.get("pill") == pill["id"]}
         if not saved:
-            return
+            return {}
         heater_temps = self._heater_temps() if heater_temps is None else heater_temps
         readings = {}
         for sid, meta in saved.items():
@@ -613,6 +627,7 @@ class Service:
                     meta.update(host=pill["address"], device_name=pill["name"], model=pill["model"], mac=pill["mac"])
                     if save and sid in readings:
                         meta["last"] = readings[sid]
+        return readings
 
     def _pill_offline(self, pill_id: str) -> None:
         old = self._pill_status.get(pill_id) or {}
@@ -655,11 +670,13 @@ class Service:
         if missing and (force or now - self._sensors_searched >= self.SENSOR_SEARCH_EVERY):
             self._sensors_searched = now
             found.update(self._locate(missing, list(pills.values())))
+        fresh = {}
         for pid, p in found.items():
             if p is None:
                 self._pill_offline(pid)
             else:
-                self._note_pill(p, at, heater_temps, save=save)
+                fresh.update(self._note_pill(p, at, heater_temps, save=save))
+        self._calib_tick(fresh, save)
         if save:
             self._sensors_saved = now
 
@@ -698,9 +715,15 @@ class Service:
         return {"id": sensor_id, "message": f"Fühler „{self._sensor_name(sensor_id, self.store.snapshot())}“ gespeichert."}
 
     def update_sensor(self, sensor_id: str, body: dict) -> dict:
-        self._sensor(sensor_id)
+        meta = self._sensor(sensor_id)
         name = self._clean_name(body.get("name"), allow_empty=True)
         room_id = self._room_or_none(body.get("room")) if "room" in body else None
+        if "room" in body and room_id != meta.get("room"):
+            with self._calib_lock:
+                calibrating = sensor_id in self._calib_runs
+            if calibrating:
+                raise ActionError("Der Fühler hat eine Kalibrierung – erst abbrechen oder schließen, dann den Raum "
+                                  "wechseln.", 409)
         with self.store.edit() as d:
             meta = d["sensors"][sensor_id]
             if "name" in body:
@@ -731,6 +754,8 @@ class Service:
 
     def delete_sensor(self, sensor_id: str) -> dict:
         self._sensor(sensor_id)
+        with self._calib_lock:
+            self._calib_runs.pop(sensor_id, None)
         with self.store.edit() as d:
             d["sensors"].pop(sensor_id)
         self._sensor_live.pop(sensor_id, None)
@@ -782,6 +807,11 @@ class Service:
         return {"restart": True, "message": "Die Pill startet neu – in etwa 15 Sekunden ist sie wieder da."}
 
     CALIB_TOLERANCE = 0.5   # °C – the deviation the user accepts (heater vs. room sensor)
+    CALIB_DEFAULT_HOURS = 24  # a calibration run: the „Ein-Tages-Kalibrierung“ …
+    CALIB_MAX_HOURS = 72      # … or up to three days
+    CALIB_SETTLE = 60 * 60    # seconds after a change of mode, setpoint or window before a minute counts as calm
+    CALIB_MIN_MINUTES = 120   # calm minutes a heater needs before the app proposes a correction
+    CALIB_SPREAD_WARN = 1.0   # °C – middle half of the minutes wider than this: the proposal is uncertain
 
     @staticmethod
     def _probe_number(sensor_id: str, data: dict) -> int | None:
@@ -799,6 +829,9 @@ class Service:
 
     def _sensor_views(self, data: dict, heaters: list[dict]) -> list[dict]:
         views = []
+        with self._calib_lock:
+            runs = json.loads(json.dumps(self._calib_runs))
+        now_iso = self.now().isoformat(timespec="seconds")
         for sensor_id, meta in data["sensors"].items():
             saved, live = meta.get("last") or {}, self._sensor_live.get(sensor_id) or {}
             last = live if live and str(live.get("at") or "") >= str(saved.get("at") or "") else saved
@@ -827,8 +860,218 @@ class Service:
                           "mode": status.get("mode"), "firmware": status.get("firmware"), "update": status.get("update"),
                           "online": status.get("online"), "offline_since": status.get("since"), "error": error,
                           "temp": last.get("temp"), "humidity": last.get("humidity"), "measured_at": last.get("at"),
-                          "compare": compare, "tolerance": self.CALIB_TOLERANCE})
+                          "compare": compare, "tolerance": self.CALIB_TOLERANCE,
+                          "calibration": self._calib_view(runs[sensor_id], heaters, now_iso) if sensor_id in runs else None})
         return sorted(views, key=lambda v: v["name"].lower())
+
+    # ------------------------------------------------------------------ calibration run („Kalibrierlauf“)
+    def _calib_reason(self, e: HeaterState, now: float) -> str | None:
+        """Why this minute of heater e does not count for a calibration – or None: the room is calm."""
+        v = e.values
+        if not e.online or not isinstance(v.get("room_temp"), int) or not isinstance(v.get("temp_corr"), int):
+            return "offline"
+        if v.get("open_window") == 1:
+            return "window"
+        if v.get("operating_mode") == 2:
+            return "boost"
+        if v.get("operating_mode") in (3, 4):   # holiday, standby („Aus“)
+            return "off"
+        if e.steady_since is None or now - e.steady_since < self.CALIB_SETTLE:
+            return "settling"
+        return None
+
+    def _calib_tick(self, fresh: dict, save: bool) -> None:
+        """One calibration minute: for every running calibration whose sensor was just read, each heater of its room
+        either adds a calm minute to its tally – the correction that would have made it show the sensor's value
+        (0.1 °C steps) – or counts as left out, with the reason."""
+        if not self._calib_runs:
+            return
+        now_iso, now = self.now().isoformat(timespec="seconds"), time.time()
+        rooms = {hid: m.get("room") for hid, m in self.store.snapshot()["heaters"].items()}
+        ended = []
+        with self._calib_lock:
+            for sid, run in self._calib_runs.items():
+                if run.get("finished"):
+                    continue
+                if now_iso >= run["until"]:
+                    run["finished"] = run["until"]
+                    ended.append(sid)
+                    continue
+                reading = fresh.get(sid)
+                if reading is None or reading.get("temp") is None:
+                    run["missing"] = run.get("missing", 0) + 1
+                    continue
+                for e in self.entries:
+                    if rooms.get(e.id) != run["room"]:
+                        continue
+                    tally = run["heaters"].setdefault(e.id, {"bins": {}, "skipped": {}})
+                    pair = (reading.get("heaters") or {}).get(e.id) or {}
+                    reason = self._calib_reason(e, now) or (None if pair.get("corr") is not None else "offline")
+                    if reason:
+                        tally["skipped"][reason] = tally["skipped"].get(reason, 0) + 1
+                        continue
+                    key = str(round((reading["temp"] - pair["temp"] + pair["corr"]) * 10))
+                    tally["bins"][key] = tally["bins"].get(key, 0) + 1
+        for sid in ended:
+            log.info("Kalibrierung zu Ende: %s", sid)
+        if save or ended:
+            self._calib_save()
+
+    @staticmethod
+    def _calib_stats(bins: dict) -> dict | None:
+        """Median and middle half (q1…q3) of the tally, in 0.1 °C; None without a calm minute."""
+        values = sorted((int(k), n) for k, n in bins.items() if n > 0)
+        total = sum(n for _, n in values)
+        if not total:
+            return None
+
+        def at(pos: int) -> int:   # the value of the pos-th minute (0-based) in sorted order
+            for value, n in values:
+                if pos < n:
+                    return value
+                pos -= n
+            return values[-1][0]
+        return {"minutes": total, "median": (at((total - 1) // 2) + at(total // 2)) / 2,
+                "q1": at((total - 1) // 4), "q3": at(3 * (total - 1) // 4)}
+
+    def _calib_view(self, run: dict, heaters: list[dict], now_iso: str) -> dict:
+        """A calibration run for the setup page: progress while it runs, then one proposal per heater."""
+        finished = run.get("finished") or (run["until"] if now_iso >= run["until"] else None)
+        by_id = {h["id"]: h for h in heaters}
+        ids = list(run["heaters"]) + [h["id"] for h in heaters if h["room"] == run["room"] and h["id"] not in run["heaters"]]
+        rows = []
+        for hid in ids:
+            tally, h = run["heaters"].get(hid) or {"bins": {}, "skipped": {}}, by_id.get(hid)
+            stats = self._calib_stats(tally["bins"])
+            minutes = stats["minutes"] if stats else 0
+            estimate = round(stats["median"]) / 10 if stats else None
+            enough = stats is not None and minutes >= self.CALIB_MIN_MINUTES
+            spread = round((stats["q3"] - stats["q1"]) / 10, 1) if stats else None
+            current = h["temp_corr"] if h else None
+            applied = (run.get("applied") or {}).get(hid)
+            why = None
+            if finished and not applied:
+                why = ("zu wenig ruhige Messung" if not enough
+                       else "außerhalb von ±9,9 °C – bitte Fühler und Aufstellort prüfen" if abs(estimate) > MAX_CORRECTION / 10
+                       else "Heizung nicht mehr eingerichtet" if h is None
+                       else "nur lesbar – für die Korrektur wird ihr Token gebraucht" if not h["writable"]
+                       else "Heizung offline" if not h["online"] else None)
+            rows.append({"id": hid, "name": h["name"] if h else hid, "minutes": minutes, "skipped": tally["skipped"],
+                         "estimate": estimate, "proposal": estimate if enough else None, "current": current,
+                         "change": round(estimate - current, 1) if enough and current is not None else None,
+                         "spread": spread, "uncertain": spread is not None and spread > self.CALIB_SPREAD_WARN + 1e-9,
+                         "applied": applied, "can_apply": bool(finished and enough and not applied and why is None),
+                         "why": why})
+        return {"running": not finished, "started": run["started"], "until": run["until"], "finished": finished,
+                "hours": run.get("hours"), "missing": run.get("missing", 0),
+                "can_finish": not finished and any(r["proposal"] is not None for r in rows),
+                "heaters": rows}
+
+    def _calib_save(self) -> None:
+        """Write the calibration runs into data.json – every 15 minutes, and at once after a start, end or change."""
+        with self._calib_lock:
+            runs = json.loads(json.dumps(self._calib_runs))
+        with self.store.edit() as d:
+            for sid, meta in d["sensors"].items():
+                if sid in runs:
+                    meta["calibration"] = runs[sid]
+                else:
+                    meta.pop("calibration", None)
+
+    def _when(self, moment: datetime) -> str:
+        """„heute 22:10 Uhr“, „morgen 20:40 Uhr“ or „23.11. 08:00 Uhr“."""
+        days = (moment.date() - self.now().date()).days
+        day = "heute" if days == 0 else "morgen" if days == 1 else moment.strftime("%d.%m.")
+        return f"{day} {moment.strftime('%H:%M')} Uhr"
+
+    @staticmethod
+    def _duration(minutes: int) -> str:
+        hours, rest = divmod(int(minutes), 60)
+        return (f"{hours} Std." + (f" {rest} Min." if rest else "")) if hours else f"{rest} Min."
+
+    def start_calibration(self, sensor_id: str, body: dict) -> dict:
+        """Start a calibration run: from now on every calm minute pairs the sensor with each heater of its room."""
+        meta = self._sensor(sensor_id)
+        data = self.store.snapshot()
+        room = meta.get("room") if meta.get("room") in data["rooms"] else None
+        if not room:
+            raise ActionError("Bitte den Fühler zuerst einem Raum zuordnen.", 409)
+        members = [e.id for e in self.entries if data["heaters"].get(e.id, {}).get("room") == room]
+        if not members:
+            raise ActionError("In diesem Raum ist keine Heizung.", 409)
+        hours = body.get("hours", self.CALIB_DEFAULT_HOURS)
+        if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= self.CALIB_MAX_HOURS:
+            raise ActionError(f"Die Dauer muss zwischen 1 und {self.CALIB_MAX_HOURS} Stunden liegen.")
+        now = self.now().replace(microsecond=0)
+        until = now + timedelta(hours=hours)
+        with self._calib_lock:
+            if sensor_id in self._calib_runs:
+                raise ActionError("Für diesen Fühler gibt es schon eine Kalibrierung – erst abbrechen oder schließen.", 409)
+            self._calib_runs[sensor_id] = {"room": room, "hours": hours, "started": now.isoformat(),
+                                           "until": until.isoformat(), "finished": None, "missing": 0,
+                                           "heaters": {hid: {"bins": {}, "skipped": {}} for hid in members},
+                                           "applied": {}}
+        self._calib_save()
+        log.info("Kalibrierung gestartet: %s in %s, %d Std.", sensor_id, data["rooms"][room]["name"], hours)
+        return {"message": f"Kalibrierung gestartet – sie läuft bis {self._when(until)}."}
+
+    def finish_calibration(self, sensor_id: str) -> dict:
+        """„Jetzt auswerten“: end a run early – once at least one heater has enough calm minutes."""
+        self._sensor(sensor_id)
+        now_iso = self.now().isoformat(timespec="seconds")
+        with self._calib_lock:
+            run = self._calib_runs.get(sensor_id)
+            if run is None:
+                raise ActionError("Für diesen Fühler läuft keine Kalibrierung.", 404)
+            if not run.get("finished") and now_iso < run["until"]:
+                if not any((self._calib_stats(t["bins"]) or {}).get("minutes", 0) >= self.CALIB_MIN_MINUTES
+                           for t in run["heaters"].values()):
+                    raise ActionError("Noch zu wenig ruhige Messung – jede Heizung braucht mindestens "
+                                      f"{self._duration(self.CALIB_MIN_MINUTES)}.", 409)
+                run["finished"] = now_iso
+        self._calib_save()
+        log.info("Kalibrierung ausgewertet: %s", sensor_id)
+        return {"message": "Kalibrierung ausgewertet."}
+
+    def discard_calibration(self, sensor_id: str) -> dict:
+        """„Abbrechen“ while it runs, „Schließen“ afterwards: the run and its tally go."""
+        self._sensor(sensor_id)
+        now_iso = self.now().isoformat(timespec="seconds")
+        with self._calib_lock:
+            run = self._calib_runs.pop(sensor_id, None)
+        if run is None:
+            raise ActionError("Für diesen Fühler gibt es keine Kalibrierung.", 404)
+        self._calib_save()
+        running = not run.get("finished") and now_iso < run["until"]
+        log.info("Kalibrierung %s: %s", "abgebrochen" if running else "geschlossen", sensor_id)
+        return {"message": "Kalibrierung abgebrochen." if running else "Kalibrierung geschlossen."}
+
+    def apply_calibration(self, sensor_id: str, body: dict) -> dict:
+        """„Übernehmen“: write the proposed correction into one heater of a finished run. Writes to the heater."""
+        self._sensor(sensor_id)
+        heater_id = str(body.get("heater") or "")
+        data = self.store.snapshot()
+        heaters = [self._heater_view(e, data) for e in self.entries]
+        now_iso = self.now().isoformat(timespec="seconds")
+        with self._calib_lock:
+            run = self._calib_runs.get(sensor_id)
+            view = self._calib_view(json.loads(json.dumps(run)), heaters, now_iso) if run else None
+        if view is None:
+            raise ActionError("Für diesen Fühler gibt es keine Kalibrierung.", 404)
+        if view["running"]:
+            raise ActionError("Die Kalibrierung läuft noch – erst auswerten.", 409)
+        row = next((r for r in view["heaters"] if r["id"] == heater_id), None)
+        if row is None:
+            raise ActionError("Diese Heizung gehört nicht zu dieser Kalibrierung.", 404)
+        if not row["can_apply"]:
+            raise ActionError(f"{row['name']}: {'schon übernommen' if row['applied'] else row['why'] or 'nicht möglich'}.", 409)
+        res = self.calibrate(heater_id, {"correction": row["proposal"]})
+        with self._calib_lock:
+            run = self._calib_runs.get(sensor_id)
+            if run is not None:
+                run.setdefault("applied", {})[heater_id] = {"at": now_iso, "old": res["old"], "new": res["new"]}
+        self._calib_save()
+        return {"message": f"{row['name']}: {res['message']}"}
 
     def _adopt(self, found: dict) -> list[dict]:
         """Known heaters (by serial number) that are offline but answered at another address: take that address."""
@@ -924,6 +1167,12 @@ class Service:
             for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
                 if meta.get("room") == room_id:
                     meta["room"] = None
+        with self._calib_lock:   # a calibration of the room ends with it
+            gone = [sid for sid, run in self._calib_runs.items() if run.get("room") == room_id]
+            for sid in gone:
+                self._calib_runs.pop(sid)
+        if gone:
+            self._calib_save()
         return {}
 
     def update_heater(self, heater_id: str, body: dict) -> dict:
@@ -1150,7 +1399,10 @@ class Service:
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
-                "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters)}
+                "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
+                "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,
+                                "hours": self.CALIB_DEFAULT_HOURS, "max_hours": self.CALIB_MAX_HOURS,
+                                "spread_warn": self.CALIB_SPREAD_WARN}}
 
     def _heater_view(self, e: HeaterState, data: dict) -> dict:
         v, meta = e.values, data["heaters"].get(e.id, {})
