@@ -60,7 +60,7 @@ class DataStore:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.RLock()
-        self.data = {"version": 1, "heaters": {}, "rooms": {}, "plans": {}}
+        self.data = {"version": 1, "heaters": {}, "rooms": {}, "plans": {}, "sensors": {}}
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 self.data.update(json.load(fh))

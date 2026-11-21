@@ -217,3 +217,47 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .brand { margin: 0 0 2px; font-size: 13px; font-weight: 600; letter-spacing: .06em; color: var(--accent); }
 .app-info { padding: 4px 16px 28px; font-size: 13px; color: var(--muted); }
 .app-info a { color: inherit; }
+
+/* "Über" tab: logo (white JPEG, so it keeps a white plate in dark mode too) and app facts */
+.about { max-width: 560px; }
+.about-logo { display: block; width: 100%; max-width: 420px; height: auto; margin: 0 auto 14px; border-radius: 12px; background: #fff; }
+.about-lead { font-size: 16px; margin: 0 0 12px; }
+.about-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 12px; }
+.about-facts dt { color: var(--muted); }
+.about-facts dd { margin: 0; overflow-wrap: anywhere; }
+.updates h2 { margin-bottom: 8px; }
+.updates p { margin: 0 0 10px; }
+.updates .update-ok { color: var(--ok); font-weight: 600; }
+.updates .update-new { padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); margin-bottom: 4px; }
+.updates .update-new p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.updates .update-new button { font-size: 16px; padding: 9px 16px; }
+.banner.info { background: var(--primary); }
+
+/* sensor search mode in "Geräte" */
+.steps { margin: 10px 0 4px; padding-left: 22px; }
+.steps li { margin: 3px 0; }
+.searching::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px; border-radius: 50%;
+                     background: var(--accent); animation: searching 1.2s ease-in-out infinite; }
+@keyframes searching { 50% { opacity: .25; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) { .searching::before { animation: none; } }
+
+/* sub-tabs inside "Geräte" (Heizung, Fühler) and "Aktualisieren" waiting for a sleeping sensor */
+.subtabs { display: flex; gap: 6px; }
+.subtabs button { border-radius: 99px; padding: 7px 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 7px; }
+.subtabs .count { font-size: 12px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+.subtabs button[aria-selected="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.subtabs button[aria-selected="true"] .count { color: inherit; }
+.device-head button + button { margin-left: 6px; }
+.sensor-wait { margin: 8px 0 4px; padding: 8px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 14px; }
+.sensor-wait .searching { font-weight: 600; margin-right: 4px; }
+
+/* calibration: sensor vs. heaters of its room */
+.calib-compare { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.calib-compare h3 { margin: 0 0 2px; font-size: 15px; }
+.calib-compare table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 6px; }
+.calib-compare th { text-align: left; font-weight: 400; color: var(--muted); font-size: 12px; padding: 0 8px 4px 0; }
+.calib-compare td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); }
+.calib-compare .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.calib-compare tr.ref td { font-weight: 600; }
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.tag.warn { color: var(--accent); border-color: var(--accent); }

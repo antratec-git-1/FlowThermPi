@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_heater import EMPTY, FakeHeater  # noqa: E402
-from heizapp import coap, discovery, plans  # noqa: E402
+from fake_shelly import HT_STATUS, FakeShelly  # noqa: E402
+from heizapp import coap, discovery, plans, shelly  # noqa: E402
 from heizapp.device import AuthError, Heater, NotApplied, ReadOnlyError  # noqa: E402
 from heizapp.server import make_server  # noqa: E402
 from heizapp.service import Service  # noqa: E402
@@ -175,6 +176,28 @@ class DiscoveryTest(unittest.TestCase):
         finally:
             a.close()
             b.close()
+
+    def test_sensor_scan_lists_only_temperature_sensors(self):
+        ht = FakeShelly()
+        plug = FakeShelly(ident="shellyplugsg3-112233445566", app="PlugSG3", status={"switch:0": {"id": 0, "output": True}})
+        locked = FakeShelly(ident="shellyhtg3-665544332211", password=True, name="Bad")
+        with socket.socket() as s:   # an address where nothing listens
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        try:
+            found = shelly.scan([("127.0.0.1", p) for p in (ht.port, plug.port, closed, locked.port)], timeout=0.5)
+            by_id = {f["id"]: f for f in found}
+            self.assertEqual(set(by_id), {"shellyhtg3-aabbccddeeff", "shellyhtg3-665544332211"})   # no plug
+            f = by_id["shellyhtg3-aabbccddeeff"]
+            self.assertEqual((f["model"], f["address"]), ("Shelly H&T Gen3", f"127.0.0.1:{ht.port}"))
+            self.assertEqual((f["temp"], f["humidity"], f["battery"], f["usb"], f["protected"]), (21.4, 47.2, 88, True, False))
+            g = by_id["shellyhtg3-665544332211"]
+            self.assertEqual((g["name"], g["temp"], g["protected"]), ("Bad", None, True))
+            for dev in (ht, plug, locked):    # read only: nothing but GET requests
+                self.assertTrue(dev.requests and all(m == "GET" for m, _ in dev.requests), dev.requests)
+        finally:
+            for dev in (ht, plug, locked):
+                dev.close()
 
 
 class ApiTest(unittest.TestCase):
@@ -514,6 +537,111 @@ class ApiTest(unittest.TestCase):
             self.assertTrue(res.headers["Server"].startswith("FlowThermPi/"))
         self.call("GET", "/api/nope", expect=404)
 
+    def test_app_icon_is_served(self):
+        with urllib.request.urlopen(self.base + "/", timeout=5) as res:
+            page = res.read()
+        for name in (b"favicon.ico", b"apple-touch-icon.png"):
+            self.assertIn(b'href="' + name + b'"', page)
+            with urllib.request.urlopen(self.base + "/" + name.decode(), timeout=5) as res:
+                self.assertTrue(res.headers["Content-Type"].startswith("image/"))
+                self.assertGreater(len(res.read()), 1000)
+        with urllib.request.urlopen(self.base + "/logo.jpg", timeout=5) as res:   # picture on the "Über" tab
+            self.assertEqual(res.headers["Content-Type"], "image/jpeg")
+
+    def test_sensor_search_sweep(self):
+        ht = FakeShelly()
+        try:
+            self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
+            res = self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+            self.assertEqual(res["networks"], ["192.168.5.0/24"])
+            self.assertEqual([(f["id"], f["temp"]) for f in res["sensors"]], [("shellyhtg3-aabbccddeeff", 21.4)])
+            self.call("POST", "/api/sensors/discover", {"network": "8.8.8"}, expect=400)   # not a home network
+        finally:
+            ht.close()
+
+    def test_sensor_save_assign_and_remove(self):
+        sid = "shellyhtg3-aabbccddeeff"
+        ht = FakeShelly(name="Shelly Wohnzimmer")
+        self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
+        self.call("POST", "/api/sensors", {"id": sid}, expect=404)            # the search has not seen it yet
+        self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+        ht.close()                                                           # asleep again – saving still works
+        room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
+        self.call("POST", "/api/sensors", {"id": sid, "room": "r-gibtsnicht"}, expect=404)
+        self.call("POST", "/api/sensors", {"id": sid, "name": "", "room": room})
+        self.call("POST", "/api/sensors", {"id": sid}, expect=409)            # only once
+        state = self.call("GET", "/api/state")
+        s = state["sensors"][0]
+        self.assertEqual((s["id"], s["name"], s["room"], s["temp"], s["humidity"], s["usb"]),
+                         (sid, "Shelly Wohnzimmer", room, 21.4, 47.2, True))
+        self.assertTrue(s["measured_at"])
+        self.assertEqual(next(r for r in state["rooms"] if r["id"] == room)["sensors"], [sid])
+
+        awake = FakeShelly(status={**HT_STATUS, "temperature:0": {"id": 0, "tC": 19.5}})   # wakes up at a new address
+        try:
+            self.service._sensor_targets = lambda nets: [("127.0.0.1", awake.port)]
+            self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+        finally:
+            awake.close()
+        s = self.call("GET", "/api/state")["sensors"][0]
+        self.assertEqual((s["temp"], s["host"]), (19.5, f"127.0.0.1:{awake.port}"))
+
+        self.call("PATCH", f"/api/sensors/{sid}", {"name": "Salon Fenster", "room": None})
+        s = self.call("GET", "/api/state")["sensors"][0]
+        self.assertEqual((s["name"], s["room"]), ("Salon Fenster", None))
+        self.call("PATCH", f"/api/sensors/{sid}", {"room": room})
+        self.call("DELETE", f"/api/rooms/{room}")                             # deleting the room unassigns the sensor
+        self.assertIsNone(self.call("GET", "/api/state")["sensors"][0]["room"])
+        self.call("DELETE", f"/api/sensors/{sid}")
+        self.assertEqual(self.call("GET", "/api/state")["sensors"], [])
+        self.call("DELETE", f"/api/sensors/{sid}", expect=404)
+
+    def test_sensor_refresh(self):
+        sid = "shellyhtg3-aabbccddeeff"
+        ht = FakeShelly()
+        self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
+        self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+        self.call("POST", "/api/sensors", {"id": sid})
+        ht.status = {**HT_STATUS, "temperature:0": {"id": 0, "tC": 23.0}}
+        res = self.call("POST", f"/api/sensors/{sid}/refresh")               # awake at its address
+        self.assertEqual((res["updated"], res["message"]), (True, "Shelly H&T Gen3: 23,0 °C"))
+        self.assertEqual(self.call("GET", "/api/state")["sensors"][0]["temp"], 23.0)
+        ht.close()
+        self.assertEqual(self.call("POST", f"/api/sensors/{sid}/refresh"), {"updated": False, "asleep": True})
+        moved = FakeShelly(status={**HT_STATUS, "temperature:0": {"id": 0, "tC": 20.5}})   # woke up at a new address
+        try:
+            self.service._sensor_targets = lambda nets: [("127.0.0.1", moved.port)]
+            self.assertTrue(self.call("POST", f"/api/sensors/{sid}/refresh")["updated"])
+        finally:
+            moved.close()
+        s = self.call("GET", "/api/state")["sensors"][0]
+        self.assertEqual((s["temp"], s["host"]), (20.5, f"127.0.0.1:{moved.port}"))
+        self.call("POST", "/api/sensors/gibtsnicht/refresh", expect=404)
+
+    def test_sensor_compares_with_heaters_of_its_room(self):
+        sid = "shellyhtg3-aabbccddeeff"
+        self.service.poll_all()
+        room = self.call("POST", "/api/rooms", {"name": "Salon"})["id"]
+        self.call("PATCH", "/api/heaters/91110001", {"room": room})          # shows 21.5 °C
+        ht = FakeShelly()                                                     # measures 21.4 °C
+        try:
+            self.service._sensor_targets = lambda nets: [("127.0.0.1", ht.port)]
+            self.call("POST", "/api/sensors/discover", {"network": "192.168.5"})
+            self.call("POST", "/api/sensors", {"id": sid, "room": room})
+            s = self.call("GET", "/api/state")["sensors"][0]
+            self.assertEqual(s["compare"], [{"heater": "91110001", "name": s["compare"][0]["name"], "temp": 21.5,
+                                             "corr": 0.0, "deviation": 0.1, "ok": True}])
+            self.a.values["room_temp"] = 228                                  # the heater warms its own sensor
+            self.service.poll_all()
+            self.call("POST", f"/api/sensors/{sid}/refresh")
+            c = self.call("GET", "/api/state")["sensors"][0]["compare"][0]
+            self.assertEqual((c["temp"], c["deviation"], c["ok"]), (22.8, 1.4, False))
+            self.call("PATCH", "/api/heaters/92220002", {"room": room})      # joined later: no common reading yet
+            c = self.call("GET", "/api/state")["sensors"][0]["compare"]
+            self.assertEqual([(x["heater"], x["deviation"]) for x in c], [("91110001", 1.4), ("92220002", None)])
+        finally:
+            ht.close()
+
     def test_heater_clocks_wait_until_own_clock_is_right(self):
         from heizapp import service as service_module   # e.g. a Raspberry Pi right after a power cut
         original = service_module.host_clock_synced
@@ -529,6 +657,7 @@ class ApiTest(unittest.TestCase):
     def test_state_names_the_app(self):
         app = self.call("GET", "/api/state")["app"]
         self.assertEqual((app["name"], app["license"]), ("FlowThermPi", "GPL-3.0"))
+        self.assertIn("antratec", app["copyright"])
         self.assertRegex(app["version"], r"^\d+\.\d+\.\d+$")
 
 

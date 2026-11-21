@@ -13,9 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import APP_NAME, LICENSE, REPO_URL, __version__
+from . import APP_NAME, COPYRIGHT, LICENSE, REPO_URL, __version__
 from .access import COOKIE, SetupAccess
 from .service import ActionError, Service
+from .update import Updater
 
 log = logging.getLogger("heizapp")
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
@@ -23,7 +24,7 @@ MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 
 
-def _routes(s: Service):
+def _routes(s: Service, u: Updater):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
     return [
@@ -52,14 +53,23 @@ def _routes(s: Service):
         ("POST", rf"/api/heaters/{h}/calibrate", lambda m, b, r: s.calibrate(m[1], b), SETUP),
         ("POST", r"/api/clock-sync", lambda m, b, r: s.sync_clocks(), SETUP),
         ("POST", r"/api/discover", lambda m, b, r: s.discover(b.get("network")), SETUP),
+        ("POST", r"/api/sensors/discover", lambda m, b, r: s.find_sensors(b.get("network")), SETUP),
+        ("POST", r"/api/sensors", lambda m, b, r: s.add_sensor(b), SETUP),
+        ("PATCH", rf"/api/sensors/{i}", lambda m, b, r: s.update_sensor(m[1], b), SETUP),
+        ("DELETE", rf"/api/sensors/{i}", lambda m, b, r: s.delete_sensor(m[1]), SETUP),
+        ("POST", rf"/api/sensors/{i}/refresh", lambda m, b, r: s.refresh_sensor(m[1]), SETUP),
         ("POST", r"/api/plans", lambda m, b, r: s.create_plan(b), SETUP),
         ("PUT", rf"/api/plans/{i}", lambda m, b, r: s.update_plan(m[1], b), SETUP),
         ("DELETE", rf"/api/plans/{i}", lambda m, b, r: s.delete_plan(m[1]), SETUP),
+        ("POST", r"/api/update/check", lambda m, b, r: u.check(), SETUP),
+        ("POST", r"/api/update/start", lambda m, b, r: u.start(), SETUP),
     ]
 
 
-def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None):
-    routes = _routes(service)
+def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None,
+                 updater: Updater | None = None):
+    updater = updater or Updater(None)   # without it: no update button (e.g. on the Mac or in Docker)
+    routes = _routes(service, updater)
     access = access or SetupAccess(service.store)
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
@@ -107,7 +117,10 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
         def state(self) -> dict:
             result = service.state()
             result["setup"] = {"pin": access.pin_set, "unlocked": access.allowed(self._token(), touch=False)}
-            result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "repo": REPO_URL}
+            result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "copyright": COPYRIGHT,
+                             "repo": REPO_URL, "commit": updater.installed["commit"],
+                             "installed": updater.installed["installed"], "updates": updater.supported}
+            result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
             return result
 
         def unlock(self, pin) -> dict:
@@ -216,5 +229,6 @@ class _Server(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
-def make_server(service: Service, host: str, port: int, password: str | None = None) -> ThreadingHTTPServer:
-    return _Server((host, port), make_handler(service, password, SetupAccess(service.store)))
+def make_server(service: Service, host: str, port: int, password: str | None = None,
+                updater: Updater | None = None) -> ThreadingHTTPServer:
+    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater))

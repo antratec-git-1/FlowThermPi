@@ -27,6 +27,14 @@ let deviceFilter = localStorage.getItem("heizung.deviceFilter") || "all";  // "a
 let calibForm = null;    // calibration in "Geräte": {id, measured}
 let scan = null;         // network search in "Geräte": {running} | {data} | {error}
 let scanNet = "";        // network typed for "Anderes Netz"
+let sensorSearch = null; // sensor search mode in "Geräte": {running, startedAt, found: {id: sensor}, networks, error}
+let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, name, room, placeholder}
+let deviceTab = localStorage.getItem("heizung.deviceTab") === "sensors" ? "sensors" : "heaters";  // sub-tab of "Geräte"
+const sensorWait = {};   // "Aktualisieren" waiting for a sleeping sensor: id -> {until}
+const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
+let updateCheck = null;  // "Nach Updates suchen" in "Über": {running} | {result} | {error}
+let updateRun = loadUpdateRun();   // update started in this browser: {from: build, at}; survives the reload
+let loadedBuild = null;  // version|commit this page came with – another one answering means: reload
 const pending = {};      // debounced setpoint changes: cardKey -> {temp, timer}
 const busy = new Set();  // cards with a running action
 
@@ -92,16 +100,115 @@ async function refresh() {
   try {
     state = await api("GET", "api/state");
     stateAt = Date.now();
+    if (watchUpdate()) return;   // a new version answers: the page reloads
     const on = state.heaters.filter(h => h.online).length;
     setStatus(`${on}/${state.heaters.length} Heizung(en) online · ${new Date().toLocaleTimeString("de-DE")}`);
-    setBanner(null);
+    setBanner(updating() ? "Die Heizungs-App wird gerade aktualisiert und ist gleich kurz nicht erreichbar. " +
+      "Die Heizungen heizen weiter." : null, true);
     showAppInfo(state.app);
     if (view === "setup" && !state.setup.unlocked && !pinPromise) showView("home");  // e.g. the app was restarted
   } catch (e) {
     setStatus("keine Verbindung zur App", true);
-    setBanner("Keine Verbindung zur Heizungs-App. Es wird gleich noch einmal versucht.");
+    if (updating()) setBanner("Die Heizungs-App startet nach dem Update neu – gleich wieder da. Die Heizungen heizen weiter.", true);
+    else setBanner("Keine Verbindung zur Heizungs-App. Es wird gleich noch einmal versucht.");
   }
   render();
+}
+
+// ------------------------------------------------------------------ updates (button in "Über")
+function buildOf(app) { return app ? `${app.version}|${app.commit || ""}` : ""; }
+function loadUpdateRun() {
+  try { const r = JSON.parse(localStorage.getItem("heizung.update") || "null"); return r && r.from ? r : null; }
+  catch (_) { return null; }
+}
+function updating() {  // an update is under way – started here or in another browser
+  return !!updateRun || !!(state && state.update && ["waiting", "running"].includes(state.update.state));
+}
+
+function watchUpdate() {  // after every refresh; true = the page reloads
+  const build = buildOf(state.app);
+  if (loadedBuild === null) loadedBuild = build;
+  else if (build !== loadedBuild) { location.reload(); return true; }   // new version: load its page and scripts
+  if (!updateRun) return false;
+  const u = state.update;
+  if (build !== updateRun.from) endUpdateRun(`Update fertig – jetzt läuft FlowThermPi ${state.app.version}.`);
+  else if (u && u.state === "failed") endUpdateRun(`Update fehlgeschlagen: ${u.message || "unbekannter Fehler"}`, true);
+  else if (u && u.state === "done") endUpdateRun(u.message || "Update fertig.");
+  else if (Date.now() - updateRun.at > UPDATE_MAX_MS)
+    endUpdateRun("Das Update dauert ungewöhnlich lange. Meldungen auf dem Pi: journalctl -u flowthermpi-update", true);
+  return false;
+}
+
+function endUpdateRun(message, error = false) {
+  updateRun = null;
+  localStorage.removeItem("heizung.update");
+  toast(message, error);
+}
+
+async function checkUpdates() {
+  updateCheck = { running: true };
+  render();
+  try { updateCheck = { result: await api("POST", "api/update/check") }; }
+  catch (e) { updateCheck = { error: e.message }; }
+  render();
+}
+
+async function startUpdate() {
+  const latest = updateCheck && updateCheck.result && updateCheck.result.latest;
+  const yes = await ask({
+    title: "Jetzt aktualisieren?",
+    text: `FlowThermPi holt ${latest ? "Version " + latest.version : "die neueste Version"} von GitHub und startet neu. ` +
+      "Das dauert meist ein bis zwei Minuten, die Heizungen heizen in der Zeit ganz normal weiter. " +
+      "Danach lädt diese Seite von selbst neu.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Jetzt aktualisieren", value: "yes", cls: "primary" }],
+  });
+  if (!yes) return;
+  try {
+    const res = await api("POST", "api/update/start");
+    updateRun = { from: buildOf(state.app), at: Date.now() };
+    localStorage.setItem("heizung.update", JSON.stringify(updateRun));
+    state.update = res.update;
+    updateCheck = null;
+  } catch (e) { toast(e.message, true); }
+  await refresh();
+}
+
+function fmtDate(iso) {
+  const d = iso ? new Date(iso) : null;
+  return d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" }) : "";
+}
+
+function updateCardHTML(app) {
+  const since = fmtDate(app.installed);
+  const u = state.update;
+  let body;
+  if (updating()) {
+    body = `<p class="searching"><b>Update läuft …</b></p>
+      <p class="muted">Das dauert meist ein bis zwei Minuten. Die App startet dabei neu, danach lädt diese Seite von selbst neu.
+        Die Heizungen heizen in der Zeit ganz normal weiter.</p>`;
+  } else if (updateCheck && updateCheck.running) {
+    body = `<p class="searching">Frage bei GitHub nach …</p>`;
+  } else {
+    const r = updateCheck && updateCheck.result;
+    const l = r && r.latest;
+    const failed = u && u.state === "failed" && !r &&
+      !(app.installed && Date.parse(u.finished || u.started) < Date.parse(app.installed));  // not if installed since
+    body = `${failed ? `<p class="error-text">Das letzte Update hat nicht geklappt: ${esc(u.message || "unbekannter Fehler")}</p>` : ""}
+      ${updateCheck && updateCheck.error ? `<p class="error-text">${esc(updateCheck.error)}</p>` : ""}
+      ${r && !r.available ? `<p class="update-ok">✓ Das ist die neueste Version.</p>` : ""}
+      ${r && r.available ? `<div class="update-new">
+        <p><b>Neu: Version ${esc(l.version)}</b>${l.date ? ` vom ${esc(fmtDate(l.date))}` : ""}</p>
+        ${l.message ? `<p class="muted">„${esc(l.message)}“</p>` : ""}
+        ${app.updates ? `<button class="primary" data-action="update-start">Jetzt aktualisieren</button>`
+          : `<p class="muted">Auf diesem Gerät gibt es keinen Update-Knopf. Den gibt es auf dem Raspberry Pi,
+              wenn FlowThermPi mit dem Installationsbefehl eingerichtet ist (Anleitung im Quellcode).</p>`}
+      </div>` : `<button data-action="update-check">Nach Updates suchen</button>`}`;
+  }
+  return `<div class="card about updates">
+    <h2>Updates</h2>
+    <p>Installiert: <b>Version ${esc(app.version)}</b>${since ? ` · seit ${esc(since)}` : ""}</p>
+    ${body}
+  </div>`;
 }
 
 function showAppInfo(app) {  // footer of the setup: name, version, licence, source code
@@ -111,9 +218,10 @@ function showAppInfo(app) {  // footer of the setup: name, version, licence, sou
     `<a href="${esc(app.repo)}" target="_blank" rel="noopener">Quellcode auf GitHub</a>`);
 }
 
-function setBanner(text) {
+function setBanner(text, info = false) {  // info: blue note instead of a red warning
   const el = document.getElementById("home-banner");
   el.textContent = text || "";
+  el.className = info ? "banner info" : "banner";
   el.hidden = !text;
 }
 
@@ -147,14 +255,31 @@ function render() {
     document.getElementById("pin-warning").hidden = state.setup.pin;
   }
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  for (const name of ["rooms", "plans", "devices"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  for (const name of ["rooms", "plans", "devices", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
   if (el.contains(focus) && focus.matches("input, select")) return;  // never disturb typing
   if (tab === "rooms") renderRooms(el);
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
+  else if (tab === "about") renderAbout(el);
   else renderDevices(el);
+}
+
+function renderAbout(el) {  // "Über": logo, what the app does, version, licence, source code
+  const app = state.app || {};
+  setHTML(el, `<div class="card about">
+    <img class="about-logo" src="logo.jpg" width="800" height="706" alt="FlowThermPi-Logo">
+    <p class="about-lead"><b>${esc(app.name)}</b> steuert Thermotec-Heizungen (AeroFlow mit FlexiSmart-Pro-Regler)
+      direkt im eigenen WLAN – ohne Cloud und ohne Konto beim Hersteller. Alle Daten bleiben im Haus.</p>
+    <dl class="about-facts">
+      <dt>Version</dt><dd>${esc(app.version)}</dd>
+      <dt>Lizenz</dt><dd>${esc(app.license)} – freie Software, ${esc(app.copyright)}</dd>
+      <dt>Quellcode</dt><dd><a href="${esc(app.repo)}" target="_blank" rel="noopener">${esc(String(app.repo).replace(/^https:\/\//, ""))}</a></dd>
+    </dl>
+    <p class="muted">FlowThermPi ist ein unabhängiges Projekt und kein Produkt der Thermotec AG.</p>
+  </div>
+  ${updateCardHTML(app)}`);
 }
 
 // ------------------------------------------------------------------ simple view for residents
@@ -412,12 +537,12 @@ async function openSetup() {
 }
 
 async function closeSetup(auto) {
-  if ((editing || roomForm || deviceForm || calibForm) && !auto) {
+  if ((editing || roomForm || deviceForm || calibForm || sensorForm) && !auto) {
     const yes = await ask({ title: "Einrichtung schließen?", text: "Nicht gespeicherte Änderungen gehen dabei verloren.",
       buttons: [{ label: "Weiter bearbeiten", value: null }, { label: "Schließen", value: "yes", cls: "primary" }] });
     if (!yes) return;
   }
-  editing = roomForm = deviceForm = calibForm = null;
+  editing = roomForm = deviceForm = calibForm = sensorForm = null;
   invalidate();
   showView("home");
   render();
@@ -545,8 +670,16 @@ function roomCard(g) {
     <div class="modes">${buttons}</div>
     ${g.kind === "room" ? planRow(g, writable) : '<p class="hint">Für Heizpläne diese Heizung unter „Geräte“ einem Raum zuordnen.</p>'}
     <ul class="heater-list">${g.heaters.map(heaterLine).join("")}</ul>
+    ${g.kind === "room" ? roomSensorsHTML(g) : ""}
     ${!writable && online.length ? '<p class="hint">Nur Anzeige: In heizungen.conf fehlt der Token.</p>' : ""}
   </article>`;
+}
+
+function roomSensorsHTML(g) {  // the room's sensors with their last reading (setup view)
+  const list = (state.sensors || []).filter(s => s.room === g.id);
+  if (!list.length) return "";
+  return `<p class="hint">Fühler: ${list.map(s => esc(s.name) + (s.temp == null ? ""
+    : ` <span class="muted">(${esc(deg(s.temp))}${s.measured_at ? ", gemessen " + esc(fmtTime(s.measured_at)) : ""})</span>`)).join(" · ")}</p>`;
 }
 
 function planRow(g, writable) {
@@ -877,6 +1010,228 @@ async function runScan(network) {
   await refresh();
 }
 
+// ------------------------------------------------------------------ sensor search mode ("Fühler suchen")
+const SENSOR_SEARCH_MS = 3 * 60 * 1000;   // the search mode ends itself after 3 minutes
+
+function mmss(ms) { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+
+function sensorText(f) {  // "21,3 °C · 45 % Luftfeuchte · am USB-Netzteil"
+  if (f.protected) return "mit Passwort geschützt – Messwerte nicht lesbar";
+  const parts = [];
+  if (f.temp != null) parts.push(deg(f.temp));
+  if (f.humidity != null) parts.push(`${Math.round(f.humidity)} % Luftfeuchte`);
+  if (f.usb) parts.push("am USB-Netzteil");
+  else if (f.battery != null) parts.push(`Batterie ${f.battery} %`);
+  return parts.join(" · ") || (f.asleep ? "schläft schon wieder" : "");
+}
+
+function sensorPanelHTML() {
+  const s = sensorSearch;
+  const found = Object.values(s.found).sort((a, b) => a.address.localeCompare(b.address, "de", { numeric: true }));
+  const saved = Object.fromEntries((state.sensors || []).map(x => [x.id, x]));
+  const items = found.map(f => `<li><span class="dot ok"></span><span class="hname"><b>${esc(f.name || f.model)}</b>
+      <span class="muted">${esc([f.address, sensorText(f)].filter(Boolean).join(" · "))}</span></span>
+      ${saved[f.id] ? `<span class="tag">in der App: ${esc(saved[f.id].name)}</span>`
+        : sensorForm && sensorForm.mode === "new" && sensorForm.id === f.id ? '<span class="tag">wird übernommen …</span>'
+        : `<button class="small primary" data-action="sensor-adopt" data-id="${esc(f.id)}">Übernehmen</button>`}</li>`).join("");
+  const list = items ? `<ul class="heater-list scan-list">${items}</ul>` : "";
+  if (s.error) {
+    return `<div class="scan"><div class="scan-head"><strong>Fühler suchen</strong>
+      <button class="small" data-action="sensor-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p>${list}</div>`;
+  }
+  if (s.running) {
+    return `<div class="scan sensor-search">
+      <div class="scan-head"><strong class="searching">Suchmodus läuft</strong>
+        <span class="muted">${s.networks ? esc(s.networks.join(", ")) + " · " : ""}noch ${mmss(s.startedAt + SENSOR_SEARCH_MS - Date.now())} min</span>
+        <button class="small" data-action="sensor-stop">Beenden</button></div>
+      <ol class="steps">
+        <li>Rückwand des Fühlers abnehmen.</li>
+        <li>Den Knopf dahinter <b>kurz</b> drücken. Der Fühler wacht auf und erscheint nach ein paar Sekunden hier.</li>
+      </ol>
+      <p class="hint">Nicht lange drücken: Nach 5 Sekunden startet der Einrichtungs-Hotspot, nach 10 Sekunden wird der
+        Fühler auf Werkseinstellungen zurückgesetzt. Der Fühler muss schon im WLAN sein.</p>
+      ${list || '<p class="scan-wait">Noch kein Fühler gefunden …</p>'}
+    </div>`;
+  }
+  return `<div class="scan"><div class="scan-head"><strong>Suche beendet</strong>
+      <span class="muted">${found.length ? `${found.length} Fühler gefunden` : "kein Fühler gefunden"}</span>
+      <button class="small" data-action="sensor-search">Erneut suchen</button>
+      <button class="small" data-action="sensor-close">Schließen</button></div>
+    ${list || `<p class="hint">Ist der Fühler im WLAN? Er antwortet nur, solange er wach ist – während der Suche den Knopf
+      hinter der Rückwand kurz drücken.</p>`}
+  </div>`;
+}
+
+async function runSensorSearch() {  // repeats a quick sweep until a button ends it, the setup closes or 3 minutes are over
+  const s = sensorSearch = { running: true, startedAt: Date.now(), found: {}, networks: null, error: null };
+  render();
+  while (sensorSearch === s && s.running && view === "setup" && Date.now() - s.startedAt < SENSOR_SEARCH_MS) {
+    const t0 = Date.now();
+    try {
+      const d = await api("POST", "api/sensors/discover", {});
+      s.networks = d.networks;
+      for (const f of d.sensors) {
+        const old = s.found[f.id];   // a sensor that is falling asleep again keeps its last readings
+        s.found[f.id] = old && f.temp == null && !f.protected ? Object.assign({}, old, { address: f.address }) : f;
+        if (!old && sensorSearch === s) toast(`Fühler gefunden: ${f.name || f.model} (${f.address})`);
+      }
+    } catch (e) {
+      s.error = e.message;
+      break;
+    }
+    if (sensorSearch !== s) return;
+    render();
+    await new Promise(r => setTimeout(r, Math.max(0, 2000 - (Date.now() - t0))));
+  }
+  s.running = false;
+  if (sensorSearch === s) render();
+}
+
+function sensorTileHTML(s, roomOptions) {
+  const editingThis = sensorForm && sensorForm.mode === "edit" && sensorForm.id === s.id;
+  const room = state.rooms.find(r => r.id === s.room);
+  return `<div class="device ${busy.has("sensor:" + s.id) ? "busy" : ""}" data-sensor="${esc(s.id)}">
+    <div class="device-head"><span class="dot"></span><strong class="dname">${esc(s.name)}</strong>
+      <span class="muted">${esc(room ? room.name : "kein Raum")}</span>
+      ${editingThis ? "" : `<button class="small" data-action="sensor-refresh" ${sensorWait[s.id] ? "disabled" : ""}>${sensorWait[s.id]
+        ? "wartet …" : "Aktualisieren"}</button><button class="small" data-action="sensor-edit">Bearbeiten</button>`}</div>
+    ${sensorWait[s.id] && sensorWait[s.id].asleep ? `<p class="sensor-wait"><span class="searching">Warte auf den Fühler …</span>
+      Er schläft gerade: Knopf hinter der Rückwand <b>kurz</b> drücken. Noch ${mmss(sensorWait[s.id].until - Date.now())} min.
+      <button class="small" data-action="sensor-refresh-cancel">Abbrechen</button></p>` : ""}
+    ${editingThis ? sensorFormHTML(sensorForm) : `<dl>
+      <dt>Raum</dt><dd><select data-action="sensor-room" aria-label="Raum">${roomOptions(s.room)}</select></dd>
+      <dt>Messwert</dt><dd>${s.temp == null ? "–" : esc(sensorText(s))}${s.measured_at
+        ? ` <span class="muted">(gemessen ${esc(fmtTime(s.measured_at))})</span>` : ""}</dd>
+      <dt>Gerät</dt><dd>${esc([s.model, s.host].filter(Boolean).join(" · ") || "–")}</dd>
+      <dt>Kennung</dt><dd>${esc(s.id)}</dd>
+    </dl>${sensorCompareHTML(s)}`}</div>`;
+}
+
+function sensorCompareHTML(s) {  // calibration, step 1: the sensor next to the heaters of its room, measured together
+  if (!s.room) return '<div class="calib-compare"><p class="hint">Für den Vergleich mit den Heizungen den Fühler einem Raum zuordnen.</p></div>';
+  if (!s.compare.length) return '<div class="calib-compare"><p class="hint">In diesem Raum ist noch keine Heizung.</p></div>';
+  const rows = s.compare.map(c => {
+    const verdict = c.deviation == null ? '<span class="muted">kein gemeinsamer Messwert</span>'
+      : c.ok ? '<span class="tag ok">passt</span>'
+      : `<span class="tag warn">zeigt ${c.deviation > 0 ? "zu viel" : "zu wenig"}</span>`;
+    return `<tr><td>${esc(c.name)}</td><td class="num">${c.temp == null ? "–" : deg(c.temp)}</td>
+      <td class="num">${c.deviation == null ? "–" : fmtDelta(c.deviation)}</td><td>${verdict}</td></tr>`;
+  }).join("");
+  const missing = s.compare.some(c => c.deviation == null);
+  return `<div class="calib-compare">
+    <h3>Kalibrierung</h3>
+    <p class="hint">Messung ${s.measured_at ? esc(fmtTime(s.measured_at)) : "–"}: Fühler und Heizungen zum selben Zeitpunkt.
+      Abweichung = Heizung − Fühler; bis ±${String(s.tolerance).replace(".", ",")} °C passt es.</p>
+    <table><thead><tr><th></th><th class="num">Ist</th><th class="num">Abweichung</th><th></th></tr></thead>
+      <tbody><tr class="ref"><td>Fühler</td><td class="num">${deg(s.temp)}</td><td></td><td></td></tr>${rows}</tbody></table>
+    ${missing ? '<p class="hint">Fehlt ein Wert, „Aktualisieren“ drücken – dann misst die App Fühler und Heizungen neu zusammen.</p>' : ""}
+  </div>`;
+}
+
+async function refreshSensor(id) {  // read now; if it sleeps, keep trying for a minute while the user wakes it
+  if (sensorWait[id]) return;
+  const w = sensorWait[id] = { until: Date.now() + 60 * 1000, asleep: false };
+  render();
+  while (sensorWait[id] === w && Date.now() < w.until && view === "setup") {
+    const t0 = Date.now();
+    try {
+      const res = await api("POST", `api/sensors/${encodeURIComponent(id)}/refresh`);
+      if (res.updated) {
+        if (sensorWait[id] === w) delete sensorWait[id];
+        toast(res.message);
+        invalidate();
+        return refresh();
+      }
+    } catch (e) {
+      if (sensorWait[id] === w) delete sensorWait[id];
+      toast(e.message, true);
+      return render();
+    }
+    if (sensorWait[id] !== w) return;    // cancelled
+    w.asleep = true;
+    render();
+    await new Promise(r => setTimeout(r, Math.max(0, 2000 - (Date.now() - t0))));
+  }
+  if (sensorWait[id] === w) {
+    delete sensorWait[id];
+    if (view === "setup") toast("Der Fühler hat nicht geantwortet. Knopf hinter der Rückwand kurz drücken, dann nochmal „Aktualisieren“.", true);
+    render();
+  }
+}
+
+function sensorFormHTML(f) {
+  const saving = busy.has("sensorform");
+  const rooms = ['<option value="">– kein Raum –</option>'].concat(state.rooms.map(r =>
+    `<option value="${esc(r.id)}" ${r.id === f.room ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
+  return `<div class="device-form sensor-form">
+    ${f.mode === "new" ? `<h3>Fühler übernehmen</h3><p class="hint">${esc(f.placeholder)} · ${esc(f.id)}</p>` : ""}
+    <label>Name<input data-sfield="name" value="${esc(f.name)}" placeholder="${esc(f.placeholder)}" maxlength="40"
+      autocomplete="off"></label>
+    <label>Raum<select data-sfield="room">${rooms}</select></label>
+    ${state.rooms.length ? "" : '<p class="hint">Noch kein Raum angelegt – Räume legst du im Tab „Räume“ über „+ Raum“ an.</p>'}
+    <div class="row">
+      <button class="primary" data-action="sensor-save" ${saving ? "disabled" : ""}>${saving ? "speichere …" : "Speichern"}</button>
+      <button data-action="sensor-cancel">Abbrechen</button>
+      ${f.mode === "edit" ? '<button class="danger" data-action="sensor-delete">Fühler entfernen</button>' : ""}
+    </div>
+  </div>`;
+}
+
+function openSensorForm(sensorId, foundId = null) {
+  if (sensorId) {
+    const s = (state.sensors || []).find(x => x.id === sensorId);
+    if (!s) return;
+    sensorForm = { mode: "edit", id: s.id, name: s.custom_name, room: s.room || "",
+                   placeholder: s.device_name || s.model || s.id };
+  } else {
+    const f = sensorSearch && sensorSearch.found[foundId];
+    if (!f) return;
+    sensorForm = { mode: "new", id: f.id, name: "", room: "", placeholder: f.name || f.model };
+  }
+  invalidate();
+  render();
+  const input = document.querySelector('.sensor-form input[data-sfield="name"]');
+  if (input) { input.focus(); input.scrollIntoView({ block: "center", behavior: "smooth" }); }
+}
+
+async function saveSensor() {
+  const f = sensorForm;
+  if (!f || busy.has("sensorform")) return;
+  const body = { name: f.name, room: f.room || null };
+  busy.add("sensorform");
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  try {
+    const res = f.mode === "new" ? await api("POST", "api/sensors", Object.assign({ id: f.id }, body))
+                                 : await api("PATCH", `api/sensors/${encodeURIComponent(f.id)}`, body);
+    sensorForm = null;
+    toast(res.message || "Gespeichert.");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete("sensorform");
+  }
+  invalidate();
+  await refresh();
+}
+
+async function deleteSensor() {
+  const f = sensorForm;
+  if (!f) return;
+  const yes = await ask({ title: "Fühler entfernen?", text: "Die App vergisst den Fühler. Am Fühler selbst ändert sich nichts.",
+    buttons: [{ label: "Nein", value: null }, { label: "Ja, entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  try {
+    const res = await api("DELETE", `api/sensors/${encodeURIComponent(f.id)}`);
+    sensorForm = null;
+    toast(res.message || "Entfernt.");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  invalidate();
+  await refresh();
+}
+
 function deviceFilterBar() {
   const counts = { all: state.heaters.length, none: state.heaters.filter(h => !h.room).length };
   for (const r of state.rooms) counts[r.id] = r.heaters.length;
@@ -920,7 +1275,22 @@ function renderDevices(el) {
         <dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}</dd>
       </dl>`}</div>`;
   }).join("");
-  setHTML(el, `<article class="card"><div class="card-head"><h2>Heizungen</h2>
+  const subtab = (id, label, count) => `<button data-subtab="${id}" role="tab" aria-selected="${deviceTab === id}">${label}
+      <span class="count">${count}</span></button>`;
+  const subtabs = `<div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizung", state.heaters.length)}
+      ${subtab("sensors", "Fühler", (state.sensors || []).length)}</div>`;
+  if (deviceTab === "sensors") {
+    return setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Raumfühler</h2>
+      <button class="small primary" data-action="sensor-search" ${sensorSearch && sensorSearch.running ? "disabled" : ""}>Fühler suchen</button></div>
+      <p class="hint">Findet Shelly-Fühler wie den Shelly H&amp;T Gen3 im WLAN und zeigt ihre Messwerte. Dabei wird nur gelesen.
+      Gefundene Fühler mit „Übernehmen“ speichern und einem Raum zuordnen.</p>
+      ${sensorSearch ? sensorPanelHTML() : ""}
+      ${sensorForm && sensorForm.mode === "new" ? `<div class="device">${sensorFormHTML(sensorForm)}</div>` : ""}
+      ${(state.sensors || []).map(s => sensorTileHTML(s, roomOptions)).join("")}
+      ${!(state.sensors || []).length && !sensorForm ? '<p class="empty">Noch kein Fühler gespeichert.</p>' : ""}
+    </article>`);
+  }
+  setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Heizungen</h2>
       <button class="small" data-action="clock-all">Alle Uhren stellen</button>
       <button class="small" data-action="scan-run" ${scan && scan.running ? "disabled" : ""}>Im Netz suchen</button>
       <button class="small primary" data-action="dev-new" ${deviceForm && deviceForm.mode === "new" ? "disabled" : ""}>+ Heizung</button></div>
@@ -1160,6 +1530,12 @@ document.addEventListener("click", e => {
     case "home-plan": return homeMode(groupFor(tile), "auto", "läuft wieder nach Plan");
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
   }
+  if (t.dataset.subtab) {
+    deviceTab = t.dataset.subtab;
+    localStorage.setItem("heizung.deviceTab", deviceTab);
+    render();
+    return;
+  }
   if (t.dataset.tab) {
     tab = t.dataset.tab;
     localStorage.setItem("heizung.tab", tab);
@@ -1199,6 +1575,16 @@ document.addEventListener("click", e => {
     case "scan-other": return runScan(scanNet.trim() || null);
     case "scan-close": scan = null; return render();
     case "scan-add": return openDeviceForm(null, { address: t.dataset.address, hostname: t.dataset.hostname });
+    case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
+    case "sensor-stop": if (sensorSearch) sensorSearch.running = false; return render();
+    case "sensor-close": sensorSearch = null; return render();
+    case "sensor-adopt": return openSensorForm(null, t.dataset.id);
+    case "sensor-edit": return openSensorForm(t.closest(".device").dataset.sensor);
+    case "sensor-refresh": return refreshSensor(t.closest(".device").dataset.sensor);
+    case "sensor-refresh-cancel": delete sensorWait[t.closest(".device").dataset.sensor]; return render();
+    case "sensor-cancel": sensorForm = null; invalidate(); return render();
+    case "sensor-save": return saveSensor();
+    case "sensor-delete": return deleteSensor();
     case "dev-edit": return openDeviceForm(t.closest(".device").dataset.heater);
     case "dev-cancel": deviceForm = null; return render();
     case "dev-save": return saveDevice();
@@ -1207,6 +1593,8 @@ document.addEventListener("click", e => {
     case "calib-cancel": calibForm = null; return render();
     case "calib-save": return saveCalib(null);
     case "calib-reset": return saveCalib({ correction: 0 });
+    case "update-check": return checkUpdates();
+    case "update-start": return startUpdate();
   }
 });
 
@@ -1217,12 +1605,15 @@ document.addEventListener("change", e => {
     w[t.dataset.field] = t.dataset.field === "temp" ? parseFloat(String(t.value).replace(",", ".")) : t.value;
     return renderEditor();
   }
+  if (sensorForm && t.dataset.sfield) { sensorForm[t.dataset.sfield] = t.value; return; }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {
     case "room-plan": t.blur(); return assignPlan(t.closest("article.card"), t.value);
     case "heater-room":
       return patch(`api/heaters/${encodeURIComponent(t.closest(".device").dataset.heater)}`, { room: t.value || null }, "Raum zugeordnet.");
+    case "sensor-room":
+      return patch(`api/sensors/${encodeURIComponent(t.closest(".device").dataset.sensor)}`, { room: t.value || null }, "Raum zugeordnet.");
   }
 });
 
@@ -1249,6 +1640,7 @@ document.addEventListener("input", e => {
     return;
   }
   if (e.target.dataset.field === "scan-network") scanNet = e.target.value;
+  if (sensorForm && e.target.dataset.sfield) { sensorForm[e.target.dataset.sfield] = e.target.value; return; }
   if (deviceForm && e.target.closest(".device-form")) updateDeviceForm(e.target);
   if (roomForm && e.target.closest(".room-form")) updateRoomForm(e.target);
 });

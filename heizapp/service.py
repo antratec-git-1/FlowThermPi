@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable
 
-from . import coap, discovery, plans
+from . import coap, discovery, plans, shelly
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
@@ -119,6 +119,8 @@ class Service:
         self._entries_lock = threading.Lock()  # guards changes of the heater list / heizungen.conf
         self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="heizung")
         self._scan_lock = threading.Lock()   # one network search at a time
+        self._sensor_lock = threading.Lock()   # one sweep of the sensor search at a time
+        self._found_sensors: dict[str, dict] = {}   # id -> {mono, at, sensor}: recent search results, for „Übernehmen“
         self._last_heal = 0.0
         self._last_daily_sync = None
         self._clock_trusted = False
@@ -521,6 +523,167 @@ class Service:
         return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1),
                 "heaters": heaters, "moved": moved}
 
+    def _sensor_targets(self, networks) -> list[tuple[str, int]]:
+        return [(str(ip), shelly.PORT) for net in networks for ip in net.hosts()]
+
+    def find_sensors(self, network=None) -> dict:
+        """One sweep of the sensor search mode: Shelly room sensors that are awake right now (read only).
+        The web page repeats it every few seconds while the search mode is open."""
+        try:
+            nets = [discovery.parse_network(network)] if str(network or "").strip() else \
+                discovery.local_networks([e.cfg.host for e in self.entries])
+        except discovery.DiscoveryError as exc:
+            raise ActionError(str(exc)) from None
+        if not nets:
+            raise ActionError("Das Heimnetz wurde nicht erkannt – bitte das Netz angeben, z. B. 192.168.178.")
+        started = time.monotonic()
+        with self._sensor_lock:
+            sensors = shelly.scan(self._sensor_targets(nets))
+        sensors.sort(key=lambda f: tuple(int(x) for x in f["address"].split(":")[0].split(".")))
+        at = self.now().isoformat(timespec="seconds")
+        heater_temps = self._heater_temps()
+        for f in sensors:
+            old = self._found_sensors.get(f["id"])
+            if f["temp"] is None and old:   # asleep again or locked: keep readings and time of the earlier sweep
+                self._found_sensors[f["id"]] = {**old, "mono": time.monotonic(),
+                                                "sensor": {**old["sensor"], "address": f["address"]}}
+            else:
+                self._found_sensors[f["id"]] = {"mono": time.monotonic(), "at": at, "sensor": f, "heaters": heater_temps}
+        self._note_sensors(sensors, at, heater_temps)
+        if sensors:
+            log.info("Fühlersuche in %s: %s", ", ".join(map(str, nets)),
+                     ", ".join(f"{f['model']} {f['address']}" for f in sensors))
+        return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1), "sensors": sensors}
+
+    # ------------------------------------------------------------------ room sensors (Shelly)
+    FOUND_KEEP = 30 * 60   # seconds a search result can still be saved (the sensor itself is asleep again by then)
+
+    def _heater_temps(self) -> dict:
+        """Room temperature and correction (°C) of every heater that is online right now – for the comparison
+        with a sensor reading of the same moment."""
+        return {e.id: {"temp": e.values["room_temp"] / 10,
+                       "corr": e.values["temp_corr"] / 10 if isinstance(e.values.get("temp_corr"), int) else None}
+                for e in self.entries if e.online and isinstance(e.values.get("room_temp"), int)}
+
+    def _note_sensors(self, found: list[dict], at: str, heater_temps: dict | None = None) -> None:
+        """Saved sensors that a search saw: remember their current address and readings, together with the
+        room temperature of the heaters in their room at that moment (the pair the calibration compares)."""
+        hits = [f for f in found if f["id"] in self.store.data["sensors"]]
+        if not hits:
+            return
+        heater_temps = self._heater_temps() if heater_temps is None else heater_temps
+        with self.store.edit() as d:
+            for f in hits:
+                meta = d["sensors"][f["id"]]
+                meta.update(host=f["address"], model=f["model"], mac=f["mac"])
+                if f["temp"] is not None:
+                    in_room = [hid for hid, h in d["heaters"].items() if meta.get("room") and h.get("room") == meta["room"]]
+                    meta["last"] = {"temp": f["temp"], "humidity": f["humidity"], "battery": f["battery"],
+                                    "usb": f["usb"], "at": at,
+                                    "heaters": {hid: heater_temps[hid] for hid in in_room if hid in heater_temps}}
+
+    def _sensor(self, sensor_id: str) -> dict:
+        meta = self.store.data["sensors"].get(sensor_id)
+        if meta is None:
+            raise ActionError("Fühler nicht gefunden", 404)
+        return meta
+
+    def _room_or_none(self, room_id) -> str | None:
+        room_id = room_id or None
+        if room_id is not None:
+            self._room(str(room_id))
+        return room_id
+
+    def add_sensor(self, body: dict) -> dict:
+        """Save a sensor from the search mode, optionally with name and room. Uses the search result,
+        because the sensor itself is usually asleep again when „Speichern“ is pressed."""
+        sensor_id = str(body.get("id") or "")
+        hit = self._found_sensors.get(sensor_id)
+        if not hit or time.monotonic() - hit["mono"] > self.FOUND_KEEP:
+            raise ActionError("Diesen Fühler hat die Suche nicht gefunden – bitte zuerst „Fühler suchen“.", 404)
+        if sensor_id in self.store.data["sensors"]:
+            raise ActionError("Dieser Fühler ist schon gespeichert.", 409)
+        name = self._clean_name(body.get("name"), allow_empty=True)
+        room_id = self._room_or_none(body.get("room"))
+        f = hit["sensor"]
+        with self.store.edit() as d:
+            d["sensors"][sensor_id] = {"name": name, "room": room_id, "device_name": f["name"], "host": f["address"],
+                                       "model": f["model"], "mac": f["mac"], "added": self.now().isoformat(timespec="seconds")}
+        self._note_sensors([f], hit["at"], hit.get("heaters"))
+        log.info("Fühler gespeichert: %s %s", f["model"], f["address"])
+        return {"id": sensor_id, "message": f"Fühler „{name or f['name'] or f['model']}“ gespeichert."}
+
+    def update_sensor(self, sensor_id: str, body: dict) -> dict:
+        self._sensor(sensor_id)
+        name = self._clean_name(body.get("name"), allow_empty=True)
+        room_id = self._room_or_none(body.get("room")) if "room" in body else None
+        with self.store.edit() as d:
+            meta = d["sensors"][sensor_id]
+            if "name" in body:
+                meta["name"] = name
+            if "room" in body:
+                meta["room"] = room_id
+        return {"message": "Gespeichert."}
+
+    def refresh_sensor(self, sensor_id: str) -> dict:
+        """„Aktualisieren“: read one saved sensor now – at its last address, else search the home network for it.
+        {"updated": False, "asleep": True} if it does not answer (it sleeps; the page retries for a minute)."""
+        meta = self._sensor(sensor_id)
+        host, _, port = str(meta.get("host") or "").partition(":")
+        port = int(port) if port.isdigit() else shelly.PORT
+        found = None
+        if host:
+            info = shelly.probe(host, port, timeout=1.5)
+            if info and str(info.get("id")) == sensor_id:
+                found = shelly.describe(host, port, info)
+        if found is None:   # asleep, or it got a new address from the router
+            nets = discovery.local_networks([e.cfg.host for e in self.entries] + [host])
+            if nets:
+                with self._sensor_lock:
+                    found = next((f for f in shelly.scan(self._sensor_targets(nets)) if f["id"] == sensor_id), None)
+        if found is not None and found["protected"]:
+            raise ActionError("Der Fühler ist mit einem Passwort geschützt – seine Messwerte lassen sich nicht lesen.", 409)
+        if found is None or found["temp"] is None:
+            return {"updated": False, "asleep": True}
+        at = self.now().isoformat(timespec="seconds")
+        heater_temps = self._heater_temps()
+        self._found_sensors[sensor_id] = {"mono": time.monotonic(), "at": at, "sensor": found, "heaters": heater_temps}
+        self._note_sensors([found], at, heater_temps)
+        name = meta.get("name") or meta.get("device_name") or found["model"]
+        return {"updated": True, "message": f"{name}: {found['temp']:.1f} °C".replace(".", ",")}
+
+    def delete_sensor(self, sensor_id: str) -> dict:
+        self._sensor(sensor_id)
+        with self.store.edit() as d:
+            d["sensors"].pop(sensor_id)
+        log.info("Fühler entfernt: %s", sensor_id)
+        return {"message": "Fühler entfernt."}
+
+    CALIB_TOLERANCE = 0.5   # °C – the deviation the user accepts (heater vs. room sensor)
+
+    def _sensor_views(self, data: dict, heaters: list[dict]) -> list[dict]:
+        views = []
+        for sensor_id, meta in data["sensors"].items():
+            last = meta.get("last") or {}
+            room = meta.get("room") if meta.get("room") in data["rooms"] else None
+            pairs = last.get("heaters") or {}
+            compare = []
+            for h in (h for h in heaters if room and h["room"] == room):
+                then = pairs.get(h["id"]) or {}
+                deviation = round(then["temp"] - last["temp"], 1) if then.get("temp") is not None and \
+                    last.get("temp") is not None else None
+                compare.append({"heater": h["id"], "name": h["name"], "temp": then.get("temp"), "corr": then.get("corr"),
+                                "deviation": deviation,
+                                "ok": None if deviation is None else abs(deviation) <= self.CALIB_TOLERANCE + 1e-9})
+            views.append({"id": sensor_id, "name": meta.get("name") or meta.get("device_name") or meta.get("model") or sensor_id,
+                          "custom_name": meta.get("name") or "", "device_name": meta.get("device_name"),
+                          "room": meta.get("room") if meta.get("room") in data["rooms"] else None,
+                          "host": meta.get("host"), "model": meta.get("model"), "mac": meta.get("mac"),
+                          "temp": last.get("temp"), "humidity": last.get("humidity"), "battery": last.get("battery"),
+                          "usb": last.get("usb"), "measured_at": last.get("at"), "compare": compare,
+                          "tolerance": self.CALIB_TOLERANCE})
+        return sorted(views, key=lambda v: v["name"].lower())
+
     def _adopt(self, found: dict) -> list[dict]:
         """Known heaters (by serial number) that are offline but answered at another address: take that address."""
         moved = []
@@ -612,7 +775,7 @@ class Service:
         self._room(room_id)
         with self.store.edit() as d:
             d["rooms"].pop(room_id)
-            for meta in d["heaters"].values():
+            for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
                 if meta.get("room") == room_id:
                     meta["room"] = None
         return {}
@@ -836,11 +999,12 @@ class Service:
                 "plan_outdated": bool(plan) and not (same_plan and received
                                                      and sent.get("fingerprint") == plans.fingerprint(plan)),
                 "heaters": members,
+                "sensors": [sid for sid, meta in data["sensors"].items() if meta.get("room") == room_id],
             })
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
-                "rooms": rooms, "plans": plan_list}
+                "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters)}
 
     def _heater_view(self, e: HeaterState, data: dict) -> dict:
         v, meta = e.values, data["heaters"].get(e.id, {})

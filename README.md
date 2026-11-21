@@ -84,8 +84,17 @@ Das Skript lädt FlowThermPi von GitHub nach `/opt/flowthermpi`, legt den Dienst
 auf Europe/Berlin, falls noch die Werkseinstellung gilt, prüft, ob die App antwortet, und zeigt die
 Adresse an – z. B. `http://flowthermpi.local`.
 
-- **Update:** denselben Befehl noch einmal ausführen. Startet die neue Version nicht, läuft die
-  vorherige weiter. Heizungen, Tokens, Räume, Pläne und PIN bleiben erhalten.
+- **Update per Knopf:** in der App *Einrichtung › Über › Nach Updates suchen*, dann *Jetzt
+  aktualisieren*. Der Pi holt den neuesten Stand von `main` und startet neu (etwa eine Minute, die
+  Heizungen heizen weiter); die Seite lädt danach von selbst neu. Startet die neue Version nicht,
+  läuft die vorherige weiter. Heizungen, Tokens, Räume, Pläne und PIN bleiben erhalten.
+  Den Knopf gibt es ab Version 0.2.0 – ein älterer Pi bekommt ihn, wenn der Befehl oben einmal
+  ausgeführt wird. Der Befehl funktioniert auch weiterhin als Update.
+- **Wie der Knopf abgesichert ist:** Die App hat keine Rechte am Programm. Sie legt nur eine Anfrage
+  in ihren Datenordner. Daraufhin startet der Dienst `flowthermpi-update` (als root) das installierte
+  `install.py`; das lädt immer `main` von diesem Repository und installiert es mit dem Installer der
+  neuen Version – genau wie der Befehl oben. Welcher Code kommt, kann die App nicht bestimmen. Im
+  Datenordner folgt root keinen Verweisen (Symlinks). Meldungen: `journalctl -u flowthermpi-update`.
 - **Daten vom Mac übernehmen** (Heizungen mit Tokens, Räume, Pläne, PIN):
   ```bash
   # auf dem Mac, im App-Ordner:
@@ -104,7 +113,7 @@ Adresse an – z. B. `http://flowthermpi.local`.
 
 ## Heizungen im Netz suchen
 
-In der Einrichtung unter „Geräte“ → **Im Netz suchen**: Die App fragt jede Adresse des Heimnetzes
+In der Einrichtung unter „Geräte“ → Untertab „Heizung“ → **Im Netz suchen**: Die App fragt jede Adresse des Heimnetzes
 einmal nach ihrer Seriennummer – nur lesend, ohne Token, ein paar Sekunden für ein /24-Netz – und
 listet alle Heizungen auf (Name `Heat4U-…`, IP, Raumtemperatur). Bekannte sind als „in der App“
 markiert, neue haben **Hinzufügen**: Das Formular hat die IP schon eingetragen und erklärt, wie man
@@ -121,6 +130,35 @@ braucht selbst schon den Token (so beweist er, dass man vor der Heizung stand). 
 an der Heizung *Einstellungen › Verbindungen › Verbinden*. Ist die Heizung schon mit SmartHeat4U
 verbunden, steht dort nur *Trennen*: erst Trennen, dann Verbinden, und die Heizung danach in
 SmartHeat4U mit demselben QR-Code neu koppeln.
+
+
+## Raumfühler suchen
+
+In der Einrichtung unter „Geräte“ → Untertab „Fühler“ → **Fühler suchen** startet einen Suchmodus
+für Shelly-Fühler (z. B. **Shelly H&T Gen3**, ab Shelly-Generation 2). Der Fühler muss schon im WLAN
+sein (Einrichtung über seinen Hotspot `ShellyHTG3-…` und `http://192.168.33.1`). Er schläft fast immer
+und antwortet nur, solange er wach ist: Während der Suche den Knopf hinter der Rückwand **kurz**
+drücken (5 s = Hotspot, 10 s = Werkseinstellungen). Die App fragt dafür alle 2 Sekunden jede Adresse
+des Heimnetzes nach `GET /shelly` (rund 3 s für ein /24-Netz) und liest gefundene Fühler einmal mit
+`Shelly.GetStatus` aus: Temperatur, Luftfeuchte, Batterie oder USB. Es wird nur gelesen; nach
+3 Minuten endet der Suchmodus von selbst.
+
+**Speichern und Raum:** Bei einem gefundenen Fühler **Übernehmen** drücken, optional einen Namen
+eintragen, einen Raum wählen, speichern. Das klappt auch noch, wenn der Fühler schon wieder schläft:
+Die App nimmt die Daten aus der Suche (bis 30 Minuten danach). Gespeicherte Fühler stehen unter
+„Raumfühler“ (Raum direkt umstellbar, „Bearbeiten“ für Name und Entfernen) und auf der Raumkachel
+mit ihrem letzten Messwert. Neue Messwerte und eine neue IP übernimmt die App bei jeder Suche, in
+der der Fühler wach ist; laufend empfängt sie noch keine Werte.
+
+**Aktualisieren** (bei jedem gespeicherten Fühler) liest ihn sofort aus – unter seiner letzten Adresse,
+sonst sucht die App ihn im Heimnetz. Schläft er, wartet die Seite bis zu einer Minute und bittet darum,
+den Knopf hinter der Rückwand kurz zu drücken; sobald er aufwacht, stehen die neuen Werte da.
+
+**Kalibrierung – Vergleich:** Ist der Fühler einem Raum zugeordnet, zeigt er unter „Kalibrierung“ seine
+Isttemperatur neben der Isttemperatur jeder Heizung des Raums und die Abweichung (Heizung − Fühler).
+Beide Werte stammen vom selben Zeitpunkt: Bei jedem Auslesen des Fühlers (Suche, „Aktualisieren“)
+merkt sich die App die Raumtemperatur der Heizungen dieses Moments. Bis ±0,5 °C gilt als „passt“,
+sonst „zeigt zu viel“ oder „zeigt zu wenig“. Die Heizung meldet ihren Wert schon mit ihrer Korrektur.
 
 ## Konfiguration: `heizungen.conf`
 
@@ -189,7 +227,7 @@ beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht an
 
 ## Ideen für später
 
-- Paket für das NAS (Docker); automatische Updates und Update-Knopf in der Einrichtung.
+- Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
 - Verlauf und Kosten (Heizdauer × Nennleistung × Strompreis).
 - Heizungen zusätzlich in Apple Home einbinden.

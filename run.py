@@ -22,6 +22,7 @@ from heizapp import APP_NAME, __version__  # noqa: E402
 from heizapp.server import make_server  # noqa: E402
 from heizapp.service import Service  # noqa: E402
 from heizapp.store import ConfigError, DataStore  # noqa: E402
+from heizapp.update import Updater  # noqa: E402
 
 
 def main() -> int:
@@ -32,6 +33,8 @@ def main() -> int:
     parser.add_argument("--config", default=os.environ.get("HEIZAPP_CONFIG", str(BASE / "heizungen.conf")))
     parser.add_argument("--data", default=os.environ.get("HEIZAPP_DATA", str(BASE / "data" / "data.json")))
     parser.add_argument("--interval", type=float, default=10.0, help="Abfrageintervall in Sekunden")
+    parser.add_argument("--update-dir", default=os.environ.get("HEIZAPP_UPDATE_DIR") or None,
+                        help=argparse.SUPPRESS)  # set by install.py: enables the update button
     parser.add_argument("--reset-pin", action="store_true",
                         help="PIN der Einrichtung löschen (bei gestoppter App) und beenden")
     args = parser.parse_args()
@@ -55,7 +58,7 @@ def main() -> int:
         return 2
 
     service.start()
-    server = make_server(service, args.host, args.port, password)
+    server = make_server(service, args.host, args.port, password, Updater(args.update_dir))
     logging.info("%s %s – %d Heizung(en) konfiguriert – läuft auf http://%s:%d",
                  APP_NAME, __version__, len(service.entries), args.host, args.port)
     try:
