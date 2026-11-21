@@ -124,7 +124,9 @@ class Remote:
         self._job: dict | None = None    # the setup („up“) under way, or the last one
         self._ts: dict | None = None     # Tailscale, as last reported …
         self._at: str | None = None      # … at this time
-        self._qr: tuple[str, str] | None = None   # (login link, its QR code) as „tailscale up“ printed them
+        # (login link, its QR code or None) of the setup started here. Only this link is shown: one that was open
+        # before – e.g. from „tailscale up“ by hand – would sign the Pi in under its plain name.
+        self._login: tuple[str, str | None] | None = None
         self._watching = False           # a thread looks at the Pi every few seconds while a login is open
         self._refreshing = False
         self._tried = time.monotonic()   # last look at the Pi (start() looks at once)
@@ -156,7 +158,10 @@ class Remote:
         with self._lock:
             ts = dict(self._ts) if self._ts else None
             if ts and ts.get("daemon"):
-                ts["qr"] = self._qr[1] if self._qr and ts.get("auth_url") and self._qr[0] == ts["auth_url"] else None
+                own = self._own_login(ts)
+                ts["other_login"] = bool(ts.get("auth_url")) and not own   # „Fernwartung einrichten“ starts a new one
+                ts["auth_url"] = ts["auth_url"] if own else None
+                ts["qr"] = self._login[1] if own else None
             result = {"supported": True, "device": self.device, "hostname": self._hostname(), "tailscale": ts,
                       "at": self._at, "job": dict(self._job) if self._job else None, "busy": self._doing,
                       "watching": self._watching, "error": self._error}
@@ -213,10 +218,14 @@ class Remote:
     def _hostname(self) -> str:
         return f"flowthermpi-{self.device}" if self.device else "flowthermpi"
 
+    def _own_login(self, ts: dict) -> bool:
+        """Tailscale's open login link is the one the setup started here (call with the lock held)."""
+        return bool(self._login and ts.get("auth_url") and ts["auth_url"] == self._login[0])
+
     def _waiting(self) -> bool:
         """A login is under way (call with the lock held)."""
         ts = self._ts or {}
-        return ts.get("state") in ("NeedsMachineAuth", "Starting") or (ts.get("state") == "NeedsLogin" and bool(ts.get("auth_url")))
+        return ts.get("state") in ("NeedsMachineAuth", "Starting") or (ts.get("state") == "NeedsLogin" and self._own_login(ts))
 
     def _watch_if_waiting(self) -> None:
         with self._lock:
@@ -382,14 +391,16 @@ class Remote:
     def _absorb(self, status: dict) -> None:
         """Take what the root service reported: Tailscale's state, the login's QR code, the job's progress."""
         ts, qr, device = _tailscale(status.get("tailscale")), status.get("qr"), status.get("device")
-        state, at = status.get("state"), _text(status.get("at"), 40)
+        login, state, at = status.get("login_url"), status.get("state"), _text(status.get("at"), 40)
         with self._free:
             if isinstance(device, str) and re.fullmatch(r"[0-9a-f]{8}", device):
                 self.device = device   # as the Pi names itself in Tailscale
             if ts is not None:
                 self._ts, self._at = ts, at
-                if isinstance(qr, str) and len(qr) <= 100_000 and QR_CODE.fullmatch(qr) and ts.get("auth_url"):
-                    self._qr = (ts["auth_url"], qr)
+                if not ts.get("auth_url"):
+                    self._login = None   # signed in, logged out or given up: no link is open any more
+                elif isinstance(login, str) and login == ts["auth_url"]:   # the setup's own login (ts is checked)
+                    self._login = (login, qr if isinstance(qr, str) and len(qr) <= 100_000 and QR_CODE.fullmatch(qr) else None)
             job = self._job
             if job and status.get("id") == job["id"]:
                 if state == "running" and job["state"] in ("waiting", "running"):

@@ -137,6 +137,32 @@ class RemoteTest(Base):
         self.assertFalse(self.remote.view(local="192.168.1.20")["via_tailscale"])
         self.assertEqual(self.remote.summary(), {"supported": True, "on": True})
 
+    def test_a_login_started_by_hand_is_not_offered(self):
+        # „sudo tailscale up“ by hand before the app: that link would sign the Pi in under the plain name „flowthermpi“
+        self.ts.installed = True
+        self.ts.tailscale(["up"])
+        self.start_service()
+        self.remote.refresh()
+        view = self.remote.view()
+        ts = view["tailscale"]
+        self.assertEqual((ts["state"], ts["auth_url"], ts["qr"], ts["other_login"], view["watching"]),
+                         ("NeedsLogin", None, None, True, False))
+        self.remote.up()                                                             # „Fernwartung einrichten“
+        ts = self.setup_done()["tailscale"]
+        self.assertEqual((ts["auth_url"], ts["qr"], ts["other_login"]), ("https://login.tailscale.com/a/000000000002", QR, False))
+        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")
+
+    def test_cancelling_closes_the_login(self):
+        self.start_service()
+        self.remote.up()
+        self.setup_done()
+        self.remote.logout()                                                         # „Abbrechen“ on the login card
+        view = self.remote.view()
+        ts = view["tailscale"]
+        self.assertEqual((ts["state"], ts["auth_url"], ts["other_login"]), ("NeedsLogin", None, False))
+        self.assertIsNone(self.ts.login)                                             # the link cannot be used any more
+        self.until(lambda: not self.remote.view()["watching"])
+
     def test_switch_off_on_and_log_out(self):
         self.start_service()
         self.remote.up()

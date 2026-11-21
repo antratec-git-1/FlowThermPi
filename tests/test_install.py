@@ -655,6 +655,12 @@ class FakeTS(install.DryRun):
         if cmd == ("systemctl", "enable", "--now", "tailscaled"):
             self.daemon = self.installed
             return 0, "", ""
+        if cmd == ("systemctl", "restart", "tailscaled"):   # a login nobody finished lives only in memory
+            self.daemon, self.login = self.installed, None
+            if self.installed and not self.account and self.prefs["want_running"]:   # it asks for a new one
+                self.logins += 1
+                self.login, self.backend = f"https://login.tailscale.com/a/{self.logins:012x}", "NeedsLogin"
+            return 0, "", ""
         return 127, "", f"{cmd[0]}: im Test unbekannt"
 
     def status_json(self):
@@ -707,6 +713,8 @@ class FakeTS(install.DryRun):
                 self.backend = "Stopped"
             return 0, "", ""
         if a == ["logout"]:
+            if not self.account:   # as tailscaled: without a finished login there is no key to log out – an open
+                return 0, "", ""   # login link stays valid
             self.account = self.login = None
             self.backend = "NeedsLogin"
             return 0, "", ""
@@ -773,6 +781,7 @@ class RemoteFromAppTest(Base):
         self.assertTrue(self.ts.prefs["auto_update"] and status["auto_update"])
         ts = status["tailscale"]
         self.assertEqual((ts["state"], ts["auth_url"], status["qr"]), ("NeedsLogin", "https://login.tailscale.com/a/000000000001", QR))
+        self.assertEqual(status["login_url"], ts["auth_url"])                 # the app knows this link is its own
         self.assertEqual((status["device"], status["phase"]), ("a1b2c3d4", None))
         self.assertEqual(status["message"], "Bitte den Pi jetzt bei Tailscale anmelden.")
 
@@ -825,12 +834,34 @@ class RemoteFromAppTest(Base):
         self.assertEqual((status["state"], status["message"]), ("done", "Der Pi ist bei Tailscale abgemeldet."))
         self.assertEqual((status["tailscale"]["state"], status["tailscale"]["auth_url"]), ("NeedsLogin", None))
         self.assertIn(("tailscale", "logout"), self.ts.commands)
+        self.assertIn(("systemctl", "restart", "tailscaled"), self.ts.commands)   # „logout“ alone leaves the link open
+        self.assertIsNone(self.ts.login)                                      # nobody can use the link any more
         self.assertFalse(self.ts.prefs["want_running"])                       # nothing comes up again by itself
+
+    def test_logout_when_signed_in_needs_no_restart(self):
+        self.ask("up")
+        self.ts.sign_in()
+        _, _, status = self.ask("logout")
+        self.assertEqual((status["state"], status["tailscale"]["state"]), ("done", "NeedsLogin"))
+        self.assertNotIn(("systemctl", "restart", "tailscaled"), self.ts.commands)
+
+    def test_a_login_started_by_hand_is_replaced(self):
+        # „sudo tailscale up“ by hand, before the app: its link would sign the Pi in under the plain name „flowthermpi“
+        self.ts.installed = True
+        self.ts.tailscale(["up"])
+        _, _, status = self.ask("status")
+        self.assertEqual(status["tailscale"]["auth_url"], "https://login.tailscale.com/a/000000000001")
+        self.assertNotIn("login_url", status)                                  # not the app's own login
+        _, _, status = self.ask("up")
+        self.assertEqual((status["login_url"], status["tailscale"]["auth_url"], status["qr"]),
+                         ("https://login.tailscale.com/a/000000000002", "https://login.tailscale.com/a/000000000002", QR))
+        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")
 
     def test_slow_servers_send_the_link_later(self):
         self.ts.url_delay = 3
         _, _, status = self.ask("up")
         self.assertEqual((status["state"], status["tailscale"]["auth_url"]), ("done", "https://login.tailscale.com/a/000000000001"))
+        self.assertEqual(status["login_url"], "https://login.tailscale.com/a/000000000001")   # still the app's own
         self.assertNotIn("qr", status)                                         # „up“ printed no QR code this time
         self.assertEqual(self.ts.sleeps, [1, 1, 1])
 

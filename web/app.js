@@ -1885,6 +1885,8 @@ function remoteStatusHTML(r) {
     body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b>
         ${!t.daemon && t.problem ? `<span class="muted">${esc(t.problem)}</span>` : ""}</span>
         ${r.via_tailscale ? `<span class="tag ok">darüber bist du gerade verbunden</span>` : ""}</li></ul>
+      ${t.other_login ? `<p class="hint">Auf dem Pi ist noch eine ältere Anmeldung offen, zum Beispiel von Hand gestartet. Sie wird
+        nicht verwendet: „Fernwartung einrichten“ startet eine neue als „${esc(r.hostname)}“.</p>` : ""}
       ${t.daemon && ["Running", "Stopped"].includes(t.state) ? remoteFactsHTML(t) : ""}
       ${r.error ? `<p class="error-text">${esc(r.error)}</p>` : ""}
       <div class="row">${remoteButtonsHTML(t, busy)}</div>`;

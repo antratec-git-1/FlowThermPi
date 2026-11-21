@@ -1346,8 +1346,12 @@ def remote_up(system: System, root: Path, status: dict, report) -> None:
         say(f"• Melde den Pi als „{hostname}“ bei Tailscale an …")
         printed = tailscale_login(system, hostname)
         state = tailscale_wait(system, lambda s: s.get("state") in ("Running", "NeedsMachineAuth") or bool(s.get("auth_url")), 30)
-        if state.get("auth_url") and state["auth_url"] == printed.get("AuthURL") and printed.get("QR"):
-            status["qr"] = printed["QR"]
+        if state.get("state") == "NeedsLogin" and state.get("auth_url"):
+            # this run's own login: „tailscale up“ with settings starts tailscaled's login afresh, so a link that was
+            # open before (e.g. from „tailscale up“ by hand, with the plain name) is gone. The app shows only this one.
+            status["login_url"] = state["auth_url"]
+            if state["auth_url"] == printed.get("AuthURL") and printed.get("QR"):
+                status["qr"] = printed["QR"]
         if state.get("state") == "NeedsLogin" and not state.get("auth_url"):
             raise InstallError("Tailscale hat keinen Anmelde-Link geschickt. Hat der Pi Internet? Bitte gleich noch einmal versuchen.")
     code, out, err = tailscale(system, "set", "--auto-update=true", timeout=30)   # Tailscale keeps itself up to date
@@ -1376,8 +1380,13 @@ def run_remote(system: System, root: Path, action: str, status: dict, report) ->
     else:   # logout – also ends a login that is still open; afterwards nothing comes up again by itself
         code, out, err = tailscale(system, "logout", timeout=60)
         tailscale(system, "down", timeout=60)
-        if tailscale_state(system).get("state") in ("Running", "Starting", "Stopped"):
-            raise InstallError(f"Abmelden hat nicht geklappt: {first_line(err or out) or 'Tailscale ist noch angemeldet'}")
+        state = tailscale_state(system)
+        if state.get("auth_url"):   # a login nobody finished: „logout“ leaves it open (tailscaled has no key yet to log
+            system.run("systemctl", "restart", "tailscaled", check=False)   # out) – it lives only in memory
+            state = tailscale_wait(system, lambda s: s.get("daemon") and not s.get("auth_url"), 20)
+        if state.get("state") in ("Running", "Starting", "Stopped") or state.get("auth_url"):
+            why = "die Anmeldung ist noch offen" if state.get("auth_url") else first_line(err or out) or "Tailscale ist noch angemeldet"
+            raise InstallError(f"Abmelden hat nicht geklappt: {why}")
         status["message"] = "Der Pi ist bei Tailscale abgemeldet."
     say(f"✓ {status['message']}")
 
