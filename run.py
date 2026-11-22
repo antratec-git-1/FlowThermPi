@@ -25,6 +25,7 @@ from heizapp.service import Service  # noqa: E402
 from heizapp.store import ConfigError, DataStore  # noqa: E402
 from heizapp.update import Updater  # noqa: E402
 from heizapp.wifi import Wifi  # noqa: E402
+from heizapp.zigbee import Zigbee  # noqa: E402
 
 
 def main() -> int:
@@ -41,6 +42,8 @@ def main() -> int:
                         help=argparse.SUPPRESS)  # set by install.py: enables Einrichtung › WLAN
     parser.add_argument("--remote-dir", default=os.environ.get("HEIZAPP_REMOTE_DIR") or None,
                         help=argparse.SUPPRESS)  # set by install.py: enables Einrichtung › Fernwartung
+    parser.add_argument("--zigbee-dir", default=os.environ.get("HEIZAPP_ZIGBEE_DIR") or None,
+                        help=argparse.SUPPRESS)  # set by install.py: enables Einrichtung › Zigbee
     parser.add_argument("--reset-pin", action="store_true",
                         help="PIN der Einrichtung löschen (bei gestoppter App) und beenden")
     args = parser.parse_args()
@@ -66,7 +69,10 @@ def main() -> int:
     service.start()
     remote = Remote(args.remote_dir)
     remote.start()   # looks at Tailscale once, in the background
-    server = make_server(service, args.host, args.port, password, Updater(args.update_dir), Wifi(args.wifi_dir), remote)
+    zigbee = Zigbee(args.zigbee_dir)
+    zigbee.start()   # looks at the Zigbee programs once, in the background
+    server = make_server(service, args.host, args.port, password, Updater(args.update_dir), Wifi(args.wifi_dir), remote,
+                         zigbee)
     logging.info("%s %s – %d Heizung(en) konfiguriert – läuft auf http://%s:%d",
                  APP_NAME, __version__, len(service.entries), args.host, args.port)
     try:

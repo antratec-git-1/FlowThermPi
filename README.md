@@ -2,7 +2,8 @@
 
 Kleine Web-App, die Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler** direkt im
 Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek). Nur die
-freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale.
+freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale, und die geplanten
+[Zigbee-Thermostate](#zigbee-thermostate-in-arbeit) brauchen Zusatzprogramme, die die App auf Knopfdruck installiert.
 
 Inoffizielles Projekt – kein Produkt von Thermotec und nicht von Thermotec unterstützt.
 
@@ -64,6 +65,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **Fernwartung** (nur auf dem Raspberry Pi): den Pi mit Tailscale aus der Ferne erreichbar machen, um einem
   Haushalt zu helfen, ohne hinzufahren – von sich aus nur, solange die Bewohner es erlauben. Siehe
   [Fernwartung](#fernwartung-tailscale).
+- **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
+  aktualisieren und entfernen – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -127,7 +130,8 @@ Adresse an – z. B. `http://flowthermpi.local`.
   ```
   Danach die App auf dem Mac beenden – sonst steuern zwei Apps dieselben Heizungen.
 - **Weitere Optionen** hinter `python3 -`: `--port 8080`, `--ref v0.2.0` (bestimmte Version),
-  `--reset-pin` (PIN vergessen), `--uninstall` (Daten bleiben), `--uninstall --purge` (alles weg).
+  `--reset-pin` (PIN vergessen), `--uninstall` (Daten bleiben; Zigbee-Programme kommen mit weg),
+  `--uninstall --purge` (alles weg).
 - **Meldungen:** `journalctl -u flowthermpi -f`. Passwort fürs Heimnetz: `HEIZAPP_PASSWORD=…` in
   `/etc/default/flowthermpi` eintragen, dann `sudo systemctl restart flowthermpi`.
 - **Uhrzeit:** Ein Raspberry Pi hat keine Batterie-Uhr. Die App stellt die Heizungsuhren erst, wenn
@@ -339,6 +343,46 @@ empfohlen 1 Tag) und **Kalibrierlauf starten**.
 - Firmware-Updates der Pill spielt man in der Shelly-App ein. Die App zeigt nur an, dass eines bereitsteht.
 - DS18B20 und DHT22 messen laut Datenblatt auf ±0,5 °C genau.
 
+## Zigbee-Thermostate (in Arbeit)
+
+Geplant: SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
+Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Der erste Schritt ist da (ab
+Version 0.4.4): *Einrichtung › Zigbee* installiert die Zusatzprogramme dafür auf Knopfdruck. Zigbee2MQTT einrichten
+und starten, Thermostate anlernen und steuern kommt in den nächsten Schritten.
+
+- **Was der Pi lädt:**
+  - **Mosquitto** aus dem Paketarchiv von Raspberry Pi OS. Es reicht die Nachrichten zwischen Zigbee2MQTT und der App
+    weiter – nur auf dem Pi selbst (`127.0.0.1:1883`) und nur mit Passwort.
+  - **Node.js 24** (offizielles Archiv von nodejs.org) und **pnpm** (von npm): darauf läuft Zigbee2MQTT bzw. damit
+    wird es gebaut.
+  - **Zigbee2MQTT** (Quellcode von GitHub, Bausteine von npm): spricht über den Stick mit den Thermostaten.
+- **Feste Versionen, jede Datei geprüft:** Welche Versionen kommen, steht in `install.py` (`ZIGBEE_PARTS`): für
+  Node.js und pnpm mit Prüfsumme, für Zigbee2MQTT mit der Git-Commit-Nummer. Die Bausteine prüft pnpm gegen die
+  Prüfsummen im Lockfile von Zigbee2MQTT (`--frozen-lockfile`). Passt etwas nicht, wird nichts installiert. Neue
+  Versionen kommen mit einem Update von FlowThermPi; dann steht im Reiter **Neue Versionen installieren**.
+- **Ablauf:** *Einrichtung › Zigbee › Zigbee-Programme installieren*. Die Seite zeigt Schritt und Fortschritt; die
+  Heizungen heizen weiter, und die Seite darf zu (der Pi macht allein weiter, auch wenn die App neu startet).
+  Geschätzt 10 bis 20 Minuten und etwa 200 MB Download – auf einem echten Pi noch nicht gemessen. Klappt etwas nicht,
+  nennt die Seite den Grund (etwa „Speicherkarte voll“, „keine Verbindung zum Internet“) und zeigt die letzten
+  Meldungen des Pi; eine schon installierte Version bleibt dann in Betrieb.
+- **Voraussetzungen:** Raspberry Pi OS **64-bit** (auf einem 32-Bit-System lehnt die App ab, auch auf einem Pi 4),
+  mindestens 1,5 GB frei, Internet.
+- **Wo es liegt:** Programme in `/opt/flowthermpi-zigbee`, die Daten von Zigbee2MQTT (später Netzwerkschlüssel und
+  angelernte Thermostate) in `/var/lib/flowthermpi-zigbee`. Zigbee2MQTT wird vom eigenen Benutzer `flowthermpi-zigbee`
+  gebaut und später betrieben – ohne Anmeldung, mit Zugriff auf den USB-Stick, nie als root.
+- **Passwörter für Mosquitto** erzeugt der Pi bei jeder Installation neu. Mosquitto kennt nur ihre Hashes; im Klartext
+  stehen sie nur bei ihren Nutzern: für die App in ihrem Datenordner (`zigbee-mqtt.json`, 0600), für Zigbee2MQTT in
+  `/etc/flowthermpi/zigbee2mqtt.env` (nur root; systemd reicht sie beim Start weiter). Die Seite zeigt sie nie.
+- **Entfernen …** löscht die Programme und Mosquitto wieder. Ein Mosquitto, das schon vorher auf dem Pi war, bleibt und
+  verliert nur die Einstellungen von FlowThermPi. Die Daten von Zigbee2MQTT bleiben, damit angelernte Thermostate nach
+  einer neuen Installation noch verbunden sind. `--uninstall` nimmt die Programme mit; `--uninstall --purge` auch die
+  Daten und den Benutzer.
+- **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage in ihren Datenordner; der Dienst
+  `flowthermpi-zigbee` (root) kennt genau drei Aktionen: nachsehen, installieren, entfernen. Was er lädt, kann die
+  App nicht bestimmen. Archive entpackt er selbst, ohne Pfade außerhalb des Programmordners. Meldungen:
+  `journalctl -u flowthermpi-zigbee`.
+- Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
+
 ## Konfiguration: `heizungen.conf`
 
 Heizungen legst du am einfachsten in der App an: Tab „Geräte“ → **+ Heizung**, bzw. **Bearbeiten**
@@ -405,7 +449,9 @@ Die Tests laufen gegen eine simulierte Heizung (`tests/fake_heater.py`), die das
 beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht angesprochen. Die
 WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`), die
 Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto. Die
-Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`).
+Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`). Die Zigbee-Programme
+werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.py`: apt, Mosquitto, Node.js, pnpm) –
+ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen.
 
 ## Ideen für später
 

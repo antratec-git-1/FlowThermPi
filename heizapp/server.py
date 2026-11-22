@@ -19,6 +19,7 @@ from .remote import Remote
 from .service import ActionError, Service
 from .update import Updater
 from .wifi import Wifi
+from .zigbee import Zigbee
 
 log = logging.getLogger("heizapp")
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
@@ -26,7 +27,7 @@ MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 
 
-def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
+def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
     return [
@@ -81,6 +82,10 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
         ("POST", r"/api/remote/down", lambda m, b, r: t.down(r.local_ip()), SETUP),
         ("POST", r"/api/remote/logout", lambda m, b, r: t.logout(r.local_ip()), SETUP),
         ("PUT", r"/api/remote/mode", lambda m, b, r: t.set_mode(b.get("mode"), r.local_ip()), SETUP),
+        ("GET", r"/api/zigbee", lambda m, b, r: z.view(), SETUP),
+        ("POST", r"/api/zigbee/refresh", lambda m, b, r: z.refresh(), SETUP),
+        ("POST", r"/api/zigbee/install", lambda m, b, r: z.install(), SETUP),
+        ("POST", r"/api/zigbee/remove", lambda m, b, r: z.remove(), SETUP),
         # Fernhilfe in the residents' view, without PIN: allowing works only in the home network, ending everywhere
         ("POST", r"/api/remote/help", lambda m, b, r: t.help(r.local_ip()), PUBLIC),
         ("POST", r"/api/remote/help/end", lambda m, b, r: t.end(r.local_ip()), PUBLIC),
@@ -88,11 +93,13 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote):
 
 
 def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None,
-                 updater: Updater | None = None, wifi: Wifi | None = None, remote: Remote | None = None):
+                 updater: Updater | None = None, wifi: Wifi | None = None, remote: Remote | None = None,
+                 zigbee: Zigbee | None = None):
     updater = updater or Updater(None)   # without it: no update button (e.g. on the Mac or in Docker)
     wifi = wifi or Wifi(None)            # without it: no WLAN setup
     remote = remote or Remote(None)      # without it: no remote maintenance
-    routes = _routes(service, updater, wifi, remote)
+    zigbee = zigbee or Zigbee(None)      # without it: no Zigbee programs
+    routes = _routes(service, updater, wifi, remote, zigbee)
     access = access or SetupAccess(service.store)
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
@@ -143,7 +150,8 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
             result["app"] = {"name": APP_NAME, "version": __version__, "license": LICENSE, "copyright": COPYRIGHT,
                              "repo": REPO_URL, "commit": updater.installed["commit"],
                              "installed": updater.installed["installed"], "updates": updater.supported,
-                             "wifi": wifi.supported, "remote": remote.supported, "device": remote.device}
+                             "wifi": wifi.supported, "remote": remote.supported, "zigbee": zigbee.supported,
+                             "device": remote.device}
             result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
             result["remote"] = remote.summary(self.local_ip())   # residents see when remote maintenance is on
             return result
@@ -263,5 +271,5 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(service: Service, host: str, port: int, password: str | None = None,
                 updater: Updater | None = None, wifi: Wifi | None = None,
-                remote: Remote | None = None) -> ThreadingHTTPServer:
-    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi, remote))
+                remote: Remote | None = None, zigbee: Zigbee | None = None) -> ThreadingHTTPServer:
+    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi, remote, zigbee))

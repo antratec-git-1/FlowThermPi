@@ -239,6 +239,7 @@ function showView(name) {
   document.body.className = "view-" + name;
   if (name === "setup" && tab === "wifi") openWifiTab();
   if (name === "setup" && tab === "remote") openRemoteTab();
+  if (name === "setup" && tab === "zigbee") openZigbeeTab();
   touchSetup();
   window.scrollTo(0, 0);
 }
@@ -269,6 +270,9 @@ function render() {
   const remoteTab = document.querySelector('#tabs [data-tab="remote"]');
   if (state) remoteTab.hidden = !state.app.remote;       // only on the Pi, set up with the installer
   if (state && tab === "remote" && !state.app.remote) tab = "rooms";
+  const zigbeeTab = document.querySelector('#tabs [data-tab="zigbee"]');
+  if (state) zigbeeTab.hidden = !state.app.zigbee;       // only on the Pi, set up with the installer
+  if (state && tab === "zigbee" && !state.app.zigbee) tab = "rooms";
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   if (tab !== shownTab) {   // a tab bar that scrolls (phone): bring the chosen tab into view – only when it changes
     shownTab = tab;
@@ -276,7 +280,7 @@ function render() {
     if (nav && (b.offsetLeft < nav.scrollLeft || b.offsetLeft + b.offsetWidth > nav.scrollLeft + nav.clientWidth))
       nav.scrollLeft = b.offsetLeft - 8;
   }
-  for (const name of ["rooms", "plans", "devices", "wifi", "remote", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  for (const name of ["rooms", "plans", "devices", "wifi", "remote", "zigbee", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
@@ -286,6 +290,7 @@ function render() {
   else if (tab === "about") renderAbout(el);
   else if (tab === "wifi") renderWifi(el);
   else if (tab === "remote") renderRemote(el);
+  else if (tab === "zigbee") renderZigbee(el);
   else renderDevices(el);
 }
 
@@ -2308,6 +2313,190 @@ function renderRemote(el) {
   setHTML(el, remoteStatusHTML(r) + remoteLoginHTML(r) + remoteModeHTML(r) + remoteAboutHTML(r));
 }
 
+// ------------------------------------------------------------------ Zigbee ("Einrichtung › Zigbee")
+let zigbee = null;          // what api/zigbee answered: programs (versions, Mosquitto, USB devices), job, busy
+let zigbeeError = null;     // api/zigbee could not be loaded
+let zigbeePending = null;   // a button pressed here whose answer is still out: "refresh" | "install" | "remove"
+let zigbeeSeen = null;      // id of the job whose failure was closed with "OK"
+let zigbeeTimer = null;     // polls every 2 s while the Pi installs or removes
+const ZIGBEE_PHASES = { check: "Prüfe den Pi", mosquitto: "Richte Mosquitto ein", node: "Lade Node.js", pnpm: "Lade pnpm",
+  zigbee2mqtt: "Lade Zigbee2MQTT", dependencies: "Lade die Bausteine von Zigbee2MQTT", build: "Baue Zigbee2MQTT",
+  finish: "Räume auf", remove: "Entferne die Programme" };
+
+function zigbeeRunning() { return !!(zigbee && zigbee.job && ["waiting", "running"].includes(zigbee.job.state)); }
+function zigbeeBusy() {     // a quick look at the Pi ("status") does not count: the server waits for it
+  return !!zigbeePending || !!(zigbee && zigbee.busy && zigbee.busy !== "status") || zigbeeRunning();
+}
+
+async function loadZigbee() {
+  try { zigbee = await api("GET", "api/zigbee"); zigbeeError = null; }
+  catch (e) { zigbeeError = e.message; }
+  followZigbee();
+  render();
+}
+
+function followZigbee() {
+  const on = zigbeeRunning();
+  if (on && !zigbeeTimer) zigbeeTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "zigbee") loadZigbee(); }, 2000);
+  if (!on && zigbeeTimer) { clearInterval(zigbeeTimer); zigbeeTimer = null; }
+}
+
+async function openZigbeeTab() {  // fresh state from the Pi: the stick may have been plugged in since
+  await loadZigbee();
+  if (zigbee && zigbee.supported && !zigbeeBusy()) zigbeeDo("refresh", { quiet: true });
+}
+
+async function zigbeeDo(action, { quiet = false } = {}) {
+  zigbeePending = action;
+  render();
+  try {
+    const res = await api("POST", "api/zigbee/" + action);
+    zigbee = res.zigbee;
+    if (!quiet && res.message) toast(res.message);
+  } catch (e) {
+    if (!quiet || action !== "refresh") toast(e.message, true);
+    try { zigbee = await api("GET", "api/zigbee"); } catch (_) { /* shown with the next look */ }
+  }
+  zigbeePending = null;
+  followZigbee();
+  invalidate();
+  render();
+}
+
+async function zigbeeInstall() {
+  const update = !!(zigbee && zigbee.programs && zigbee.programs.complete);
+  const yes = await ask({ title: update ? "Zigbee-Programme aktualisieren?" : "Zigbee-Programme installieren?",
+    text: (update ? "Der Pi lädt die neueren Versionen und prüft jede Datei. "
+      : "Der Pi lädt dafür Mosquitto (aus dem Paketarchiv von Raspberry Pi OS), Node.js (von nodejs.org) und Zigbee2MQTT " +
+        "mit seinen Bausteinen (von GitHub und npm) – zusammen etwa 200 MB – und prüft jede Datei. ") +
+      "Das dauert etwa 10 bis 20 Minuten. Die Heizungen heizen dabei ganz normal weiter, und du kannst diese Seite " +
+      "in der Zeit schließen.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: update ? "Aktualisieren" : "Installieren", value: "yes", cls: "primary" }] });
+  if (!yes) return;
+  zigbeeSeen = null;
+  zigbeeDo("install", { quiet: true });
+}
+
+async function zigbeeRemove() {
+  const yes = await ask({ title: "Zigbee-Programme entfernen?",
+    text: "Zigbee2MQTT, Node.js und Mosquitto werden wieder vom Pi gelöscht. Zigbee-Thermostate lassen sich danach nicht mehr " +
+      "steuern, bis die Programme wieder installiert sind. Angelernte Thermostate bleiben gespeichert.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  zigbeeSeen = null;
+  zigbeeDo("remove", { quiet: true });
+}
+
+function zigbeeSize(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " GB" : mb + " MB"; }
+
+function zigbeeStateText(p) {   // [dot, words]
+  if (!p.arch_ok) return ["offline", "Für Zigbee braucht der Pi ein 64-Bit-System (Raspberry Pi OS 64-bit)"];
+  if (!p.complete) return ["", Object.values(p.installed).some(Boolean) ? "Nicht vollständig installiert" : "Noch nicht installiert"];
+  if (!p.current) return ["on", "Installiert – neuere Versionen sind da"];
+  if (!p.mosquitto.active) return ["offline", "Installiert, aber Mosquitto läuft nicht"];
+  return ["ok", "Installiert"];
+}
+
+function zigbeePortName(id) {   // usb-SONOFF_SONOFF_Dongle_Plus_MG24_8a2c1d0e-if00-port0 → SONOFF Dongle Plus MG24
+  const words = id.replace(/^usb-/, "").replace(/-if\d+(-port\d+)?$/, "").split("_").filter(Boolean);
+  const last = words[words.length - 1] || "";
+  if (words.length > 1 && last.length >= 6 && /\d/.test(last) && /^[0-9A-Za-z]+$/.test(last)) words.pop();   // serial number
+  return words.filter((w, i) => i === 0 || w.toLowerCase() !== words[i - 1].toLowerCase()).join(" ") || id;
+}
+
+function zigbeeStickText(p) {
+  const sticks = p.ports.filter(x => x.stick);
+  if (sticks.length) return "eingesteckt – " + sticks.map(x => zigbeePortName(x.id)).join(", ");
+  if (p.ports.length) return "nicht erkannt (eingesteckt: " + p.ports.map(x => zigbeePortName(x.id)).join(", ") + ")";
+  return "nicht eingesteckt";
+}
+
+function zigbeeFactsHTML(p) {
+  const row = (part, name) => {
+    const have = p.installed[part], want = p.wanted[part];
+    return `<dt>${name}</dt><dd>${have ? esc(have) : "–"}${have && want && have !== want ? ` <span class="tag warn">neu: ${esc(want)}</span>` : ""}</dd>`;
+  };
+  return `<dl class="about-facts">
+    ${row("zigbee2mqtt", "Zigbee2MQTT")}
+    ${row("node", "Node.js")}
+    <dt>Mosquitto</dt><dd>${p.mosquitto.version ? `${esc(p.mosquitto.version)} · ${p.mosquitto.active ? "läuft" : "läuft nicht"}` : "–"}</dd>
+    <dt>Zigbee-Stick</dt><dd>${esc(zigbeeStickText(p))}</dd>
+    ${p.free_mb != null ? `<dt>Speicherkarte</dt><dd>${esc(zigbeeSize(p.free_mb))} frei</dd>` : ""}
+  </dl>`;
+}
+
+function zigbeeButtonsHTML(p, busy) {
+  const b = (action, label, cls = "") => `<button class="${cls}" data-action="${action}" ${busy ? "disabled" : ""}>${label}</button>`;
+  if (!p.arch_ok) return "";
+  const any = Object.values(p.installed).some(Boolean) || !!p.mosquitto.version;
+  if (!p.complete) return b("zigbee-install", "Zigbee-Programme installieren", "primary") + (any ? b("zigbee-remove", "Entfernen …") : "");
+  if (!p.current) return b("zigbee-install", "Neue Versionen installieren", "primary") + b("zigbee-remove", "Entfernen …");
+  if (!p.mosquitto.active) return b("zigbee-install", "Reparieren", "primary") + b("zigbee-remove", "Entfernen …");
+  return b("zigbee-remove", "Entfernen …");
+}
+
+function zigbeeProgressHTML(j) {
+  if (j.action !== "install") return `<p class="searching"><b>Entferne die Zigbee-Programme …</b></p><p class="muted">Einen Moment bitte.</p>`;
+  const what = j.phase ? (ZIGBEE_PHASES[j.phase] || "Installiere") + " …" : "Gleich geht es los …";
+  const share = j.step && j.steps ? Math.round(100 * (j.step - 1 + (j.progress || 0) / 100) / j.steps) : 0;
+  return `<p class="searching"><b>${esc(what)}</b>${j.progress != null ? ` <span class="muted">${j.progress} %</span>` : ""}</p>
+    <div class="progress" role="progressbar" aria-valuenow="${share}" aria-valuemin="0" aria-valuemax="100"><span style="width:${share}%"></span></div>
+    <p class="muted">${j.step && j.steps ? `Schritt ${j.step} von ${j.steps}` : "Der Pi beginnt gleich"}${j.started ? ` · gestartet ${esc(fmtTime(j.started))}` : ""}.
+      Das dauert etwa 10 bis 20 Minuten. Die Heizungen heizen dabei ganz normal weiter.</p>`;
+}
+
+function zigbeeStatusHTML(z) {
+  const p = z.programs, j = z.job, busy = zigbeeBusy();
+  let body;
+  if (zigbeeRunning()) body = zigbeeProgressHTML(j);
+  else if (!p) body = `<p class="${z.error ? "error-text" : "searching"}">${esc(z.error || "Frage den Pi …")}</p>`;
+  else {
+    const [dot, words] = zigbeeStateText(p);
+    body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b>
+        ${!p.arch_ok && p.arch ? `<span class="muted">(dieser hat „${esc(p.arch)}“)</span>` : ""}</span></li></ul>
+      ${p.arch_ok ? zigbeeFactsHTML(p) : ""}
+      ${p.complete && !p.service.present ? `<p class="hint">Die Programme sind bereit. Zigbee2MQTT startet erst, wenn der Stick
+        eingerichtet ist – das kommt mit einem der nächsten Updates.</p>` : ""}
+      ${z.error ? `<p class="error-text">${esc(z.error)}</p>` : ""}
+      <div class="row">${zigbeeButtonsHTML(p, busy)}</div>`;
+  }
+  const failed = j && !zigbeeRunning() && j.state === "failed" && j.id !== zigbeeSeen && j.finished &&
+    Date.now() - Date.parse(j.finished) < 60 * 60 * 1000;
+  return `<div class="card zigbee-status">
+    <div class="card-head"><h2>Zigbee-Programme</h2>
+      <button class="small" data-action="zigbee-refresh" ${busy ? "disabled" : ""}>${zigbeePending === "refresh" ? "frage …" : "Neu prüfen"}</button></div>
+    ${body}
+    ${failed ? `<div class="wifi-note bad"><p><b>${j.action === "remove" ? "Entfernen" : "Installieren"} hat nicht geklappt.</b></p>
+      <p>${esc(j.message || "")}</p>
+      ${j.details ? `<details><summary>Meldungen des Pi</summary><pre class="zigbee-log">${esc(j.details)}</pre></details>` : ""}
+      <button class="small" data-action="zigbee-ok">OK</button></div>` : ""}
+    ${z.at && !zigbeeRunning() ? `<p class="hint">Stand ${esc(fmtTime(z.at))}</p>` : ""}
+  </div>`;
+}
+
+function zigbeeAboutHTML() {
+  return `<div class="card">
+    <h2>Wofür ist das?</h2>
+    <p>Die SONOFF-Thermostate (TRV Gen2) funken mit <b>Zigbee</b>. Der Pi spricht mit ihnen über einen USB-Stick
+      (SONOFF Dongle Plus MG24). Dafür braucht er drei freie Zusatzprogramme:</p>
+    <ul class="zigbee-parts">
+      <li><b>Zigbee2MQTT</b> spricht über den Stick mit den Thermostaten.</li>
+      <li><b>Mosquitto</b> reicht die Nachrichten zwischen Zigbee2MQTT und dieser App weiter – nur hier auf dem Pi, mit Passwort.</li>
+      <li><b>Node.js</b> – darauf läuft Zigbee2MQTT.</li>
+    </ul>
+    <p class="hint">Welche Versionen der Pi lädt, legt die jeweilige Version von FlowThermPi fest, und er prüft jede Datei.
+      Nach einem Update von FlowThermPi kann hier deshalb „Neue Versionen installieren“ erscheinen.</p>
+  </div>`;
+}
+
+function renderZigbee(el) {
+  const z = zigbee;
+  if (!z) return setHTML(el, `<div class="card"><p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p></div>`);
+  if (!z.supported) return setHTML(el, `<div class="card"><p>Zigbee gibt es nur, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
+  setHTML(el, zigbeeStatusHTML(z) + zigbeeAboutHTML());
+}
+
 // ------------------------------------------------------------------ events
 function planOf(t) { return state.plans.find(p => p.id === t.closest("[data-plan]").dataset.plan); }
 function dayOf(t) { return t.closest(".day").dataset.day; }
@@ -2342,6 +2531,7 @@ document.addEventListener("click", e => {
     if (tab === "plans" && editing) renderEditor();
     if (tab === "wifi") openWifiTab();
     if (tab === "remote") openRemoteTab();
+    if (tab === "zigbee") openZigbeeTab();
     render();
     return;
   }
@@ -2418,6 +2608,10 @@ document.addEventListener("click", e => {
     case "remote-cancel": return remoteDo("logout", { okText: "Anmeldung abgebrochen." });
     case "remote-ok": remoteSeen = remote && remote.job && remote.job.id; return render();
     case "remote-mode": return remoteMode(t.dataset.mode);
+    case "zigbee-refresh": return zigbeeDo("refresh");
+    case "zigbee-install": return zigbeeInstall();
+    case "zigbee-remove": return zigbeeRemove();
+    case "zigbee-ok": zigbeeSeen = zigbee && zigbee.job && zigbee.job.id; return render();
   }
 });
 

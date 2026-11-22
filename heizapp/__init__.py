@@ -5,7 +5,7 @@ Version 3 (siehe LICENSE).
 """
 
 APP_NAME = "FlowThermPi"
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 LICENSE = "GPL-3.0"
 COPYRIGHT = "© 2026 antratec"
 REPO_URL = "https://github.com/antratec-git-1/FlowThermPi"

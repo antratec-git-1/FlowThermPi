@@ -337,3 +337,11 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .choice span { color: var(--muted); font-size: 14px; }
 .choice.active { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
 .choice.active b::before { content: "✓ "; color: var(--primary); }
+
+/* Einrichtung › Zigbee */
+.progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 10px 0 6px; }
+.progress span { display: block; height: 100%; background: var(--accent); transition: width .6s; }
+.zigbee-log { max-height: 220px; overflow: auto; margin: 6px 0 8px; padding: 8px; border-radius: 8px; font-size: 12px;
+              white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); }
+.zigbee-parts { margin: 8px 0 0; padding-left: 20px; }
+.zigbee-parts li { margin: 4px 0; }

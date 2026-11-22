@@ -6,12 +6,13 @@
 Updates danach in der App: Einrichtung › Über › „Nach Updates suchen“ – oder derselbe Befehl noch
 einmal. WLAN einrichten: Einrichtung › WLAN (der Pi kann also mit Netzwerkkabel ausgeliefert werden).
 Fernwartung: Einrichtung › Fernwartung – Tailscale wird erst installiert, wenn man dort darum bittet.
+Zigbee-Thermostate: Einrichtung › Zigbee – auch deren Zusatzprogramme erst, wenn man dort darum bittet.
 Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi und
 bleiben bei Updates erhalten.
 
 Dieses Skript ist der einzige Teil von FlowThermPi, der als root läuft – auch für den Update-Knopf
-(--from-app), die WLAN-Einrichtung (--wifi) und die Fernwartung (--remote). Die App selbst hat keine
-Rechte am System.
+(--from-app), die WLAN-Einrichtung (--wifi), die Fernwartung (--remote) und die Zigbee-Programme
+(--zigbee). Die App selbst hat keine Rechte am System.
 
 Optionen hinter „python3 -“ anhängen, z. B. „… | sudo python3 - --port 8080“:
     --port N           Port der App (Standard 80: http://<name>.local ohne Portangabe)
@@ -76,6 +77,39 @@ TAILSCALE_PACKAGES = "https://pkgs.tailscale.com/stable"   # Tailscale's own pac
 TAILSCALE_KEYRING = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
 TAILSCALE_SOURCE = "/etc/apt/sources.list.d/tailscale.list"
 TAILSCALE_LOGIN_WAIT = 8                 # seconds „tailscale up“ waits; the login link comes within a second or two
+ZIGBEE_UNIT = f"/etc/systemd/system/{NAME}-zigbee.service"   # runs this script for Einrichtung › Zigbee
+ZIGBEE_PATH = f"/etc/systemd/system/{NAME}-zigbee.path"      # watches for the app's requests about it
+ZIGBEE_REQUEST = "zigbee-request.json"   # in DATA_DIR: placed by the app (Einrichtung › Zigbee) – just an action
+ZIGBEE_STATUS = "zigbee-status.json"     # in DATA_DIR: progress, result and what is installed, for the app
+ZIGBEE_ACTIONS = ("status", "install", "remove")
+ZIGBEE_DIR = f"/opt/{NAME}-zigbee"       # Node.js, pnpm and Zigbee2MQTT – belongs to root
+ZIGBEE_DATA = f"/var/lib/{NAME}-zigbee"  # Zigbee2MQTT's own data (network key, paired devices) – kept on removal
+ZIGBEE_USER = f"{NAME}-zigbee"           # builds and runs Zigbee2MQTT, may use the USB stick (group dialout)
+ZIGBEE_SERVICE = f"{NAME}-zigbee2mqtt"   # Zigbee2MQTT itself – set up in a later step, once the stick is there
+ZIGBEE_ENV = f"/etc/{NAME}/zigbee2mqtt.env"   # Zigbee2MQTT's login at Mosquitto – only root reads it, systemd hands it over
+ZIGBEE_LOGIN = "zigbee-mqtt.json"        # in DATA_DIR: the app's login at Mosquitto
+ZIGBEE_INFO = "installed.json"           # in ZIGBEE_DIR: what is installed there
+ZIGBEE_FREE_MB = 1500                    # free space on the SD card needed before an installation starts
+ZIGBEE_STEPS = ("check", "mosquitto", "node", "pnpm", "zigbee2mqtt", "dependencies", "build", "finish")
+MOSQUITTO_CONF = "/etc/mosquitto/conf.d/flowthermpi.conf"
+MOSQUITTO_PASSWD = "/etc/mosquitto/flowthermpi.passwd"
+MQTT_PORT = 1883
+MQTT_USERS = {"app": NAME, "zigbee2mqtt": "zigbee2mqtt"}   # one login each, made anew at every installation
+# What „Installieren“ puts on the Pi: fixed for each version of FlowThermPi and checked after every download.
+ZIGBEE_PARTS = {
+    "node": {"version": "24.22.3",       # Node.js 24 (LTS); Zigbee2MQTT 2.14 asks for ^22.2.0 || ^24
+             "sha256": {"arm64": "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
+                        "amd64": "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2"}},
+    "pnpm": {"version": "11.26.0",       # the version Zigbee2MQTT names in its package.json (packageManager)
+             "sha512": "fc0e2bf890b9f983611f1ab68c0637bce914390653699f83c1a78b005ed25f2c"
+                       "81e77920c8fd8eee2ecf0b58b28cdcb00a84d97f69bcf7c56b2f344710238664"},
+    "zigbee2mqtt": {"version": "2.14.3", "commit": "3c841fdfd66c92239921ef84fde8f039c64e1662"},
+}
+NODE_ARCH = {"arm64": "arm64", "amd64": "x64"}   # Debian's name of the system -> the one in Node.js's file names
+NODE_URL = "https://nodejs.org/dist/v{version}/node-v{version}-linux-{arch}.tar.gz"
+PNPM_URL = "https://registry.npmjs.org/pnpm/-/pnpm-{version}.tgz"
+ZIGBEE2MQTT_URL = "https://codeload.github.com/Koenkk/zigbee2mqtt/tar.gz/{commit}"
+APT = ("apt-get", "-o", "DPkg::Lock::Timeout=300")   # waits if the system is installing updates right now
 RELEASE_INFO = "release.json"            # in each release: version and Git commit, read by the app
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MIN_PYTHON = (3, 11)
@@ -114,6 +148,7 @@ Environment=HEIZAPP_DATA={data}/data/data.json
 Environment=HEIZAPP_UPDATE_DIR={data}
 Environment=HEIZAPP_WIFI_DIR={data}
 Environment=HEIZAPP_REMOTE_DIR={data}
+Environment=HEIZAPP_ZIGBEE_DIR={data}
 EnvironmentFile=-/etc/default/{name}
 ExecStart={python} {app}/current/run.py
 Restart=always
@@ -226,6 +261,58 @@ TAILSCALE_SOURCE_TEMPLATE = """\
 deb [signed-by={keyring}] {packages}/{distro} {codename} main
 """
 
+ZIGBEE_UNIT_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Installiert oder entfernt die Zigbee-Programme, wenn die App darum bittet (Einrichtung › Zigbee).
+[Unit]
+Description=FlowThermPi – Zigbee-Programme
+Wants=network-online.target
+After=network-online.target
+# „Neu prüfen“ several times in a row must not lock the service (and with it the path unit) – systemd's
+# default allows 5 starts in 10 s
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+ExecStart={python} -I -B -X utf8 {app}/current/install.py --zigbee
+TimeoutStartSec=60min
+# the heaters come first: Zigbee2MQTT is built with what the Pi has to spare
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+"""
+
+ZIGBEE_PATH_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Startet {name}-zigbee.service, sobald die App eine Anfrage zu den Zigbee-Programmen ablegt.
+[Unit]
+Description=FlowThermPi – wartet auf Anfragen der App zu Zigbee
+
+[Path]
+PathExists={data}/{zigbee_request}
+Unit={name}-zigbee.service
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+MOSQUITTO_TEMPLATE = """\
+# Geschrieben von FlowThermPi (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
+# Nur auf diesem Pi erreichbar und nur mit Passwort (eins für die App, eins für Zigbee2MQTT).
+listener {port} 127.0.0.1
+allow_anonymous false
+password_file {passwd}
+"""
+
+ZIGBEE_ENV_TEMPLATE = """\
+# Geschrieben von FlowThermPi (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
+# Anmeldung von Zigbee2MQTT bei Mosquitto. Nur root kann diese Datei lesen.
+ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://127.0.0.1:{port}
+ZIGBEE2MQTT_CONFIG_MQTT_USER={user}
+ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD={password}
+"""
+
 
 class InstallError(Exception):
     pass
@@ -242,6 +329,14 @@ class CommandError(InstallError):
 class ProgramMissing(CommandError):
     def __init__(self, program: str):
         super().__init__(program, "Programm nicht gefunden")
+
+
+class StepFailed(InstallError):
+    """A long step failed. details: the end of what it printed (holds no password), for the app."""
+
+    def __init__(self, message: str, details: str = ""):
+        super().__init__(message)
+        self.details = details
 
 
 def say(text: str = "") -> None:
@@ -290,18 +385,47 @@ class System:
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
-    def user_exists(self) -> bool:
+    def user_exists(self, user: str = NAME) -> bool:
         import pwd
         try:
-            pwd.getpwnam(NAME)
+            pwd.getpwnam(user)
             return True
         except KeyError:
             return False
 
-    def fchown(self, fd: int) -> None:
+    def fchown(self, fd: int, user: str = NAME) -> None:
         import pwd
-        user = pwd.getpwnam(NAME)
-        os.fchown(fd, user.pw_uid, user.pw_gid)
+        entry = pwd.getpwnam(user)
+        os.fchown(fd, entry.pw_uid, entry.pw_gid)
+
+    def lchown(self, path: Path, user: str) -> None:
+        """path itself (a link is not followed) to user and its group."""
+        import pwd
+        entry = pwd.getpwnam(user)
+        os.chown(path, entry.pw_uid, entry.pw_gid, follow_symlinks=False)
+
+    def chown_tree(self, top: Path, user: str) -> None:
+        """Hand a folder over that root has just filled and nobody else can reach yet – innermost entries first,
+        links themselves, never what they point to."""
+        import pwd
+        entry = pwd.getpwnam(user)
+        for folder, dirs, files in os.walk(top, topdown=False):
+            for name in dirs + files:
+                os.chown(os.path.join(folder, name), entry.pw_uid, entry.pw_gid, follow_symlinks=False)
+        os.chown(top, entry.pw_uid, entry.pw_gid, follow_symlinks=False)
+
+    def run_as(self, user: str, cmd: tuple[str, ...], cwd: Path, env: dict, timeout: float) -> tuple[int, str]:
+        """cmd as user – with its own group only, none of root's – and what it printed, errors included."""
+        try:
+            res = subprocess.run(cmd, cwd=cwd, env=env, user=user, group=user, extra_groups=[], umask=0o022,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            return 124, f"{out}\n{cmd[0]}: keine Antwort nach {timeout:g} Sekunden"
+        except FileNotFoundError:
+            raise ProgramMissing(cmd[0]) from None
+        return res.returncode, res.stdout
 
 
 class DryRun(System):
@@ -327,11 +451,21 @@ class DryRun(System):
     def sleep(self, seconds: float) -> None:
         pass
 
-    def user_exists(self) -> bool:
+    def user_exists(self, user: str = NAME) -> bool:
         return False
 
-    def fchown(self, fd: int) -> None:
+    def fchown(self, fd: int, user: str = NAME) -> None:
         pass
+
+    def lchown(self, path: Path, user: str) -> None:
+        pass
+
+    def chown_tree(self, top: Path, user: str) -> None:
+        pass
+
+    def run_as(self, user: str, cmd: tuple[str, ...], cwd: Path, env: dict, timeout: float) -> tuple[int, str]:
+        self.commands.append(cmd)
+        return 0, ""
 
 
 # ---------------------------------------------------------------------- program files
@@ -468,10 +602,11 @@ def prune(app: Path) -> None:
 # The data folder belongs to the service user, so nothing in it is trusted: root never follows a link
 # there (a planted link could otherwise make root change or hand over files elsewhere). Files are opened
 # relative to an opened folder with O_NOFOLLOW and replaced by renaming, never written through a path.
-def open_folder(name: str | Path, system: System, parent: int | None = None) -> int:
+def open_folder(name: str | Path, system: System, parent: int | None = None, user: str = NAME,
+                mode: int = 0o750) -> int:
     """Folder of the service (created if missing), 0750 and owned by it; returns an open descriptor."""
     try:
-        os.mkdir(name, 0o750, dir_fd=parent)
+        os.mkdir(name, mode, dir_fd=parent)
     except FileExistsError:
         pass
     try:
@@ -479,8 +614,8 @@ def open_folder(name: str | Path, system: System, parent: int | None = None) -> 
     except OSError as exc:
         raise InstallError(f"{name} im Datenordner ist kein normaler Ordner (Verweis?) – "
                            "aus Sicherheitsgründen abgebrochen.") from exc
-    os.fchmod(fd, 0o750)
-    system.fchown(fd)
+    os.fchmod(fd, mode)
+    system.fchown(fd, user)
     return fd
 
 
@@ -587,12 +722,15 @@ def configured_port(unit: Path) -> int | None:
 
 
 def write_units(root: Path, port: int) -> None:
-    """The app's service plus the units behind the update button, the WLAN setup and the remote maintenance."""
+    """The app's service plus the units behind the update button, the WLAN setup, the remote maintenance and the
+    Zigbee programs."""
     values = {"name": NAME, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
-              "wifi_request": WIFI_REQUEST, "remote_request": REMOTE_REQUEST, "python": sys.executable or "/usr/bin/python3"}
+              "wifi_request": WIFI_REQUEST, "remote_request": REMOTE_REQUEST, "zigbee_request": ZIGBEE_REQUEST,
+              "python": sys.executable or "/usr/bin/python3"}
     for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE),
                            (WIFI_UNIT, WIFI_UNIT_TEMPLATE), (WIFI_PATH, WIFI_PATH_TEMPLATE),
-                           (REMOTE_UNIT, REMOTE_UNIT_TEMPLATE), (REMOTE_PATH, REMOTE_PATH_TEMPLATE)):
+                           (REMOTE_UNIT, REMOTE_UNIT_TEMPLATE), (REMOTE_PATH, REMOTE_PATH_TEMPLATE),
+                           (ZIGBEE_UNIT, ZIGBEE_UNIT_TEMPLATE), (ZIGBEE_PATH, ZIGBEE_PATH_TEMPLATE)):
         path = root / unit.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.format(**values), encoding="utf-8")
@@ -692,6 +830,7 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "enable", "--now", f"{NAME}-update.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-wifi.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-remote.path")
+        system.run("systemctl", "enable", "--now", f"{NAME}-zigbee.path")
         system.run("systemctl", "restart", NAME)
 
         if system.live:
@@ -1444,6 +1583,577 @@ def remote_from_app(args: argparse.Namespace, system: System) -> None:
         os.close(folder)
 
 
+# ---------------------------------------------------------------------- Zigbee (Einrichtung › Zigbee)
+# SONOFF's Zigbee thermostats need three extra programs on the Pi: Mosquitto (passes the messages between Zigbee2MQTT
+# and the app; from Debian's own archive), Node.js and Zigbee2MQTT (which talks to the Zigbee USB stick). The app
+# places {data}/zigbee-request.json with nothing but one of ZIGBEE_ACTIONS, and flowthermpi-zigbee.path runs
+# „install.py --zigbee“ as root. What gets installed is fixed in ZIGBEE_PARTS for each version of FlowThermPi – the app
+# cannot choose – and every download is checked: Node.js and pnpm against their checksums, Zigbee2MQTT against its Git
+# commit, its building blocks against the checksums in its own lockfile (pnpm install --frozen-lockfile). Zigbee2MQTT
+# is built (and later run) by its own user, never by root. Mosquitto listens only on this Pi and only with a password
+# – one for the app, one for Zigbee2MQTT, made anew at every installation and never shown or logged. Zigbee2MQTT itself
+# is started in a later step, once the stick is there; until then nothing of it runs.
+def zigbee_request(text: str) -> str:
+    """The app's request, checked: only the action counts, nothing else in it is used."""
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise InstallError("Die Anfrage der App zu Zigbee ist unlesbar.") from exc
+    if not isinstance(raw, dict) or raw.get("action") not in ZIGBEE_ACTIONS:
+        raise InstallError("Unbekannte Anfrage zu Zigbee.")
+    return raw["action"]
+
+
+def apt_env() -> dict:
+    return {**os.environ, "DEBIAN_FRONTEND": "noninteractive", "LC_ALL": "C.UTF-8"}
+
+
+def debian_arch(system: System) -> str:
+    """The system's own architecture (arm64 for Raspberry Pi OS 64-bit) – not the kernel's: a Pi 4 with the 32-bit
+    system runs a 64-bit kernel, and the Node.js for arm64 would not run there."""
+    return system.run("dpkg", "--print-architecture", check=False).strip()
+
+
+def package_version(system: System, package: str) -> str | None:
+    """Version of an installed Debian package; None if it is not installed."""
+    found = re.fullmatch(r"install ok installed (\S+)",
+                         system.run("dpkg-query", "-W", "-f=${Status} ${Version}", package, check=False).strip())
+    return found.group(1) if found else None
+
+
+def serial_ports(root: Path) -> list[dict]:
+    """USB devices with a serial port, under their lasting names (/dev/serial/by-id) – the Zigbee stick is one."""
+    folder = root / "dev/serial/by-id"
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    ports = []
+    for name in names:
+        if len(ports) == 8 or not re.fullmatch(r"[\w.:+-]{1,200}", name):
+            continue
+        try:
+            device = os.path.basename(os.readlink(folder / name))
+        except OSError:
+            device = ""
+        ports.append({"id": name, "device": device if re.fullmatch(r"tty\w{1,20}", device) else None})
+    return ports
+
+
+def free_mb(path: Path) -> int | None:
+    """Free space where path is (or would be), in MB."""
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        return shutil.disk_usage(path).free >> 20
+    except OSError:
+        return None
+
+
+def zigbee_info(base: Path) -> dict:
+    """What earlier installations noted in ZIGBEE_DIR (root's own folder)."""
+    try:
+        info = json.loads((base / ZIGBEE_INFO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def write_zigbee_info(base: Path, info: dict) -> None:
+    write_system_file(base / ZIGBEE_INFO, (json.dumps(info, indent=1) + "\n").encode())
+
+
+def zigbee_state(system: System, root: Path) -> dict:
+    """What the app shows: the programs and their versions, Mosquitto, Zigbee2MQTT's service, the USB devices."""
+    base = root / ZIGBEE_DIR.lstrip("/")
+    info, arch = zigbee_info(base), debian_arch(system)
+    return {"arch": arch or None, "arch_ok": arch in NODE_ARCH, "free_mb": free_mb(base),
+            "installed": {part: info.get(part) for part in ZIGBEE_PARTS}, "complete": info.get("complete") is True,
+            "wanted": {part: value["version"] for part, value in ZIGBEE_PARTS.items()},
+            "mosquitto": {"version": package_version(system, "mosquitto"),
+                          "active": system.ok("systemctl", "is-active", "--quiet", "mosquitto")},
+            "service": {"present": (root / f"etc/systemd/system/{ZIGBEE_SERVICE}.service").exists(),
+                        "active": system.ok("systemctl", "is-active", "--quiet", ZIGBEE_SERVICE)},
+            "ports": serial_ports(root)}
+
+
+def fetch_file(url: str, dest: Path, report=None, limit: int = 300 << 20) -> None:
+    """A program archive to dest over HTTPS (checked against the system's certificates); report(percent) now and then."""
+    error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as res, open(dest, "wb") as out:
+                total, done, shown = int(res.headers.get("Content-Length") or 0), 0, -10
+                while chunk := res.read(1 << 16):
+                    done += len(chunk)
+                    if done > limit:
+                        raise InstallError(f"{url} ist unerwartet groß – abgebrochen.")
+                    out.write(chunk)
+                    if report and total and done * 100 // total >= shown + 10:
+                        shown = done * 100 // total
+                        report(min(shown, 100))
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise InstallError(f"{url} gibt es nicht (mehr).") from exc
+            error = exc
+        except (urllib.error.URLError, OSError) as exc:
+            error = exc
+        time.sleep(5 * attempt)
+    raise InstallError(f"Download von {url.split('/')[2]} fehlgeschlagen ({error}). Hat der Pi Internet?")
+
+
+def check_digest(path: Path, algorithm: str, expected: str, url: str) -> None:
+    """The file is exactly the one this version of FlowThermPi expects – otherwise it is deleted, nothing is installed."""
+    digest = hashlib.new(algorithm)
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1 << 20):
+            digest.update(chunk)
+    if digest.hexdigest() != expected.lower():
+        path.unlink(missing_ok=True)
+        raise InstallError(f"Die Datei von {url} ist nicht die erwartete (Prüfsumme stimmt nicht) – aus "
+                           "Sicherheitsgründen abgebrochen.")
+
+
+def unpack(archive: Path, dest: Path) -> tuple[Path, str | None]:
+    """Unpack a program archive (tar.gz) into dest: plain files, folders, and links that stay inside the archive's
+    one top folder (it is moved elsewhere later). Nothing is written through a link and nothing lands outside.
+    Returns that top folder and the Git commit GitHub writes into its archives (None in other ones)."""
+    dest.mkdir(parents=True)
+    with tarfile.open(archive, "r:gz") as tar:
+        comment = str((tar.pax_headers or {}).get("comment", ""))
+        commit = comment if COMMIT.fullmatch(comment) else None
+        for member in tar:
+            name = PurePosixPath(member.name)
+            if not name.parts or name.is_absolute() or ".." in name.parts:
+                raise InstallError(f"Unerwarteter Pfad im Archiv: {member.name}")
+            target, parent = dest.joinpath(*name.parts), dest
+            for part in name.parts[:-1]:
+                parent = parent / part
+                if parent.is_symlink():
+                    raise InstallError(f"Unerwarteter Pfad im Archiv (über einen Verweis): {member.name}")
+            if member.isdir():
+                if target.is_symlink():
+                    raise InstallError(f"Unerwarteter Pfad im Archiv (über einen Verweis): {member.name}")
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not (member.isfile() or member.issym()):
+                continue   # hard links, devices and the like: nothing a program needs
+            if target.is_symlink() or target.exists():
+                raise InstallError(f"Doppelter Eintrag im Archiv: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if member.issym():
+                if PurePosixPath(member.linkname).is_absolute():
+                    raise InstallError(f"Unerwarteter Verweis im Archiv: {member.name}")
+                os.symlink(member.linkname, target)
+                continue
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with tar.extractfile(member) as src, os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(src, out)
+            os.chmod(target, 0o755 if member.mode & 0o111 else 0o644)
+    tops = list(dest.iterdir())
+    if len(tops) != 1 or tops[0].is_symlink() or not tops[0].is_dir():
+        raise InstallError("Das Archiv hat einen unerwarteten Aufbau.")
+    inside = os.path.realpath(tops[0])
+    for folder, dirs, files in os.walk(tops[0]):   # every link, followed to its end, must stay inside the top folder
+        for entry in dirs + files:
+            path = os.path.join(folder, entry)
+            if os.path.islink(path) and os.path.commonpath([inside, os.path.realpath(path)]) != inside:
+                raise InstallError(f"Unerwarteter Verweis im Archiv: {os.path.relpath(path, dest)}")
+    return tops[0], commit
+
+
+def switch_link(link: Path, target: Path) -> None:
+    """Point link (next to target) at target in one step."""
+    new = link.with_name(f".{link.name}.new")
+    if new.is_symlink() or new.exists():
+        new.unlink()
+    new.symlink_to(target.name)
+    os.replace(new, link)
+
+
+def write_root_secret(path: Path, text: str) -> None:
+    """A file only root reads (0600 in a 0700 folder), replaced in one step."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def zigbee_mosquitto(system: System, root: Path, info: dict) -> dict[str, str]:
+    """Mosquitto from Debian's archive – only on this Pi, only with a password. Returns the new logins
+    {user: password}; they go to the app and to Zigbee2MQTT, nowhere else."""
+    if package_version(system, "mosquitto") is None:
+        say("• Lade die Paketlisten …")
+        system.run(*APT, "update", check=False, env=apt_env())   # a broken other archive must not stop us
+        say("• Installiere Mosquitto …")
+        try:
+            system.run(*APT, "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+                       "install", "-y", "--no-install-recommends", "mosquitto", env=apt_env())
+        except CommandError as exc:
+            raise InstallError(f"Mosquitto ließ sich nicht installieren ({apt_reason(exc.detail)}).") from None
+        info["mosquitto_ours"] = True   # „Entfernen“ takes it away again
+    logins = {user: secrets.token_urlsafe(24) for user in MQTT_USERS.values()}
+    write_system_file(root / MOSQUITTO_CONF.lstrip("/"),
+                      MOSQUITTO_TEMPLATE.format(port=MQTT_PORT, passwd=MOSQUITTO_PASSWD).encode())
+    passwd = root / MOSQUITTO_PASSWD.lstrip("/")
+    tmp = passwd.with_name(f".{passwd.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{user}:{password}\n" for user, password in logins.items()))
+        system.run("mosquitto_passwd", "-U", str(tmp))   # the passwords become hashes, in the file itself
+        system.lchown(tmp, "mosquitto")   # Mosquitto reads it again without root's rights (after its log rotation)
+        os.replace(tmp, passwd)
+    finally:
+        tmp.unlink(missing_ok=True)
+    system.run("systemctl", "enable", "mosquitto", check=False)
+    try:
+        system.run("systemctl", "restart", "mosquitto")
+    except CommandError as exc:
+        raise InstallError(f"Mosquitto startet nicht ({first_line(exc.detail) or 'ohne Meldung'}).") from None
+    return logins
+
+
+def zigbee_user(system: System, root: Path, base: Path) -> None:
+    """The user that builds and runs Zigbee2MQTT – without login, with access to the USB stick (group dialout) – and
+    its folders: ZIGBEE_DATA (0700) and base/work, where pnpm keeps what it has loaded."""
+    if not system.user_exists(ZIGBEE_USER):
+        system.run("useradd", "--system", "--user-group", "--groups", "dialout", "--home-dir", ZIGBEE_DATA,
+                   "--no-create-home", "--shell", "/usr/sbin/nologin", ZIGBEE_USER)
+        say(f"• Benutzer „{ZIGBEE_USER}“ für Zigbee2MQTT angelegt")
+    data = root / ZIGBEE_DATA.lstrip("/")
+    data.parent.mkdir(parents=True, exist_ok=True)
+    os.close(open_folder(data, system, user=ZIGBEE_USER, mode=0o700))
+    work = base / "work"
+    work.mkdir(mode=0o700, exist_ok=True)
+    system.lchown(work, ZIGBEE_USER)
+
+
+def zigbee_logins(system: System, root: Path, folder: int, logins: dict[str, str]) -> None:
+    """The app's login into its data folder (0600, its own); Zigbee2MQTT's into a file that only root reads – systemd
+    hands it over when it starts Zigbee2MQTT."""
+    user = MQTT_USERS["app"]
+    write_private(folder, ZIGBEE_LOGIN, json.dumps({"host": "127.0.0.1", "port": MQTT_PORT, "user": user,
+                                                    "password": logins[user]}) + "\n", system)
+    user = MQTT_USERS["zigbee2mqtt"]
+    write_root_secret(root / ZIGBEE_ENV.lstrip("/"),
+                      ZIGBEE_ENV_TEMPLATE.format(port=MQTT_PORT, user=user, password=logins[user]))
+
+
+def restart_zigbee2mqtt(system: System) -> None:
+    """Zigbee2MQTT, once it is set up, starts again – with its new password and what was installed."""
+    if system.ok("systemctl", "is-enabled", "--quiet", ZIGBEE_SERVICE):
+        system.run("systemctl", "restart", ZIGBEE_SERVICE, check=False)
+
+
+def zigbee_env(base: Path) -> dict:
+    """For pnpm and Node.js: our Node.js first, everything pnpm keeps in base/work, no colours, never a question."""
+    work = base / "work"
+    return {"PATH": f"{base / 'node' / 'bin'}:/usr/bin:/bin", "HOME": str(work), "XDG_CACHE_HOME": str(work / "cache"),
+            "XDG_DATA_HOME": str(work / "data"), "XDG_CONFIG_HOME": str(work / "config"),
+            "XDG_STATE_HOME": str(work / "state"), "CI": "true", "NO_COLOR": "1", "LANG": "C.UTF-8"}
+
+
+def program_runs(system: System, base: Path, cmd: tuple[str, ...], expected: str) -> bool:
+    """cmd (a --version) runs as ZIGBEE_USER and ends with the expected line."""
+    code, out = system.run_as(ZIGBEE_USER, cmd, cwd=base, env=zigbee_env(base), timeout=120)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    return code == 0 and bool(lines) and lines[-1] == expected
+
+
+def zigbee_download(base: Path, url: str, name: str, report, digest: tuple[str, str] | None = None):
+    """Download (checked if digest is given) and unpack into a new temporary folder in base. Returns that folder –
+    the caller removes it – and (the archive's top folder, its Git commit)."""
+    tmp = Path(tempfile.mkdtemp(prefix=".download-", dir=base))
+    try:
+        archive = tmp / name
+        fetch_file(url, archive, report)
+        if digest:
+            check_digest(archive, *digest, url)
+        return tmp, unpack(archive, tmp / "files")
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def zigbee_node(system: System, base: Path, arch: str, progress) -> None:
+    """Node.js from nodejs.org, checked against its checksum, to base/node-v<version>; base/node points at it."""
+    version = ZIGBEE_PARTS["node"]["version"]
+    folder = base / f"node-v{version}"
+    cmd = (str(folder / "bin" / "node"), "--version")
+    if not ((folder / "bin" / "node").is_file() and program_runs(system, base, cmd, f"v{version}")):
+        url = NODE_URL.format(version=version, arch=NODE_ARCH[arch])
+        tmp, (top, _) = zigbee_download(base, url, "node.tar.gz", progress, ("sha256", ZIGBEE_PARTS["node"]["sha256"][arch]))
+        try:
+            shutil.rmtree(folder, ignore_errors=True)
+            os.rename(top, folder)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if not program_runs(system, base, cmd, f"v{version}"):
+            raise InstallError(f"Node.js {version} läuft auf diesem Pi nicht.")
+    switch_link(base / "node", folder)
+
+
+def zigbee_pnpm(system: System, base: Path, progress) -> None:
+    """pnpm, which loads Zigbee2MQTT's building blocks, from npm's registry (checked) to base/pnpm-<version>."""
+    version = ZIGBEE_PARTS["pnpm"]["version"]
+    folder = base / f"pnpm-{version}"
+    cmd = (str(base / "node" / "bin" / "node"), str(folder / "bin" / "pnpm.mjs"), "--version")
+    if not ((folder / "bin" / "pnpm.mjs").is_file() and program_runs(system, base, cmd, version)):
+        url = PNPM_URL.format(version=version)
+        tmp, (top, _) = zigbee_download(base, url, "pnpm.tgz", progress, ("sha512", ZIGBEE_PARTS["pnpm"]["sha512"]))
+        try:
+            if not (top / "bin" / "pnpm.mjs").is_file():
+                raise InstallError("Das Archiv von pnpm hat einen unerwarteten Aufbau.")
+            shutil.rmtree(folder, ignore_errors=True)
+            os.rename(top, folder)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if not program_runs(system, base, cmd, version):
+            raise InstallError(f"pnpm {version} läuft auf diesem Pi nicht.")
+    switch_link(base / "pnpm", folder)
+
+
+def zigbee2mqtt_ready(base: Path, info: dict) -> bool:
+    """The wanted Zigbee2MQTT is there and built."""
+    project = base / "zigbee2mqtt"
+    return (info.get("commit") == ZIGBEE_PARTS["zigbee2mqtt"]["commit"] and project.is_symlink()
+            and (project / "dist" / ".hash").is_file() and (project / "node_modules").is_dir())
+
+
+def zigbee2mqtt_fetch(system: System, base: Path, progress) -> Path:
+    """Zigbee2MQTT's source at the fixed commit into a new folder base/zigbee2mqtt-<version>-<n>, handed over to
+    ZIGBEE_USER, who builds it there. The folder in use stays as it is until the new one is ready."""
+    part = ZIGBEE_PARTS["zigbee2mqtt"]
+    url = ZIGBEE2MQTT_URL.format(commit=part["commit"])
+    numbers = [int(m.group(1)) for p in base.iterdir() if (m := re.fullmatch(r"zigbee2mqtt-.+-(\d+)", p.name))]
+    project = base / f"zigbee2mqtt-{part['version']}-{max(numbers, default=0) + 1}"
+    tmp, (top, commit) = zigbee_download(base, url, "zigbee2mqtt.tar.gz", progress)
+    try:
+        if commit != part["commit"]:
+            raise InstallError("Das Archiv von GitHub ist nicht die erwartete Version von Zigbee2MQTT – aus "
+                               "Sicherheitsgründen abgebrochen.")
+        try:
+            version = json.loads((top / "package.json").read_text(encoding="utf-8")).get("version")
+        except (OSError, ValueError, AttributeError):
+            version = None
+        if version != part["version"]:
+            raise InstallError("Im Archiv von GitHub steckt eine andere Version von Zigbee2MQTT – abgebrochen.")
+        os.rename(top, project)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    system.chown_tree(project, ZIGBEE_USER)
+    return project
+
+
+def pnpm_reason(out: str, code: int) -> str:
+    """Why pnpm or the build failed, in words."""
+    text = out.lower()
+    if "enospc" in text or "no space left" in text:
+        return "die Speicherkarte ist voll"
+    if "heap out of memory" in text or "enomem" in text or code == 134:
+        return "zu wenig Arbeitsspeicher"
+    if code == 124:
+        return "es hat zu lange gedauert"
+    if re.search(r"enotfound|eai_again|econnreset|etimedout|econnrefused|socket hang up", text):
+        return "keine Verbindung zum Internet – bitte später noch einmal versuchen"
+    return f"Fehlercode {code}"
+
+
+def run_pnpm(system: System, base: Path, project: Path, *args: str, timeout: float, failed: str) -> None:
+    cmd = (str(base / "node" / "bin" / "node"), str(base / "pnpm" / "bin" / "pnpm.mjs"), *args)
+    code, out = system.run_as(ZIGBEE_USER, cmd, cwd=project, env=zigbee_env(base), timeout=timeout)
+    lines = [line.rstrip() for line in out.splitlines() if line.strip()]
+    for line in lines[-20:]:
+        say(f"  {line}")
+    if code:
+        raise StepFailed(f"{failed} ({pnpm_reason(out, code)}).", "\n".join(lines[-40:])[-4000:])
+
+
+def zigbee2mqtt_build(system: System, base: Path, project: Path, phase) -> None:
+    """Its building blocks exactly as its lockfile names them, then the build – both as ZIGBEE_USER. Parts that need
+    a compiler and are optional (unix-dgram) are left out by pnpm; the serial port comes ready-built."""
+    phase("dependencies")
+    run_pnpm(system, base, project, "install", "--frozen-lockfile", "--store-dir", str(base / "work" / "store"),
+             timeout=40 * 60, failed="Die Bausteine von Zigbee2MQTT ließen sich nicht laden")
+    phase("build")
+    run_pnpm(system, base, project, "run", "build", timeout=30 * 60, failed="Zigbee2MQTT ließ sich nicht bauen")
+    if not ((project / "dist" / ".hash").is_file() and (project / "dist" / "controller.js").is_file()):
+        raise InstallError("Zigbee2MQTT ist nach dem Bauen unvollständig.")
+
+
+def prune_zigbee(base: Path) -> None:
+    """Older versions, and what an interrupted installation left behind."""
+    keep = {(base / name).resolve() for name in ("node", "pnpm", "zigbee2mqtt") if (base / name).is_symlink()}
+    for path in base.iterdir():
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if path.name.startswith(".download-") or (re.match(r"(node-v|pnpm-|zigbee2mqtt-)", path.name)
+                                                  and path.resolve() not in keep):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def zigbee_install(system: System, root: Path, folder: int, status: dict, report) -> None:
+    """„Installieren“: everything in ZIGBEE_PARTS that is not there yet – also after an update of FlowThermPi that
+    brings newer versions. A step that fails leaves what worked before as it was."""
+    base = root / ZIGBEE_DIR.lstrip("/")
+
+    def phase(name: str) -> None:
+        status.update(phase=name, step=ZIGBEE_STEPS.index(name) + 1, steps=len(ZIGBEE_STEPS), progress=None)
+        report()
+
+    def progress(percent: int) -> None:
+        status["progress"] = percent
+        report()
+
+    phase("check")
+    arch = debian_arch(system)
+    if arch not in NODE_ARCH:
+        raise InstallError("Für Zigbee braucht der Pi ein 64-Bit-System (Raspberry Pi OS 64-bit)"
+                           + (f" – hier läuft „{arch}“." if arch else "."))
+    free = free_mb(base)
+    if free is not None and free < ZIGBEE_FREE_MB:
+        raise InstallError(f"Auf der Speicherkarte sind nur noch {free} MB frei – die Zigbee-Programme brauchen etwa "
+                           f"{ZIGBEE_FREE_MB} MB.")
+    os.chmod(base, 0o755)
+    info = zigbee_info(base)
+
+    phase("mosquitto")
+    logins = zigbee_mosquitto(system, root, info)
+    write_zigbee_info(base, info)
+    zigbee_user(system, root, base)
+    zigbee_logins(system, root, folder, logins)
+    restart_zigbee2mqtt(system)   # it has to log in with its new password
+    say("• Mosquitto läuft (nur auf diesem Pi, mit Passwort)")
+
+    phase("node")
+    say(f"• Node.js {ZIGBEE_PARTS['node']['version']} …")
+    zigbee_node(system, base, arch, progress)
+    info["node"] = ZIGBEE_PARTS["node"]["version"]
+    write_zigbee_info(base, info)
+
+    phase("pnpm")
+    say(f"• pnpm {ZIGBEE_PARTS['pnpm']['version']} …")
+    zigbee_pnpm(system, base, progress)
+    info["pnpm"] = ZIGBEE_PARTS["pnpm"]["version"]
+    write_zigbee_info(base, info)
+
+    part = ZIGBEE_PARTS["zigbee2mqtt"]
+    if zigbee2mqtt_ready(base, info):
+        say(f"• Zigbee2MQTT {part['version']} ist schon da")
+    else:
+        phase("zigbee2mqtt")
+        say(f"• Zigbee2MQTT {part['version']} …")
+        project = zigbee2mqtt_fetch(system, base, progress)
+        try:
+            zigbee2mqtt_build(system, base, project, phase)
+        except BaseException:
+            shutil.rmtree(project, ignore_errors=True)
+            raise
+        switch_link(base / "zigbee2mqtt", project)
+        info.update(zigbee2mqtt=part["version"], commit=part["commit"])
+
+    phase("finish")
+    info.update(complete=True, arch=arch, installed=now_text())
+    write_zigbee_info(base, info)
+    prune_zigbee(base)
+    restart_zigbee2mqtt(system)
+    status["message"] = "Die Zigbee-Programme sind installiert."
+
+
+def zigbee_remove(system: System, root: Path, folder: int | None, keep_data: bool = True) -> str:
+    """„Entfernen“: the programs, the logins and Mosquitto – if it came with them; one that was there before only
+    loses our settings. Zigbee2MQTT's data (network key, paired thermostats) and its user stay unless keep_data is
+    False: after a new installation the thermostats are still paired."""
+    base = root / ZIGBEE_DIR.lstrip("/")
+    info = zigbee_info(base)
+    system.run("systemctl", "disable", "--now", ZIGBEE_SERVICE, check=False)
+    unit = root / f"etc/systemd/system/{ZIGBEE_SERVICE}.service"
+    if unit.exists():
+        unit.unlink()
+        system.run("systemctl", "daemon-reload", check=False)
+    shutil.rmtree(base, ignore_errors=True)
+    for name in (ZIGBEE_ENV, MOSQUITTO_CONF, MOSQUITTO_PASSWD):
+        (root / name.lstrip("/")).unlink(missing_ok=True)
+    if folder is not None:
+        try:
+            os.unlink(ZIGBEE_LOGIN, dir_fd=folder)
+        except FileNotFoundError:
+            pass
+    if package_version(system, "mosquitto"):
+        if info.get("mosquitto_ours"):
+            say("• Entferne Mosquitto …")
+            system.run(*APT, "purge", "-y", "mosquitto", check=False, env=apt_env())
+        else:
+            system.run("systemctl", "restart", "mosquitto", check=False)
+    if not keep_data:
+        shutil.rmtree(root / ZIGBEE_DATA.lstrip("/"), ignore_errors=True)
+        system.run("userdel", ZIGBEE_USER, check=False)
+    return "Die Zigbee-Programme sind entfernt."
+
+
+def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
+    """Run by flowthermpi-zigbee.service when the app has placed a request. Progress and result go to
+    zigbee-status.json – at the end always with the state of the programs."""
+    root = Path(args.root)
+    data_dir = root / DATA_DIR.lstrip("/")
+    try:
+        folder = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise InstallError(f"Datenordner {DATA_DIR} fehlt oder ist kein Ordner ({exc.strerror}).") from exc
+    try:
+        try:
+            text = read_private(folder, ZIGBEE_REQUEST)
+        finally:
+            try:
+                os.unlink(ZIGBEE_REQUEST, dir_fd=folder)   # first: while it exists, the path unit starts us again
+            except FileNotFoundError:
+                pass
+        if text is None:
+            say("Keine Anfrage der App zu Zigbee – nichts zu tun.")
+            return
+        status = {"id": request_id(text), "action": None, "state": "running", "phase": None, "step": None,
+                  "steps": None, "progress": None, "started": now_text(), "at": now_text()}
+
+        def report() -> None:
+            status["at"] = now_text()
+            write_private(folder, ZIGBEE_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
+
+        try:
+            status["action"] = action = zigbee_request(text)
+            if action != "status":
+                report()   # the app shows at once that it has begun
+                with install_lock(root / ZIGBEE_DIR.lstrip("/")):
+                    if action == "install":
+                        zigbee_install(system, root, folder, status, report)
+                    else:
+                        status["phase"] = "remove"
+                        report()
+                        status["message"] = zigbee_remove(system, root, folder)
+                say(f"✓ {status['message']}")
+            status["state"] = "done"
+        except InstallError as exc:   # reported to the app; not an error of the service itself
+            status.update(state="failed", message=str(exc), details=getattr(exc, "details", "") or None)
+            say(f"✗ {exc}")
+        finally:
+            if status["state"] == "running":   # an error in this script: the app must not wait for ever
+                status.update(state="failed", message=f"Unerwarteter Fehler – Meldungen: journalctl -u {NAME}-zigbee")
+            status.update(phase=None, step=None, progress=None, finished=now_text())
+            try:
+                status["zigbee"] = zigbee_state(system, root)
+            finally:
+                report()
+    finally:
+        os.close(folder)
+
+
 def reset_pin(args: argparse.Namespace, system: System) -> None:
     system.run("systemctl", "stop", NAME, check=False)
     try:
@@ -1460,12 +2170,20 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "disable", "--now", f"{NAME}-update.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-wifi.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-remote.path", check=False)
+        system.run("systemctl", "disable", "--now", f"{NAME}-zigbee.path", check=False)
         system.run("systemctl", "disable", "--now", NAME, check=False)
-        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH, REMOTE_UNIT, REMOTE_PATH):
+        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH, REMOTE_UNIT, REMOTE_PATH, ZIGBEE_UNIT, ZIGBEE_PATH):
             path = root / unit.lstrip("/")
             if path.exists():
                 path.unlink()
         system.run("systemctl", "daemon-reload", check=False)
+        left = [root / name.lstrip("/") for name in (ZIGBEE_DIR, MOSQUITTO_CONF, ZIGBEE_ENV)]
+        if args.purge:   # also what „Entfernen“ in the app kept: the paired thermostats and their user
+            left.append(root / ZIGBEE_DATA.lstrip("/"))
+        if any(path.exists() for path in left) or (args.purge and system.user_exists(ZIGBEE_USER)):
+            zigbee_remove(system, root, None, keep_data=not args.purge)
+            say(f"✓ Zigbee-Programme entfernt ({ZIGBEE_DIR})." if args.purge else
+                f"✓ Zigbee-Programme entfernt ({ZIGBEE_DIR}) – die angelernten Thermostate bleiben in {ZIGBEE_DATA}.")
         shutil.rmtree(root / APP_DIR.lstrip("/"), ignore_errors=True)
     say(f"✓ FlowThermPi entfernt ({APP_DIR}).")
     if system.live and shutil.which("tailscale"):
@@ -1495,6 +2213,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--from-app", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-update.service
     parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-wifi.service
     parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-remote.service
+    parser.add_argument("--zigbee", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-zigbee.service
     parser.add_argument("--commit", help=argparse.SUPPRESS)  # with --source: Git commit of that folder
     parser.add_argument("--root", default="/", help=argparse.SUPPRESS)  # tests: work inside this folder only
     return parser.parse_args(argv)
@@ -1516,6 +2235,8 @@ def main(argv: list[str] | None = None, system: System | None = None) -> int:
             wifi_from_app(args, system)
         elif args.remote:
             remote_from_app(args, system)
+        elif args.zigbee:
+            zigbee_from_app(args, system)
         elif args.uninstall:
             uninstall(args, system)
         elif args.reset_pin:
