@@ -102,11 +102,11 @@ class LogFileTest(LogBase):
         log.warning("Umgebung: HEIZAPP_PASSWORD=%s ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=%s", APP_PASSWORD, APP_MQTT)
         log.warning("Authorization: Basic %s", basic)
         log.warning("Bitte anmelden: https://login.tailscale.com/a/%s – Code 1234", LOGIN)
-        log.warning("Schlüssel tskey-auth-kQx1CNTRL-abcdefghijk benutzt")
+        log.warning("Schlüssel tskey-beispiel-nicht-echt benutzt")
         log.warning("QR-Code: data:image/png;base64,%s", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" * 4)
         text = logs.read_all()
-        for secret in (TOKEN, "ganzanderes123", "geheimes", basic, LOGIN, "kQx1CNTRL", "iVBORw0KGgo", Z2M_MQTT,
-                       APP_PASSWORD, APP_MQTT):
+        for secret in (TOKEN, "ganzanderes123", "geheimes", basic, LOGIN, "beispiel-nicht-echt", "iVBORw0KGgo",
+                       Z2M_MQTT, APP_PASSWORD, APP_MQTT):
             self.assertNotIn(secret, text)
         self.assertIn("Json?token=••• 4.01", text)   # rather a character too many than one too few
         self.assertIn("Token ••• abgelehnt", text)
