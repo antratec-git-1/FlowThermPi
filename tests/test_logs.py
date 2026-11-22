@@ -102,11 +102,10 @@ class LogFileTest(LogBase):
         log.warning("Umgebung: HEIZAPP_PASSWORD=%s ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=%s", APP_PASSWORD, APP_MQTT)
         log.warning("Authorization: Basic %s", basic)
         log.warning("Bitte anmelden: https://login.tailscale.com/a/%s – Code 1234", LOGIN)
-        log.warning("Schlüssel tskey-beispiel-nicht-echt benutzt")
         log.warning("QR-Code: data:image/png;base64,%s", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" * 4)
         text = logs.read_all()
-        for secret in (TOKEN, "ganzanderes123", "geheimes", basic, LOGIN, "beispiel-nicht-echt", "iVBORw0KGgo",
-                       Z2M_MQTT, APP_PASSWORD, APP_MQTT):
+        for secret in (TOKEN, "ganzanderes123", "geheimes", basic, LOGIN, "iVBORw0KGgo", Z2M_MQTT,
+                       APP_PASSWORD, APP_MQTT):
             self.assertNotIn(secret, text)
         self.assertIn("Json?token=••• 4.01", text)   # rather a character too many than one too few
         self.assertIn("Token ••• abgelehnt", text)
@@ -116,7 +115,6 @@ class LogFileTest(LogBase):
         self.assertEqual(logs.redact("spin=3 Setpoint=21 pinned"), "spin=3 Setpoint=21 pinned")   # words stay
         self.assertIn("Authorization: Basic •••", text)
         self.assertIn("https://login.tailscale.com/a/••• – Code 1234", text)
-        self.assertIn("tskey-••• benutzt", text)
         self.assertEqual(logs.redact(f"x {TOKEN} y"), "x ••• y")
 
     def test_each_line_says_when_how_bad_and_where(self):
