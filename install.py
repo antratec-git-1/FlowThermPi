@@ -11,8 +11,9 @@ Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/l
 bleiben bei Updates erhalten.
 
 Dieses Skript ist der einzige Teil von FlowThermPi, der als root läuft – auch für den Update-Knopf
-(--from-app), die WLAN-Einrichtung (--wifi), die Fernwartung (--remote) und die Zigbee-Programme
-(--zigbee). Die App selbst hat keine Rechte am System.
+(--from-app), die WLAN-Einrichtung (--wifi), die Fernwartung (--remote), die Zigbee-Programme
+(--zigbee) und die Systemprotokolle für „Protokoll speichern“ (--logs). Die App selbst hat keine
+Rechte am System.
 
 Optionen hinter „python3 -“ anhängen, z. B. „… | sudo python3 - --port 8080“:
     --port N           Port der App (Standard 80: http://<name>.local ohne Portangabe)
@@ -46,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 REPO = "antratec-git-1/FlowThermPi"
@@ -95,6 +96,36 @@ MOSQUITTO_CONF = "/etc/mosquitto/conf.d/flowthermpi.conf"
 MOSQUITTO_PASSWD = "/etc/mosquitto/flowthermpi.passwd"
 MQTT_PORT = 1883
 MQTT_USERS = {"app": NAME, "zigbee2mqtt": "zigbee2mqtt"}   # one login each, made anew at every installation
+LOGS_UNIT = f"/etc/systemd/system/{NAME}-logs.service"   # collects the Pi's system logs for „Protokoll speichern“
+LOGS_PATH = f"/etc/systemd/system/{NAME}-logs.path"      # watches for the app's request
+LOGS_REQUEST = "logs-request.json"       # in DATA_DIR: placed by the app – just "collect"
+LOGS_STATUS = "logs-status.json"         # in DATA_DIR: done or failed, for the app
+LOGS_FILE = "system-log.txt"             # in DATA_DIR: what was collected, without secrets – the app reads and removes it
+LOGS_DAYS = 7                            # the journal of the last week …
+LOGS_MAX = 6 << 20                       # … in at most this many bytes
+# whose journal goes in, with at most this many of its newest lines
+LOGS_UNITS = ((NAME, 3000), (f"{NAME}-update", 600), (f"{NAME}-wifi", 400), (f"{NAME}-remote", 400),
+              (f"{NAME}-zigbee", 800), (f"{NAME}-logs", 100), (ZIGBEE_SERVICE, 1500), ("mosquitto", 300),
+              ("NetworkManager", 1000), ("wpa_supplicant", 300), ("tailscaled", 800), ("systemd-timesyncd", 100))
+LOGS_KERNEL = 1500
+HIDDEN = "•••"
+# What a secret looks like – the same list as in heizapp/logs.py (this script cannot import the app), plus the lines of
+# NetworkManager, wpa_supplicant and nmcli that hold a WLAN password
+SECRET_KEYS = r"token|pop|psk|password|passwort|passwd|secret|auth_?key|auth_?url|login_?url|pin"
+SECRET_PATTERNS = (
+    (re.compile(rf"(?i)(?<![A-Za-z0-9])({SECRET_KEYS})=[^\s&\"',;]+"), rf"\1={HIDDEN}"),
+    (re.compile(rf"""(?i)(["'])((?:[A-Za-z0-9]+_)*(?:{SECRET_KEYS}))\1(\s*:\s*)(["'])(?:\\.|(?!\4).)*\4"""),
+     rf"\1\2\1\3\4{HIDDEN}\4"),
+    (re.compile(r"(?i)\b(Basic|Bearer)\s+[A-Za-z0-9+/=._~-]{8,}"), rf"\1 {HIDDEN}"),
+    (re.compile(r"(https://[A-Za-z0-9.-]+(?::\d{1,5})?/a/)[A-Za-z0-9]+"), rf"\1{HIDDEN}"),   # Tailscale's login link
+    (re.compile(r"\btskey-[A-Za-z0-9_-]+"), f"tskey-{HIDDEN}"),
+    (re.compile(r"data:image/png;base64,[A-Za-z0-9+/=]{16,}"), f"data:image/png;base64,{HIDDEN}"),
+    (re.compile(r"(?im)\b((?:802-11-wireless-security\.|802-1x\.)?(?:psk|password|wep-key[0-3]|leap-password|"
+                r"private-key-password)\s*[:=]\s*)\S.*$"), rf"\1{HIDDEN}"),
+)
+THROTTLED = {0: "Unterspannung jetzt", 1: "Takt begrenzt jetzt", 2: "gedrosselt jetzt", 3: "Temperaturgrenze jetzt",
+             16: "Unterspannung seit dem Start", 17: "Takt begrenzt seit dem Start", 18: "gedrosselt seit dem Start",
+             19: "Temperaturgrenze seit dem Start"}   # bits of „vcgencmd get_throttled“
 # What „Installieren“ puts on the Pi: fixed for each version of FlowThermPi and checked after every download.
 ZIGBEE_PARTS = {
     "node": {"version": "24.22.3",       # Node.js 24 (LTS); Zigbee2MQTT 2.14 asks for ^22.2.0 || ^24
@@ -149,6 +180,7 @@ Environment=HEIZAPP_UPDATE_DIR={data}
 Environment=HEIZAPP_WIFI_DIR={data}
 Environment=HEIZAPP_REMOTE_DIR={data}
 Environment=HEIZAPP_ZIGBEE_DIR={data}
+Environment=HEIZAPP_SYSLOG_DIR={data}
 EnvironmentFile=-/etc/default/{name}
 ExecStart={python} {app}/current/run.py
 Restart=always
@@ -292,6 +324,36 @@ Description=FlowThermPi – wartet auf Anfragen der App zu Zigbee
 [Path]
 PathExists={data}/{zigbee_request}
 Unit={name}-zigbee.service
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+LOGS_UNIT_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Sammelt die Systemprotokolle für „Protokoll speichern“ in der App – ohne Passwörter, Tokens und Anmelde-Links.
+[Unit]
+Description=FlowThermPi – Systemprotokolle sammeln
+# „Protokoll speichern“ several times in a row must not lock the service (and with it the path unit)
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+ExecStart={python} -I -B -X utf8 {app}/current/install.py --logs
+TimeoutStartSec=3min
+Nice=10
+"""
+
+LOGS_PATH_TEMPLATE = """\
+# Geschrieben von install.py – wird bei jedem Update neu geschrieben.
+# Startet {name}-logs.service, sobald die App um die Systemprotokolle bittet.
+[Unit]
+Description=FlowThermPi – wartet auf „Protokoll speichern“ in der App
+
+[Path]
+PathExists={data}/{logs_request}
+Unit={name}-logs.service
 
 [Install]
 WantedBy=multi-user.target
@@ -722,15 +784,16 @@ def configured_port(unit: Path) -> int | None:
 
 
 def write_units(root: Path, port: int) -> None:
-    """The app's service plus the units behind the update button, the WLAN setup, the remote maintenance and the
-    Zigbee programs."""
+    """The app's service plus the units behind the update button, the WLAN setup, the remote maintenance, the
+    Zigbee programs and „Protokoll speichern“."""
     values = {"name": NAME, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
               "wifi_request": WIFI_REQUEST, "remote_request": REMOTE_REQUEST, "zigbee_request": ZIGBEE_REQUEST,
-              "python": sys.executable or "/usr/bin/python3"}
+              "logs_request": LOGS_REQUEST, "python": sys.executable or "/usr/bin/python3"}
     for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE),
                            (WIFI_UNIT, WIFI_UNIT_TEMPLATE), (WIFI_PATH, WIFI_PATH_TEMPLATE),
                            (REMOTE_UNIT, REMOTE_UNIT_TEMPLATE), (REMOTE_PATH, REMOTE_PATH_TEMPLATE),
-                           (ZIGBEE_UNIT, ZIGBEE_UNIT_TEMPLATE), (ZIGBEE_PATH, ZIGBEE_PATH_TEMPLATE)):
+                           (ZIGBEE_UNIT, ZIGBEE_UNIT_TEMPLATE), (ZIGBEE_PATH, ZIGBEE_PATH_TEMPLATE),
+                           (LOGS_UNIT, LOGS_UNIT_TEMPLATE), (LOGS_PATH, LOGS_PATH_TEMPLATE)):
         path = root / unit.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.format(**values), encoding="utf-8")
@@ -831,6 +894,7 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "enable", "--now", f"{NAME}-wifi.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-remote.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-zigbee.path")
+        system.run("systemctl", "enable", "--now", f"{NAME}-logs.path")
         system.run("systemctl", "restart", NAME)
 
         if system.live:
@@ -852,7 +916,7 @@ def install(args: argparse.Namespace, system: System) -> None:
     say(f"  Öffnen im Heimnetz:  http://{socket.gethostname().split('.')[0]}.local{suffix}"
         + (f"   oder   http://{address}{suffix}" if address else ""))
     say("  Update später:       in der App unter Einrichtung › Über – oder diesen Befehl noch einmal")
-    say(f"  Meldungen ansehen:   journalctl -u {NAME} -f")
+    say(f"  Meldungen ansehen:   journalctl -u {NAME} -f   – oder in der App „Protokoll speichern“")
 
 
 def update_from_app(args: argparse.Namespace, system: System) -> None:
@@ -2154,6 +2218,277 @@ def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
         os.close(folder)
 
 
+# ---------------------------------------------------------------------- „Protokoll speichern“
+# The app may not read the system's journal: it places {data}/logs-request.json and flowthermpi-logs.path runs
+# „install.py --logs“ as root. That collects the journal of the last week (FlowThermPi's services, Zigbee2MQTT,
+# Mosquitto, the network, Tailscale, the kernel) and the Pi's state – voltage, temperature, memory, SD card,
+# restarts – and writes it to {data}/system-log.txt, readable only by the app. Every secret root can find (the
+# heaters' tokens, WLAN passwords, the MQTT logins, the app's password) and everything that looks like one is
+# replaced by ••• before the file is written.
+def logs_request(text: str) -> None:
+    """The app's request, checked: it can only ask for the one thing."""
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise InstallError("Die Anfrage der App nach den Systemprotokollen ist unlesbar.") from exc
+    if not isinstance(raw, dict) or raw.get("action") != "collect":
+        raise InstallError("Unbekannte Anfrage nach den Systemprotokollen.")
+
+
+def scrub(text: str, known: set[str]) -> str:
+    """text without the known secrets and without anything that looks like one."""
+    if known:
+        text = re.compile("|".join(map(re.escape, sorted(known, key=len, reverse=True)))).sub(HIDDEN, text)
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def known_secrets(root: Path, folder: int) -> set[str]:
+    """Values that must not leave the Pi: the heaters' tokens, the WLAN passwords, the MQTT logins, the app's password.
+    Files in the data folder are read without following a link (read_private)."""
+    found: set[str] = set()
+
+    def take(value) -> None:
+        value = str(value or "").strip().strip("\"'")
+        if len(value) >= 6:   # shorter ones would blank out ordinary words
+            found.add(value)
+
+    for line in (read_private(folder, "heizungen.conf") or "").splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2:
+            take(parts[1])
+    try:
+        login = json.loads(read_private(folder, ZIGBEE_LOGIN) or "{}")
+        take(login.get("password") if isinstance(login, dict) else None)
+    except ValueError:
+        pass
+    files = [(root / ZIGBEE_ENV.lstrip("/"), r"^ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=(.+)$"),
+             (root / "etc/default" / NAME, r"^\s*(?:export\s+)?HEIZAPP_PASSWORD=(.+)$")]
+    for folder_name in ("etc/NetworkManager/system-connections", "etc/wpa_supplicant"):
+        try:
+            names = sorted(os.listdir(root / folder_name))
+        except OSError:
+            continue
+        files += [(root / folder_name / name, r"^\s*(?:psk|password|wep-key[0-3]|leap-password|private-key-password|"
+                   r"pin)\s*=\s*(.+)$") for name in names]
+    for path, pattern in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in re.finditer(pattern, text, re.M | re.I):
+            take(match.group(1))
+    return found
+
+
+def throttled(text: str) -> str:
+    """„throttled=0x50005“ from vcgencmd in words – under-voltage is the Pi's most common trouble."""
+    found = re.search(r"throttled=(0x[0-9a-fA-F]+)", text)
+    if not found:
+        return first_line(text) or "?"
+    value = int(found.group(1), 16)
+    flags = [word for bit, word in THROTTLED.items() if value >> bit & 1]
+    return f"{found.group(1)} – " + (", ".join(flags) if flags else "keine Unterspannung, nicht gedrosselt")
+
+
+def system_overview(system: System, root: Path) -> list[str]:
+    """The Pi in a few lines: model, system, running time, memory, SD card, temperature, voltage, versions."""
+    def read(name: str) -> str:
+        try:
+            return (root / name).read_bytes()[:4096].decode("utf-8", "replace").strip("\x00 \n")
+        except OSError:
+            return ""
+
+    def call(*cmd: str) -> str:
+        try:
+            code, out, err = system.call(*cmd, timeout=10)
+        except ProgramMissing:
+            return ""
+        return out if code == 0 else ""
+
+    lines = [f"Gerät:            {read('proc/device-tree/model') or '?'} · {os_release(root).get('PRETTY_NAME') or '?'} · "
+             f"Kernel {platform.release()} · {debian_arch(system) or platform.machine()}"]
+    uptime = read("proc/uptime").split()
+    if uptime:
+        minutes = int(float(uptime[0]) // 60)
+        lines.append(f"Läuft seit:       {minutes // 1440} Tg. {minutes % 1440 // 60} Std. {minutes % 60} Min. "
+                     f"(Last {' '.join(read('proc/loadavg').split()[:3]) or '?'})")
+    memory = {key: int(value.split()[0]) >> 10 for key, value in
+              (line.split(":", 1) for line in read("proc/meminfo").splitlines() if ":" in line)
+              if key in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree") and value.split()[0].isdigit()}
+    if memory:
+        lines.append(f"Speicher:         {memory.get('MemAvailable', '?')} von {memory.get('MemTotal', '?')} MB frei, "
+                     f"Auslagerung {memory.get('SwapFree', '?')} von {memory.get('SwapTotal', '?')} MB frei")
+    try:
+        disk = shutil.disk_usage(root)
+        lines.append(f"SD-Karte:         {disk.free >> 20} von {disk.total >> 20} MB frei")
+    except OSError:
+        pass
+    temp = read("sys/class/thermal/thermal_zone0/temp")
+    if temp.isdigit():
+        lines.append(f"CPU-Temperatur:   {int(temp) / 1000:.1f} °C".replace(".", ","))
+    volts = call("vcgencmd", "get_throttled")
+    lines.append(f"Spannung:         {throttled(volts) if volts else 'vcgencmd nicht verfügbar'}")
+    lines.append(f"Journal:          {'dauerhaft gespeichert' if (root / 'var/log/journal').is_dir() else 'nur seit dem letzten Start (geht beim Ausschalten verloren)'}")
+    app = release_info(root / APP_DIR.lstrip("/") / "current")
+    lines.append(f"FlowThermPi:      {app.get('version') or '?'} ({str(app.get('commit') or '?')[:7]}), installiert {app.get('installed') or '?'}")
+    zigbee = zigbee_info(root / ZIGBEE_DIR.lstrip("/"))
+    lines.append("Zigbee-Programme: " + (", ".join(f"{part} {zigbee[part]}" for part in ZIGBEE_PARTS if zigbee.get(part))
+                                         or "nicht installiert"))
+    lines.append(f"Mosquitto:        {package_version(system, 'mosquitto') or 'nicht installiert'}")
+    lines.append(f"Tailscale:        {first_line(call('tailscale', 'version')) or 'nicht installiert'}")
+    lines.append(f"Python:           {platform.python_version()}")
+    return lines
+
+
+def folder_listing(folder: int) -> str:
+    """Names, sizes and times in the data folder (and data/, data/logs/) – never a file's content, never a link
+    followed."""
+    rows: list[str] = []
+
+    def walk(fd: int, prefix: str, depth: int) -> None:
+        with os.scandir(fd) as entries:
+            items = sorted(entries, key=lambda entry: entry.name)
+        for entry in items[:100]:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            kind = "/" if stat.S_ISDIR(info.st_mode) else " → Verweis" if stat.S_ISLNK(info.st_mode) else ""
+            rows.append(f"{prefix}{entry.name}{kind}  {info.st_size} B  {stat.filemode(info.st_mode)}  "
+                        f"{datetime.fromtimestamp(info.st_mtime):%Y-%m-%d %H:%M:%S}")
+            if kind == "/" and depth < 2 and entry.name in ("data", "logs"):
+                try:
+                    sub = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError:
+                    continue
+                try:
+                    walk(sub, prefix + "  ", depth + 1)
+                finally:
+                    os.close(sub)
+
+    walk(folder, "", 0)
+    return "\n".join(rows)
+
+
+def usb_devices(root: Path) -> str:
+    """USB devices as the kernel lists them (maker and product, no serial numbers) and the serial ports."""
+    base, rows = root / "sys/bus/usb/devices", []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        names = []
+
+    def read(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace").strip()[:80]
+        except OSError:
+            return ""
+
+    for name in names[:60]:
+        vendor = read(base / name / "idVendor")
+        if vendor:
+            rows.append(f"{name}: {vendor}:{read(base / name / 'idProduct')} {read(base / name / 'manufacturer')} "
+                        f"{read(base / name / 'product')}".rstrip())
+    rows += [f"Serieller Anschluss: {port['id']} → {port['device'] or '?'}" for port in serial_ports(root)]
+    return "\n".join(rows)
+
+
+def system_report(system: System, root: Path, folder: int) -> str:
+    """The Pi's system logs and state for „Protokoll speichern“ – without any secret (scrub)."""
+    now = datetime.now()
+    since = (now - timedelta(days=LOGS_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    parts = [f"FlowThermPi – Systemprotokolle vom {now:%d.%m.%Y %H:%M:%S}, Rechner {socket.gethostname()}, "
+             f"Gerätenummer {device_number(root) or '?'}\n"
+             f"Journal der letzten {LOGS_DAYS} Tage (seit {since}), von jedem Dienst die neuesten Zeilen.\n"
+             "Passwörter, Tokens und Anmelde-Links sind durch ••• ersetzt.\n"]
+
+    def section(title: str, text: str) -> None:
+        parts.append(f"\n===== {title} =====\n{text.rstrip() or '(nichts)'}\n")
+
+    def command(title: str, *cmd: str, tail: int = 0, timeout: float = 30) -> None:
+        try:
+            code, out, err = system.call(*cmd, timeout=timeout)
+        except ProgramMissing:
+            section(title, f"({cmd[0]} gibt es auf diesem Pi nicht)")
+            return
+        text = out if out.strip() else err
+        if tail:
+            lines = text.splitlines()
+            text = "\n".join(lines[:1] + (["…"] if len(lines) > tail + 1 else []) + lines[1:][-tail:])
+        if code:
+            text += f"\n(Fehlercode {code}{': ' + first_line(err) if out.strip() and err.strip() else ''})"
+        section(title, text)
+
+    section("Überblick", "\n".join(system_overview(system, root)))
+    command("Uhrzeit (timedatectl)", "timedatectl", "show")
+    command("Dienste", "systemctl", "show", "--no-pager", "-p",
+            "Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus",
+            NAME, *(f"{NAME}-{kind}.path" for kind in ("update", "wifi", "remote", "zigbee", "logs")), ZIGBEE_SERVICE,
+            "mosquitto", "tailscaled", "NetworkManager", "systemd-timesyncd")
+    command("Fehlgeschlagene Dienste", "systemctl", "--failed", "--no-pager", "--no-legend", "--plain")
+    command("Netz: Adressen", "ip", "-brief", "address")
+    command("Netz: Wege", "ip", "route")
+    command("Netz: Geräte", "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status")
+    command("WLAN in Reichweite", "nmcli", "-f", "IN-USE,SSID,CHAN,SIGNAL,SECURITY", "device", "wifi", "list",
+            "--rescan", "no")
+    section("USB-Geräte", usb_devices(root))
+    section(f"Datenordner {DATA_DIR}", folder_listing(folder))
+    command("Systemstarts", "journalctl", "--list-boots", "--no-pager", tail=20)
+    journal = ("-o", "short-iso", "--no-pager", "--no-hostname", f"--since={since}")
+    for unit, lines in LOGS_UNITS:
+        command(f"Journal: {unit}", "journalctl", "-u", unit, "-n", str(lines), *journal)
+    command("Journal: Kernel", "journalctl", "-k", "-n", str(LOGS_KERNEL), *journal)
+    text = scrub("".join(parts), known_secrets(root, folder))
+    data = text.encode("utf-8")
+    if len(data) > LOGS_MAX:   # the newest at the end matter most: keep the start (overview) and cut the middle
+        head, rest = data[:LOGS_MAX // 4], data[-(LOGS_MAX - LOGS_MAX // 4):]
+        text = (head.decode("utf-8", "ignore") + "\n\n… (zu lang – hier gekürzt) …\n\n" + rest.decode("utf-8", "ignore"))
+    return text
+
+
+def logs_from_app(args: argparse.Namespace, system: System) -> None:
+    """Run by flowthermpi-logs.service when the app asks for the system logs („Protokoll speichern“). Writes them,
+    without any secret, to system-log.txt in the data folder (only the app reads it) and the result to
+    logs-status.json."""
+    root = Path(args.root)
+    data_dir = root / DATA_DIR.lstrip("/")
+    try:
+        folder = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise InstallError(f"Datenordner {DATA_DIR} fehlt oder ist kein Ordner ({exc.strerror}).") from exc
+    try:
+        try:
+            text = read_private(folder, LOGS_REQUEST)
+        finally:
+            try:
+                os.unlink(LOGS_REQUEST, dir_fd=folder)   # first: while it exists, the path unit starts us again
+            except FileNotFoundError:
+                pass
+        if text is None:
+            say("Keine Anfrage der App nach den Systemprotokollen – nichts zu tun.")
+            return
+        status = {"id": request_id(text), "state": "running", "started": now_text()}
+        try:
+            logs_request(text)
+            write_private(folder, LOGS_STATUS, json.dumps(status) + "\n", system)
+            report = system_report(system, root, folder)
+            write_private(folder, LOGS_FILE, report, system)
+            status.update(state="done", size=len(report.encode("utf-8")))
+            say(f"✓ Systemprotokolle gesammelt ({len(report.encode('utf-8')) >> 10} KB)")
+        except InstallError as exc:   # reported to the app
+            status.update(state="failed", message=str(exc))
+            say(f"✗ {exc}")
+        finally:
+            if status["state"] == "running":   # an error in this script: the app must not wait for ever
+                status.update(state="failed", message=f"Unerwarteter Fehler – Meldungen: journalctl -u {NAME}-logs")
+            status["finished"] = now_text()
+            write_private(folder, LOGS_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
+    finally:
+        os.close(folder)
+
+
 def reset_pin(args: argparse.Namespace, system: System) -> None:
     system.run("systemctl", "stop", NAME, check=False)
     try:
@@ -2171,8 +2506,10 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "disable", "--now", f"{NAME}-wifi.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-remote.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-zigbee.path", check=False)
+        system.run("systemctl", "disable", "--now", f"{NAME}-logs.path", check=False)
         system.run("systemctl", "disable", "--now", NAME, check=False)
-        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH, REMOTE_UNIT, REMOTE_PATH, ZIGBEE_UNIT, ZIGBEE_PATH):
+        for unit in (UNIT, UPDATE_UNIT, UPDATE_PATH, WIFI_UNIT, WIFI_PATH, REMOTE_UNIT, REMOTE_PATH, ZIGBEE_UNIT, ZIGBEE_PATH,
+                     LOGS_UNIT, LOGS_PATH):
             path = root / unit.lstrip("/")
             if path.exists():
                 path.unlink()
@@ -2214,6 +2551,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-wifi.service
     parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-remote.service
     parser.add_argument("--zigbee", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-zigbee.service
+    parser.add_argument("--logs", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-logs.service
     parser.add_argument("--commit", help=argparse.SUPPRESS)  # with --source: Git commit of that folder
     parser.add_argument("--root", default="/", help=argparse.SUPPRESS)  # tests: work inside this folder only
     return parser.parse_args(argv)
@@ -2237,6 +2575,8 @@ def main(argv: list[str] | None = None, system: System | None = None) -> int:
             remote_from_app(args, system)
         elif args.zigbee:
             zigbee_from_app(args, system)
+        elif args.logs:
+            logs_from_app(args, system)
         elif args.uninstall:
             uninstall(args, system)
         elif args.reset_pin:

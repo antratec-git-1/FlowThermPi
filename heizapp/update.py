@@ -12,6 +12,7 @@ HEIZAPP_UPDATE_DIR. Auf GitHub wird nur gefragt, wenn jemand „Nach Updates suc
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -33,6 +34,7 @@ APP_ROOT = Path(__file__).resolve().parent.parent   # the installed release (…
 NOT_PICKED_UP = timedelta(minutes=2)   # the request should be gone within seconds
 STALE = timedelta(minutes=20)          # "running" for longer: interrupted (the update service may run 15 min)
 MAX_ANSWER = 1 << 20
+log = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -88,6 +90,13 @@ class Updater:
     def check(self) -> dict:
         """The newest version on GitHub (main) compared with the installed one."""
         try:
+            return self._check()
+        except ActionError as exc:
+            log.warning("Nach Updates suchen: %s", exc)
+            raise
+
+    def _check(self) -> dict:
+        try:
             head = json.loads(self._get(f"https://api.github.com/repos/{REPO}/commits/{BRANCH}",
                                         {"Accept": "application/vnd.github+json"}))
             sha = head.get("sha") if isinstance(head, dict) else None
@@ -110,6 +119,8 @@ class Updater:
                   "message": lines[0][:160] if lines else ""}
         mine = self.installed
         available = sha != mine["commit"] if mine["commit"] else latest["version"] != mine["version"]
+        log.info("Nach Updates gesucht: installiert %s (%s), auf GitHub %s (%s) – %s", mine["version"],
+                 (mine["commit"] or "?")[:7], latest["version"], sha[:7], "Update verfügbar" if available else "aktuell")
         return {"installed": mine, "latest": latest, "available": available, "supported": self.supported}
 
     # ------------------------------------------------------------------ request and status
@@ -133,6 +144,8 @@ class Updater:
                 tmp.unlink(missing_ok=True)
                 raise ActionError(f"Das Update ließ sich nicht anstoßen ({exc.strerror}).", 500) from exc
             self._asked = now
+        log.info("Update angestoßen (installiert: %s) – der Dienst auf dem Pi holt die neueste Version",
+                 self.installed["version"])
         return {"message": "Update gestartet.", "update": self.status()}
 
     def status(self) -> dict | None:

@@ -308,7 +308,122 @@ function renderAbout(el) {  // "Über": logo, what the app does, version, licenc
     </dl>
     <p class="muted">FlowThermPi ist ein unabhängiges Projekt und kein Produkt der Thermotec AG.</p>
   </div>
-  ${updateCardHTML(app)}`);
+  ${updateCardHTML(app)}
+  ${logsCardHTML()}`);
+}
+
+// ------------------------------------------------------------------ „Protokoll speichern“ (residents' view and Über)
+let logsBusy = false;   // the file is being put together
+let logsEmail = null;   // the e-mail address being typed in Einrichtung › Über (null: as saved)
+
+function fmtBytes(n) {
+  if (n == null) return "–";
+  return n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1).replace(".", ",")} MB`;
+}
+function fmtLocal(iso) {  // "2026-11-01T08:00:01" (the server's local time) -> "01.11.2026, 08:00"
+  const d = localTime(iso);
+  return d ? d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "–";
+}
+
+function renderLogFoot() {
+  setHTML(document.getElementById("log-foot"), `<button class="quiet" data-action="logs-save" ${logsBusy ? "disabled" : ""}>${
+    logsBusy ? "Protokoll wird zusammengestellt …" : "Protokoll speichern …"}</button>`);
+}
+
+function logsCardHTML() {
+  const l = state.logs || {};
+  const hours = l.detail_hours || 24;
+  const email = logsEmail ?? (l.email || "");
+  return `<div class="card about logs-card">
+    <h2>Protokoll</h2>
+    <p>Die App schreibt mit, was passiert: welche Heizung nicht antwortet, was wann eingestellt wurde, wie WLAN,
+      Fernwartung und Zigbee laufen. „Protokoll speichern“ – auch unten in der Heizungsansicht – macht daraus eine
+      Datei, die die Bewohner dir schicken können. Passwörter und Tokens stehen nicht darin.</p>
+    <p class="muted">Gespeichert: ${esc(fmtBytes(l.size))}${l.oldest ? ` · ältester Eintrag ${esc(fmtLocal(l.oldest))}` : ""}${
+      l.system ? " · dazu die Systemprotokolle des Pi" : ""}</p>
+    <label class="logs-email">E-Mail-Adresse, an die die Bewohner das Protokoll schicken
+      <span><input type="email" data-lfield="email" value="${esc(email)}" placeholder="name@beispiel.de" autocomplete="email"
+        maxlength="120"><button data-action="logs-email">Speichern</button></span></label>
+    <p class="hint">Steht hier eine Adresse, bietet die Heizungsansicht nach dem Speichern an, eine E-Mail an sie
+      vorzubereiten. Die Datei hängen die Bewohner dann selbst an.</p>
+    <div class="logs-detail">
+      <p><b>Ausführliches Protokoll:</b> ${l.detail_until ? `an bis ${esc(fmtTime(l.detail_until))} Uhr` : "aus"}</p>
+      <p class="hint">Schreibt zusätzlich jede Abfrage der Heizungen und Fühler und jeden Aufruf der Seite mit – für
+        Fehler, die nur ab und zu auftreten. Endet nach ${hours} Stunden von selbst.</p>
+      ${l.detail_until ? `<button data-action="logs-detail" data-on="0">Ausschalten</button>`
+        : `<button data-action="logs-detail" data-on="1">Für ${hours} Stunden einschalten</button>`}
+    </div>
+    <button class="primary" data-action="logs-save" ${logsBusy ? "disabled" : ""}>${logsBusy ? "Wird zusammengestellt …"
+      : "Protokoll speichern …"}</button>
+  </div>`;
+}
+
+async function logsSave() {
+  const l = (state && state.logs) || {};
+  const intro = "Das Protokoll hilft herauszufinden, was nicht geklappt hat. Passwörter und Tokens stehen nicht darin, " +
+    "wohl aber die Namen der Räume und Geräte und Adressen im Heimnetz." +
+    (l.system ? " Das Zusammenstellen dauert ein paar Sekunden, manchmal bis zu einer Minute." : "");
+  let res = null;
+  const go = await ask({
+    title: "Protokoll speichern?",
+    text: intro,
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Zusammenstellen", value: "submit", cls: "primary" }],
+    onSubmit: async () => {
+      const d = dialog;
+      d.text = "Einen Moment bitte – das Protokoll wird zusammengestellt …";
+      renderDialog();
+      logsBusy = true;
+      render();
+      try { res = await api("POST", "api/logs/prepare"); return null; } catch (e) { d.text = intro; return e.message; }
+      finally { logsBusy = false; render(); }
+    },
+  });
+  if (!go || !res) return;
+  const save = await ask({
+    title: "Das Protokoll ist fertig",
+    text: `Jetzt die Datei „${res.name}“ (${fmtBytes(res.size)}) speichern – meist landet sie im Ordner „Downloads“.` +
+      (res.system ? "" : ` Die Systemprotokolle des Pi fehlen darin: ${res.missing}`),
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Datei speichern", value: "save", cls: "primary" }],
+  });
+  if (!save) return;
+  const a = document.createElement("a");   // right after the tap: browsers allow the download
+  a.href = "api/logs/" + encodeURIComponent(res.id);
+  a.download = res.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (!res.mail) {
+    await ask({ title: "Protokoll gespeichert", text: "Bitte die Datei an die Person schicken, die bei der Heizung hilft.",
+      buttons: [{ label: "OK", value: null, cls: "primary" }] });
+    return;
+  }
+  const mail = await ask({
+    title: "E-Mail vorbereiten?",
+    text: `Dann öffnet sich eine E-Mail an ${res.mail.to}. Die Datei „${res.name}“ bitte selbst anhängen ` +
+      "(Büroklammer, Ordner „Downloads“) und die E-Mail abschicken.",
+    buttons: [{ label: "Nein, danke", value: null }, { label: "E-Mail vorbereiten", value: "mail", cls: "primary" }],
+  });
+  if (mail) location.href = mailtoHref(res.mail);
+}
+
+function mailtoHref(mail) {  // opens the e-mail program with address, subject and text („@“ stays readable)
+  return `mailto:${encodeURIComponent(mail.to).replace(/%40/g, "@")}?subject=${encodeURIComponent(mail.subject)}` +
+    `&body=${encodeURIComponent(mail.body)}`;
+}
+
+async function logsSettings(body) {
+  try {
+    const res = await api("PUT", "api/logs/settings", body);
+    state.logs = res.logs;
+    if ("email" in body) logsEmail = null;
+    if (res.message) toast(res.message);
+  } catch (e) { toast(e.message, true); }
+  invalidate();
+  render();
+}
+function logsEmailSave() {
+  const input = document.querySelector('#tab-about [data-lfield="email"]');
+  return logsSettings({ email: (input ? input.value : logsEmail ?? "").trim() });
 }
 
 // ------------------------------------------------------------------ simple view for residents
@@ -488,6 +603,7 @@ function renderHome() {
     now.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) + " Uhr";
   if (!state) return;
   renderHelp();
+  renderLogFoot();
   const gs = groups().filter(g => g.heaters.length);
   setHTML(document.getElementById("tiles"), gs.length ? gs.map(homeTile).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>');
@@ -2518,6 +2634,7 @@ document.addEventListener("click", e => {
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
+    case "logs-save": return logsBusy ? undefined : logsSave();
   }
   if (t.dataset.subtab) {
     deviceTab = t.dataset.subtab;
@@ -2612,6 +2729,8 @@ document.addEventListener("click", e => {
     case "zigbee-install": return zigbeeInstall();
     case "zigbee-remove": return zigbeeRemove();
     case "zigbee-ok": zigbeeSeen = zigbee && zigbee.job && zigbee.job.id; return render();
+    case "logs-email": return logsEmailSave();
+    case "logs-detail": return logsSettings({ detail: t.dataset.on === "1" });
   }
 });
 
@@ -2665,6 +2784,7 @@ document.addEventListener("input", e => {
     return;
   }
   if (e.target.dataset.field === "scan-network") scanNet = e.target.value;
+  if (e.target.dataset.lfield === "email") { logsEmail = e.target.value; return; }
   if (wifiForm && ["ssid", "password"].includes(e.target.dataset.wfield)) { wifiForm[e.target.dataset.wfield] = e.target.value; return; }
   if (sensorForm && e.target.dataset.sfield) { sensorForm[e.target.dataset.sfield] = e.target.value; return; }
   if (deviceForm && e.target.closest(".device-form")) updateDeviceForm(e.target);
@@ -2683,6 +2803,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Enter" && calibForm && e.target.closest(".calib-form")) return saveCalib(null);
   if (e.key === "Enter" && wifiForm && e.target.closest(".wifi-form")) return connectWifi();
   if (e.key === "Enter" && e.target.dataset.field === "scan-network") { e.target.blur(); return runScan(scanNet.trim() || null); }
+  if (e.key === "Enter" && e.target.dataset.lfield === "email") { e.target.blur(); return logsEmailSave(); }
   if (e.key === "Enter" && deviceForm && e.target.closest(".device-form")) saveDevice();
   if (e.key === "Enter" && roomForm && e.target.closest(".room-form") && e.target.dataset.field === "name") saveRoom();
 });

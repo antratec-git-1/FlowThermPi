@@ -35,7 +35,7 @@ from pathlib import Path
 
 from .service import ActionError
 
-log = logging.getLogger("heizapp")
+log = logging.getLogger(__name__)   # never the login link (logs.py hides one that slips through)
 REQUEST, STATUS, SETTINGS = "remote-request.json", "remote-status.json", "remote-settings.json"
 MODES = ("ask", "always")    # Fernhilfe only when the residents allow it | always reachable
 STATES = ("NoState", "NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting", "Running")
@@ -61,6 +61,27 @@ DNS_NAME = re.compile(r"[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){0,8}")
 IP = re.compile(r"[0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9a-fA-F:]{2,39}")
 TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)")
 TAG = re.compile(r"tag:[A-Za-z][A-Za-z0-9-]{0,62}")
+STATE_WORDS = {"NoState": "unbekannt", "NeedsLogin": "nicht angemeldet", "NeedsMachineAuth": "wartet auf Freigabe im "
+               "Tailscale-Netz", "Stopped": "aus", "Starting": "startet", "Running": "an"}
+
+
+def _when(text) -> str:
+    """ISO time -> "22.11. 14:27", for the log."""
+    try:
+        return datetime.fromisoformat(str(text)).strftime("%d.%m. %H:%M") if text else "?"
+    except ValueError:
+        return str(text)
+
+
+def _state_word(ts: dict | None) -> str:
+    """Tailscale's state for the log."""
+    if not ts:
+        return "unbekannt"
+    if not ts.get("installed"):
+        return "nicht installiert"
+    if not ts.get("daemon"):
+        return "Dienst läuft nicht" + (f" ({ts['problem']})" if ts.get("problem") else "")
+    return STATE_WORDS.get(ts.get("state"), str(ts.get("state")))
 
 
 def _now() -> str:
@@ -254,6 +275,8 @@ class Remote:
         except BaseException:
             self._reset_help(mine, before)
             raise
+        log.info("Fernwartung: einrichten bzw. einschalten angestoßen%s", " – als Fernhilfe bis " + mine[11:16]
+                 if mine else "")
         threading.Thread(target=self._follow, args=(rid,), name="remote-up", daemon=True).start()
         return {"remote": self.view(local)}
 
@@ -279,11 +302,13 @@ class Remote:
             status = self._ask("on")
             if status.get("state") != "done":
                 raise ActionError(_text(status.get("message"), 300) or "Die Fernhilfe ließ sich nicht einschalten.", 502)
-        except BaseException:
+        except BaseException as exc:
             self._reset_help(mine, before)
+            log.warning("Fernhilfe ließ sich nicht einschalten: %s", exc)
             raise
         result = self.summary(local)
         until = _time(result["until"])
+        log.info("Fernhilfe von den Bewohnern erlaubt – bis %s", f"{until:%H:%M}" if until else "?")
         message = (f"Die Fernhilfe ist an – bis {until:%H:%M} Uhr." if result["on"] and until
                    else _text(status.get("message"), 300))
         return {"message": message, "remote": result}
@@ -296,6 +321,7 @@ class Remote:
                 raise ActionError("Die Fernwartung ist hier dauerhaft eingeschaltet. Ausschalten lässt sie sich in "
                                   "der Einrichtung.", 409)
         self._switch_off("down", local)
+        log.info("Fernhilfe beendet (Knopf „Beenden“%s)", ", aus der Ferne" if self._from_afar(local) else "")
         return {"message": "Die Fernhilfe ist beendet.", "remote": self.summary(local)}
 
     def set_mode(self, mode, local: str | None = None) -> dict:
@@ -313,6 +339,7 @@ class Remote:
             state = (self._ts or {}).get("state")
         if same:
             return {"message": None, "remote": self.view(local)}
+        log.info("Fernwartung: Einstellung jetzt „%s“", "nur nach Freigabe der Bewohner" if mode == "ask" else "immer an")
         self._wake.set()
         message = ("Gespeichert: Die Fernwartung ist nur an, wenn die Bewohner sie erlauben." if mode == "ask"
                    else "Gespeichert: Die Fernwartung ist immer an.")
@@ -333,7 +360,12 @@ class Remote:
     def _switch_off(self, action: str, local: str | None) -> dict:
         with self._lock:   # a Fernhilfe ends first: if switching off fails, the guard tries again
             ended = self._end_help()
-        result = self._act(action, local)
+        try:
+            result = self._act(action, local)
+        except ActionError as exc:
+            log.warning("Fernwartung %s hat nicht geklappt: %s", "ausschalten" if action == "down" else "abmelden", exc)
+            raise
+        log.info("Fernwartung: %s", result.get("message") or ("ausgeschaltet" if action == "down" else "abgemeldet"))
         self._reset_help(ended, None)   # over – the guard has nothing left to do
         return result
 
@@ -567,6 +599,7 @@ class Remote:
             job = self._job
             if message and job and job["id"] == rid and job["state"] in ("waiting", "running"):
                 job.update(state="failed", phase=None, message=message, finished=_now())
+                log.warning("Fernwartung einrichten hat nicht geklappt: %s", message)
             if self._owner == rid:
                 self._doing = self._owner = None
                 self._free.notify_all()
@@ -643,6 +676,9 @@ class Remote:
             if ts is not None:
                 if ts.get("state") != (self._ts or {}).get("state"):
                     self._wake.set()   # e.g. on now: the guard decides whether that may be
+                if _state_word(ts) != _state_word(self._ts):
+                    log.info("Fernwartung: Tailscale %s%s", _state_word(ts),
+                             f" (vorher {_state_word(self._ts)})" if self._ts else f" (Stand vom {_when(at)})")
                 self._ts, self._at = ts, at
                 if not ts.get("auth_url"):
                     self._login = None   # signed in, logged out or given up: no link is open any more
@@ -655,6 +691,8 @@ class Remote:
                     job.update(state="running", phase=phase if phase in ("installing", "connecting") else job["phase"])
                 elif state in ("done", "failed") and job["state"] not in ("done", "failed"):
                     job.update(state=state, phase=None, message=_text(status.get("message"), 300), finished=at or _now())
+                    log.log(logging.INFO if state == "done" else logging.WARNING, "Fernwartung einrichten: %s",
+                            job["message"] or ("fertig" if state == "done" else "fehlgeschlagen"))
                     if self._owner == job["id"]:   # in the same step, so the page never sees "done" but busy …
                         self._doing = self._owner = None
                         self._free.notify_all()

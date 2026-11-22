@@ -18,7 +18,7 @@ from . import coap, discovery, plans, shelly
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
-log = logging.getLogger("heizapp")
+log = logging.getLogger(__name__)
 
 DEVICE_PLAN_SLOT = 1   # the app always writes its plan into plan 1 of a heater
 AVG_WINDOW = 1800      # seconds of heater readings averaged for calibration
@@ -32,6 +32,8 @@ HEAL_EVERY = 900       # at most one automatic network search per 15 minutes
 STEADY_GAP = 300       # seconds offline after which a heater counts as changed (the room may have cooled meanwhile)
 MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Boost",
                "boost_off": "Boost beendet", "off": "Aus (Frostschutz)", "on": "Eingeschaltet"}
+MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby"}   # operating_mode, for the log
+SUMMARY_EVERY = 15 * 60   # seconds between two lines „Stand: …“ in the log
 
 
 def host_clock_synced() -> bool:
@@ -52,6 +54,32 @@ def host_clock_synced() -> bool:
 def _num(value: float, fmt: str = ".1f") -> str:
     """German number format for messages: 21.5 -> "21,5"."""
     return format(value, fmt).replace(".", ",")
+
+
+def _deg10(value) -> str:
+    """A temperature as the heater reports it (0.1 °C) for the log: 215 -> "21,5 °C"."""
+    return f"{_num(value / 10)} °C" if isinstance(value, int) and not isinstance(value, bool) else "?"
+
+
+def _span(seconds: float) -> str:
+    """A clock's deviation for the log: "40 s", "12 Min.", "3 Std.", "5000 Tage"."""
+    seconds = abs(seconds)
+    if seconds < 120:
+        return f"{seconds:.0f} s"
+    if seconds < 2 * 3600:
+        return f"{seconds // 60:.0f} Min."
+    if seconds < 2 * 86400:
+        return f"{seconds // 3600:.0f} Std."
+    return f"{seconds // 86400:.0f} Tage"
+
+
+def _since(start: float | None) -> str:
+    """How long ago, for the log: "7 Min.", "2 Std. 5 Min."."""
+    if start is None:
+        return "?"
+    minutes = max(0, int((time.time() - start) // 60))
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} Std. {minutes} Min." if hours else f"{minutes} Min."
 
 
 class ActionError(Exception):
@@ -92,6 +120,10 @@ class HeaterState:
         # as calm only a while after one of them changed
         self.steady: tuple | None = None
         self.steady_since: float | None = None
+        # what the log has said about this heater: it answers (True), it does not (False), nothing yet (None) –
+        # and the last odd answer, so each is written once
+        self.reported: bool | None = None
+        self.reported_error: str | None = None
 
     def room_temp_average(self, window: float = AVG_WINDOW) -> tuple[float, int, int] | None:
         """Average room temperature (0.1 °C) over the last `window` seconds, only from readings taken with
@@ -156,6 +188,8 @@ class Service:
                 self._clock_warned = True
                 log.warning("Uhrzeit dieses Geräts ist noch nicht übers Internet abgeglichen – "
                             "die Heizungsuhren werden erst danach gestellt.")
+            elif self._clock_trusted and self._clock_warned:   # the times above this line may have been wrong
+                log.info("Uhrzeit dieses Geräts ist jetzt übers Internet abgeglichen.")
         return self._clock_trusted
 
     def _iso(self, ts: float | None) -> str | None:
@@ -171,6 +205,7 @@ class Service:
     def _run(self) -> None:
         self.poll_all(full=True)
         self.sync_clocks(only_drifted=True)
+        summarized = time.monotonic()
         while not self._stop.wait(self.poll_interval):
             try:
                 self.poll_all()
@@ -182,14 +217,38 @@ class Service:
                     self.sync_clocks()
                 else:
                     self.sync_clocks(only_drifted=True)
+                if time.monotonic() - summarized >= SUMMARY_EVERY:
+                    summarized = time.monotonic()
+                    self.log_summary()
             except Exception:  # the poller must never die
                 log.exception("Fehler im Abfrage-Thread")
+
+    def log_summary(self) -> None:
+        """One line „Stand: …“ – how warm it is where, what each heater does; every 15 minutes."""
+        parts = []
+        for e in self.entries:
+            v = e.values
+            if not e.online:
+                parts.append(f"{self._name(e)} nicht erreichbar seit {_since(e.offline_since)}")
+                continue
+            parts.append(f"{self._name(e)} {_deg10(v.get('room_temp'))} (Soll {_deg10(v.get('setpoint'))}, "
+                         f"{MODE_WORDS.get(v.get('operating_mode'), '?')}"
+                         + (", heizt" if v.get("heater_state") == 1 else "")
+                         + (", Fenster offen" if v.get("open_window") == 1 else "") + ")")
+        data = self.store.snapshot()
+        for sid in data["sensors"]:
+            live = self._sensor_live.get(sid) or {}
+            if live.get("temp") is not None:
+                parts.append(f"Fühler {self._sensor_name(sid, data)} {_num(live['temp'])} °C")
+        if parts:
+            log.info("Stand: %s", " · ".join(parts))
 
     def poll_all(self, full: bool = False) -> None:
         list(self._pool.map(lambda e: self.refresh(e, full), self.entries))
 
     def refresh(self, e: HeaterState, full: bool = False) -> None:
         with e.refresh_lock:
+            started, before = time.monotonic(), dict(e.values)
             try:
                 vals = e.device.read(FAST_FIELDS)
                 slow = full or e.polls % SLOW_EVERY == 0 or "system_time" not in e.values
@@ -213,9 +272,17 @@ class Service:
                 e.online, e.error = False, str(exc)
                 if e.offline_since is None:
                     e.offline_since = time.time()
+                if e.reported is not False:
+                    e.reported = False
+                    log.warning("Heizung %s antwortet nicht: %s", self._who(e), exc)
+                log.debug("Heizung %s: keine Antwort (%.1f s)", self._who(e), time.monotonic() - started)
             except (DeviceError, ValueError, KeyError, TypeError) as exc:
                 e.online, e.error = True, f"unerwartete Antwort: {exc}"
+                if e.error != e.reported_error:
+                    e.reported_error = e.error
+                    log.warning("Heizung %s: %s", self._who(e), e.error)
             else:
+                offline_since = e.offline_since
                 e.values.update(vals)
                 now = time.time()
                 steady = (e.values.get("operating_mode"), e.values.get("setpoint"), e.values.get("open_window"))
@@ -224,8 +291,49 @@ class Service:
                 e.online, e.error, e.last_seen, e.offline_since = True, None, now, None
                 if isinstance(vals.get("room_temp"), int):
                     e.temps.append((e.last_seen, vals["room_temp"], e.values.get("temp_corr")))
+                self._log_reading(e, before, vals, offline_since, time.monotonic() - started)
             finally:
                 e.polls += 1
+
+    def _who(self, e: HeaterState) -> str:
+        """A heater in the log: its name and address."""
+        name = self._name(e)
+        return name if name == e.label else f"{name} ({e.label})"
+
+    def _log_reading(self, e: HeaterState, before: dict, vals: dict, offline_since: float | None,
+                     seconds: float) -> None:
+        """What the log says about one successful reading: the first one, the heater back after a gap, what changed
+        at the heater since the last reading (also through a button on the device or the plan) – and in the detailed
+        log every reading."""
+        v = e.values
+        if e.reported is None:
+            log.info("Heizung %s erreichbar: %s, Soll %s, %s · Firmware %s · Seriennummer %s%s", self._who(e),
+                     _deg10(v.get("room_temp")), _deg10(v.get("setpoint")), MODE_WORDS.get(v.get("operating_mode"), "?"),
+                     v.get("active_fw_ver") or "?", v.get("idu") or "?", "" if e.device.writable else " · ohne Token")
+        elif e.reported is False:
+            log.info("Heizung %s antwortet wieder (nach %s)", self._who(e), _since(offline_since))
+        if e.reported_error:
+            log.info("Heizung %s antwortet wieder normal", self._who(e))
+        e.reported, e.reported_error = True, None
+        if before.get("operating_mode") is not None:   # not the first reading: compare
+            changes = []
+            for name, label, show in (("operating_mode", "Modus", lambda x: MODE_WORDS.get(x, str(x))),
+                                      ("setpoint", "Soll", _deg10),
+                                      ("open_window", "Fenster", lambda x: "offen" if x == 1 else "zu"),
+                                      ("temp_corr", "Korrektur", lambda x: f"{_num(x / 10, '+.1f')} °C"
+                                       if isinstance(x, int) else "?"),
+                                      ("heating_plan", "Planplatz", lambda x: str(x + 1) if isinstance(x, int) else "?"),
+                                      ("child_lock_en", "Kindersicherung", lambda x: "an" if x == 1 else "aus"),
+                                      ("active_fw_ver", "Firmware", str)):
+                if name in vals and before.get(name) is not None and vals[name] != before[name]:
+                    changes.append(f"{label} {show(before[name])} → {show(vals[name])}")
+            if changes:
+                log.info("Heizung %s: %s", self._who(e), " · ".join(changes))
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Heizung %s: %s, Soll %s, %s%s%s, %d Werte in %.2f s", self._who(e), _deg10(v.get("room_temp")),
+                      _deg10(v.get("setpoint")), MODE_WORDS.get(v.get("operating_mode"), "?"),
+                      ", heizt" if v.get("heater_state") == 1 else "",
+                      ", Fenster offen" if v.get("open_window") == 1 else "", len(vals), seconds)
 
     def _bind(self, e: HeaterState, idu: str) -> None:
         """Key a heater by its serial number, so names/rooms survive a changed IP."""
@@ -246,12 +354,18 @@ class Service:
         return f"Heat4U-{idu[:3]}{idu[-3:]}" if len(idu) >= 6 else e.label
 
     # ------------------------------------------------------------------ helpers
-    def _run_parallel(self, entries: list[HeaterState], action: Callable[[HeaterState], str]) -> list[dict]:
+    def _run_parallel(self, entries: list[HeaterState], action: Callable[[HeaterState], str],
+                      what: str = "Befehl") -> list[dict]:
         def one(e: HeaterState) -> dict:
+            started = time.monotonic()
             try:
                 message, ok = action(e), True
             except (DeviceError, coap.CoapError, ValueError) as exc:
                 message, ok = str(exc), False
+            if ok:
+                log.info("Heizung %s: %s (%.1f s)", self._who(e), message, time.monotonic() - started)
+            else:
+                log.warning("Heizung %s: %s hat nicht geklappt – %s", self._who(e), what, message)
             self.refresh(e, full=True)
             return {"heater": e.id, "name": self._name(e), "ok": ok, "message": message}
         return list(self._pool.map(one, entries))
@@ -305,7 +419,8 @@ class Service:
         def apply(e: HeaterState) -> str:
             e.device.set("setpoint", value)
             return f"Solltemperatur {value / 10:g} °C".replace(".", ",")
-        return {"results": self._run_parallel(self._targets(kind, ident), apply)}
+        return {"results": self._run_parallel(self._targets(kind, ident), apply,
+                                              f"Solltemperatur {value / 10:g} °C".replace(".", ","))}
 
     def set_mode(self, kind: str, ident: str, mode: str, minutes=30) -> dict:
         """Modes of the device plus "on": undo "off" – back to the mode and temperature the heater
@@ -324,7 +439,7 @@ class Service:
             else:
                 self._heater_meta_set(e, "before_off", None)
             return MODE_LABELS[mode]
-        return {"results": self._run_parallel(self._targets(kind, ident), apply)}
+        return {"results": self._run_parallel(self._targets(kind, ident), apply, f"Modus „{MODE_LABELS[mode]}“")}
 
     def _mode_before_off(self, e: HeaterState) -> dict | None:
         """What "on" should restore later; None if the heater is already off (manual at frost level)."""
@@ -381,7 +496,9 @@ class Service:
         def write(e: HeaterState) -> str:
             changed = e.device.write_plan(DEVICE_PLAN_SLOT, windows)
             return f"übertragen ({len(changed)} Tag(e) geändert)" if changed else "war bereits aktuell"
-        results = self._run_parallel(self._targets("room", room_id), write)
+        targets = self._targets("room", room_id)
+        log.info("Heizplan „%s“ an %s senden: %s", plan["name"], room["name"], ", ".join(self._name(e) for e in targets))
+        results = self._run_parallel(targets, write, f"Heizplan „{plan['name']}“ übertragen")
         if any(r["ok"] for r in results):
             with self.store.edit() as d:
                 d["rooms"][room_id]["sent"] = {
@@ -437,6 +554,7 @@ class Service:
             parts.append(f"{skipped} unlesbare Zeitfenster wurden übersprungen.")
         if active_slot and len(empty) < 3:
             parts.append(f"Ausgewählt auf der Heizung: Plan {active_slot}.")
+        log.info("Heizpläne von %s ausgelesen: %s", self._who(e), " ".join(parts) or "nichts Neues")
         return {"created": created, "existing": existing, "empty": empty, "skipped": skipped,
                 "active_slot": active_slot, "message": " ".join(parts)}
 
@@ -499,11 +617,13 @@ class Service:
             raise ActionError("Heizung ist offline oder nur lesbar (Token fehlt).")
 
         def apply(e: HeaterState) -> str:
+            if e.clock_drift is not None and abs(e.clock_drift) >= 1:
+                log.info("Heizung %s: Uhr geht %s %s – wird gestellt", self._who(e), _span(e.clock_drift),
+                         "vor" if e.clock_drift > 0 else "nach")
             e.clock_drift = e.device.set_clock(self.now)
             e.last_clock_sync = time.time()
-            log.info("Uhr gestellt: %s", e.cfg.host)
             return "Uhr gestellt"
-        return {"results": self._run_parallel(targets, apply) if targets else []}
+        return {"results": self._run_parallel(targets, apply, "Uhr stellen") if targets else []}
 
     # ------------------------------------------------------------------ network search
     def _scan_targets(self, networks) -> list[tuple[str, int]]:
@@ -564,9 +684,8 @@ class Service:
         for p in pills:
             self._found_pills[p["id"]] = {"mono": time.monotonic(), "at": at, "heaters": heater_temps, "pill": p}
             self._note_pill(p, at, heater_temps, save=True)
-        if pills:
-            log.info("Fühlersuche in %s: %s", ", ".join(map(str, nets)),
-                     ", ".join(f"{p['name'] or p['model']} {p['address']}" for p in pills))
+        log.info("Fühlersuche in %s: %s", ", ".join(map(str, nets)),
+                 ", ".join(f"{p['name'] or p['model']} {p['address']}" for p in pills) or "keine Pill gefunden")
         return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1), "pills": pills}
 
     # ------------------------------------------------------------------ room sensors (Shelly Pill)
@@ -600,6 +719,7 @@ class Service:
         of the heaters in their rooms at that moment (the pair the calibration compares). With save, the
         readings also go to data.json; a new address always does. Returns the readings (sensor id -> reading)."""
         probes = {p["channel"]: p for p in pill["probes"]}
+        self._log_pill(pill)
         self._pill_status[pill["id"]] = {
             "online": True, "since": None, "mode": pill["mode"], "firmware": pill["firmware"], "update": pill["update"],
             "probes": probes, "error": "Die Pill ist mit einem Passwort geschützt – ihre Messwerte lassen sich nicht "
@@ -632,7 +752,33 @@ class Service:
     def _pill_offline(self, pill_id: str) -> None:
         old = self._pill_status.get(pill_id) or {}
         since = old.get("since") if old.get("online") is False else self.now().isoformat(timespec="seconds")
+        if old.get("online") is not False:
+            log.warning("Fühler: Pill %s antwortet nicht", self._pill_name(pill_id))
         self._pill_status[pill_id] = {**old, "online": False, "since": since, "error": self.NOT_ANSWERING}
+
+    def _pill_name(self, pill_id: str, pill: dict | None = None) -> str:
+        """A Pill in the log: its name (or id) and address."""
+        meta = next((m for m in self.store.snapshot()["sensors"].values() if m.get("pill") == pill_id), {})
+        name = (pill or {}).get("name") or meta.get("device_name") or pill_id
+        address = (pill or {}).get("address") or meta.get("host")
+        return f"{name} ({address})" if address else name
+
+    def _log_pill(self, pill: dict) -> None:
+        """The log about one Pill that answered: the first time since the start, back after a gap, and in the
+        detailed log every reading."""
+        old = self._pill_status.get(pill["id"])
+        probes = ", ".join(f"Fühler {p['channel']}: " + (f"{_num(p['temp'])} °C" if p["temp"] is not None else "kein Wert")
+                           + (f", {p['humidity']:.0f} %" if p.get("humidity") is not None else "")
+                           + (f" (Fehler {p['error']})" if p.get("error") else "") for p in pill["probes"]) or "kein Fühler"
+        if old is None:
+            log.info("Fühler: Pill %s erreichbar – %s · Modus %s · Firmware %s%s", self._pill_name(pill["id"], pill), probes,
+                     pill.get("mode") or "?", pill.get("firmware") or "?",
+                     " · mit Passwort geschützt" if pill.get("protected") else "")
+        elif old.get("online") is False:
+            log.info("Fühler: Pill %s antwortet wieder – %s", self._pill_name(pill["id"], pill), probes)
+        elif log.isEnabledFor(logging.DEBUG):
+            log.debug("Fühler: Pill %s – %s%s", self._pill_name(pill["id"], pill), probes,
+                      f", WLAN {pill['rssi']:.0f} dBm" if pill.get("rssi") is not None else "")
 
     def _read_pill(self, pill_id: str, address) -> dict | None:
         """The Pill pill_id at its last address, or None if it does not answer there (or another device does)."""
@@ -730,6 +876,8 @@ class Service:
                 meta["name"] = name
             if "room" in body:
                 meta["room"] = room_id
+        log.info("Fühler %s gespeichert:%s%s", sensor_id, f" Name „{name}“" if "name" in body else "",
+                 f" Raum {self.store.data['rooms'][room_id]['name'] if room_id else '(keiner)'}" if "room" in body else "")
         return {"message": "Gespeichert."}
 
     def refresh_sensor(self, sensor_id: str) -> dict:
@@ -1108,9 +1256,14 @@ class Service:
         self._last_heal = now
         try:
             nets = discovery.local_networks([e.cfg.host for e in self.entries])
+            log.info("Suche im Heimnetz (%s) nach Heizungen, die nicht antworten: %s", ", ".join(map(str, nets)) or "?",
+                     ", ".join(self._who(e) for e in lost))
             with self._scan_lock:
                 found = discovery.scan(self._scan_targets(nets))
-            self._adopt(found)
+            moved = self._adopt(found)
+            if not moved:
+                log.info("Suche im Heimnetz: %d Heizung(en) antworten, keine der gesuchten unter einer neuen Adresse",
+                         len(found))
         except Exception:  # never disturb the poller
             log.exception("Automatische Netzsuche fehlgeschlagen")
 
@@ -1123,6 +1276,7 @@ class Service:
             d["rooms"][room_id] = {"name": name, "plan": None}
             if members is not None:
                 self._assign(d, room_id, members)
+        log.info("Raum angelegt: %s%s", name, f" mit {', '.join(self._name(e) for e in members)}" if members else "")
         return {"id": room_id}
 
     def update_room(self, room_id: str, body: dict) -> dict:
@@ -1134,12 +1288,17 @@ class Service:
         members = self._heater_entries(body["heaters"]) if "heaters" in body else None
         with self.store.edit() as d:
             room = d["rooms"][room_id]
+            old_name = room["name"]
             if name is not None:
                 room["name"] = name
             if "plan" in body:
                 room["plan"] = plan_id
             if members is not None:
                 self._assign(d, room_id, members)
+        changed = ([f"Name „{name}“"] if name is not None and name != old_name else []) \
+            + ([f"Plan „{self.store.data['plans'][plan_id]['name']}“" if plan_id else "kein Plan"] if "plan" in body else []) \
+            + ([f"Heizungen: {', '.join(self._name(e) for e in members) or 'keine'}"] if members is not None else [])
+        log.info("Raum %s geändert: %s", old_name, " · ".join(changed) or "nichts")
         return {}
 
     def _heater_entries(self, ids) -> list[HeaterState]:
@@ -1161,7 +1320,7 @@ class Service:
                 meta["room"] = None
 
     def delete_room(self, room_id: str) -> dict:
-        self._room(room_id)
+        log.info("Raum gelöscht: %s", self._room(room_id)["name"])
         with self.store.edit() as d:
             d["rooms"].pop(room_id)
             for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
@@ -1191,6 +1350,9 @@ class Service:
                 meta["name"] = name
             if "room" in body:
                 meta["room"] = room_id
+        if "name" in body or "room" in body:
+            log.info("Heizung %s gespeichert:%s%s", self._who(e), f" Name „{name}“" if "name" in body else "",
+                     f" Raum {self.store.data['rooms'][room_id]['name'] if room_id else '(keiner)'}" if "room" in body else "")
         return {"message": "Gespeichert." + warning, "warning": bool(warning)}
 
     # ------------------------------------------------------------------ adding / changing heaters
@@ -1351,6 +1513,7 @@ class Service:
         plan_id = new_id("p")
         with self.store.edit() as d:
             d["plans"][plan_id] = plan
+        log.info("Heizplan angelegt: „%s“ (%d Zeitfenster)", plan["name"], sum(map(len, plan["days"].values())))
         return {"id": plan_id}
 
     def update_plan(self, plan_id: str, body: dict) -> dict:
@@ -1359,11 +1522,13 @@ class Service:
         plan = self._plan_from(body)
         with self.store.edit() as d:
             d["plans"][plan_id] = plan
+        log.info("Heizplan geändert: „%s“ (%d Zeitfenster)", plan["name"], sum(map(len, plan["days"].values())))
         return {}
 
     def delete_plan(self, plan_id: str) -> dict:
         if plan_id not in self.store.data["plans"]:
             raise ActionError("Heizplan nicht gefunden", 404)
+        log.info("Heizplan gelöscht: „%s“", self.store.data["plans"][plan_id]["name"])
         with self.store.edit() as d:
             d["plans"].pop(plan_id)
             for room in d["rooms"].values():
@@ -1422,6 +1587,7 @@ class Service:
             "writable": e.device.writable,
             "error": e.error,
             "last_seen": self._iso(e.last_seen),
+            "offline_since": self._iso(e.offline_since),
             "room_temp": deg("room_temp"),
             "setpoint": deg("setpoint"),
             "antifrost": deg("antifrost_sp"),

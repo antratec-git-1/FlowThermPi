@@ -6,6 +6,7 @@ and retransmission with the same message ID (so the device can de-duplicate writ
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 import socket
@@ -18,6 +19,7 @@ OPT_CONTENT_FORMAT = 12
 OPT_URI_QUERY = 15
 CONTENT_FORMAT_JSON = 50
 DEFAULT_PORT = 5683
+log = logging.getLogger(__name__)
 
 
 class CoapError(Exception):
@@ -113,7 +115,10 @@ def request(host: str, method: str, path: str, payload: bytes = b"", query: list
         raise CoapError(f"{host}: Adresse nicht auflösbar") from exc
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        for _attempt in range(retries + 1):
+        for attempt in range(retries + 1):
+            if attempt:   # the detailed log: a heater whose Wi-Fi dozes or that is gone (never the query: token)
+                log.debug("%s %s %s: keine Antwort nach %g s – Versuch %d von %d", host, method, path, timeout,
+                          attempt + 1, retries + 1)
             try:
                 sock.sendto(packet, addr)
             except OSError as exc:
@@ -133,8 +138,10 @@ def request(host: str, method: str, path: str, payload: bytes = b"", query: list
                     continue
                 if answer["type"] == ACK and answer["code"] == 0 and answer["mid"] == mid:
                     deadline = time.monotonic() + 3 * timeout  # empty ACK: separate response follows
+                    log.debug("%s %s %s: Antwort kommt getrennt (leeres ACK)", host, method, path)
                     continue
                 if answer["type"] == RST and answer["mid"] == mid:
+                    log.debug("%s %s %s: zurückgewiesen (RST)", host, method, path)
                     raise CoapError(f"{host}: Anfrage zurückgewiesen (RST)")
                 if answer["token"] != token:
                     continue

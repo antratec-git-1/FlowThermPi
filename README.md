@@ -24,6 +24,8 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   als 15 Minuten ist, erscheint dort nicht.
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
+- **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
+  und schicken sie dem Helfer – auf Wunsch mit vorbereiteter E-Mail. Siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 
 **Einrichtung** (Knopf oben rechts): Heizungen, Räume, Heizpläne, Kalibrierung, Uhren – alles
 Folgende. Mit **PIN festlegen** (4–8 Ziffern) wird sie geschützt; die einfache Ansicht bleibt
@@ -67,6 +69,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   [Fernwartung](#fernwartung-tailscale).
 - **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
   aktualisieren und entfernen – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
+- **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
+  einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -132,7 +136,8 @@ Adresse an – z. B. `http://flowthermpi.local`.
 - **Weitere Optionen** hinter `python3 -`: `--port 8080`, `--ref v0.2.0` (bestimmte Version),
   `--reset-pin` (PIN vergessen), `--uninstall` (Daten bleiben; Zigbee-Programme kommen mit weg),
   `--uninstall --purge` (alles weg).
-- **Meldungen:** `journalctl -u flowthermpi -f`. Passwort fürs Heimnetz: `HEIZAPP_PASSWORD=…` in
+- **Meldungen:** `journalctl -u flowthermpi -f` – oder in der App [Protokoll speichern](#protokoll-wenn-etwas-schiefgeht).
+  Passwort fürs Heimnetz: `HEIZAPP_PASSWORD=…` in
   `/etc/default/flowthermpi` eintragen, dann `sudo systemctl restart flowthermpi`.
 - **Uhrzeit:** Ein Raspberry Pi hat keine Batterie-Uhr. Die App stellt die Heizungsuhren erst, wenn
   der Pi seine Uhrzeit aus dem Internet hat – nach einem Stromausfall also nie auf eine falsche Zeit.
@@ -383,6 +388,41 @@ und starten, Thermostate anlernen und steuern kommt in den nächsten Schritten.
   `journalctl -u flowthermpi-zigbee`.
 - Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
 
+## Protokoll: wenn etwas schiefgeht
+
+Ab Version 0.4.5 schreibt die App mit, was passiert: wann eine Heizung oder ein Fühler nicht antwortet und wann wieder, was in der App
+eingestellt wurde (Temperatur, Modus, Heizplan, Uhren, Räume, PIN), was sich an einer Heizung selbst geändert hat (am
+Display oder durch den Plan), wie Update, WLAN, Fernwartung und Zigbee laufen, jeden Start – und ob die App vorher
+sauber beendet wurde oder etwa der Strom weg war.
+
+- **Protokoll speichern** – unten in der Heizungsansicht (ohne PIN, damit die Bewohner es können) und in
+  *Einrichtung › Über*: Die App stellt eine ZIP-Datei zusammen, der Browser speichert sie (meist im Ordner
+  „Downloads“). Ist in der Einrichtung eine E-Mail-Adresse eingetragen, bietet die Seite danach an, eine E-Mail an sie
+  vorzubereiten – mit Betreff und kurzem Text. Die Datei hängen die Bewohner selbst an; das kann ein Browser nicht.
+- **In der Datei:** `LIESMICH.txt`; `uebersicht.txt` (Version, Heizungen mit Zustand, Räume, Pläne, Fühler, WLAN,
+  Fernwartung, Zigbee, die letzten Warnungen); `app.log` (das Protokoll der App, ältester Eintrag zuerst);
+  `system.txt` (nur auf dem Pi: das Journal seiner Dienste aus den letzten 7 Tagen, Kernel, Neustarts, Netz,
+  USB-Geräte, Speicherkarte, Temperatur und Unterspannung); `daten.json` (Räume, Pläne, Namen – ohne PIN).
+- **Nicht in der Datei:** Tokens der Heizungen, Passwörter (WLAN, App, Mosquitto) und der Anmelde-Link von Tailscale.
+  Sie werden schon beim Schreiben jeder Zeile durch `•••` ersetzt und beim Zusammenstellen noch einmal. **Wohl aber**
+  Namen von Räumen und Geräten, Adressen im Heimnetz und WLAN-Namen – darauf weist der Dialog hin.
+- **Ausführliches Protokoll** (*Einrichtung › Über*), für Fehler, die nur ab und zu auftreten: schreibt 24 Stunden
+  lang zusätzlich jede Abfrage der Heizungen und Fühler und jeden Aufruf der Seite mit und schaltet sich dann von
+  selbst ab, auch wenn die App zwischendurch neu startet.
+- **Wo es liegt:** `logs/flowthermpi.log` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/logs/`). Ist die
+  Datei 2 MB groß, beginnt eine neue; die zehn neuesten bleiben, zusammen höchstens etwa 20 MB. Anderer Ordner:
+  `--log-dir` bzw. `HEIZAPP_LOG_DIR`. Jede Zeile beginnt mit Datum, Uhrzeit (mit Millisekunden und Zeitzone), Stufe und
+  dem Teil der App. Auf der Konsole bzw. im Journal (`journalctl -u flowthermpi`) stehen dieselben Meldungen in kurz,
+  ohne die ausführlichen.
+- **Die Systemprotokolle des Pi** darf die App nicht selbst lesen. Wie beim Update-Knopf legt sie nur eine Anfrage in
+  ihren Datenordner; der Dienst `flowthermpi-logs` (root) sammelt dann genau das oben Genannte. Er ersetzt die
+  Geheimnisse, die er auf dem Pi findet (Tokens aus `heizungen.conf`, WLAN-Passwörter von NetworkManager, die
+  Passwörter für Mosquitto, `HEIZAPP_PASSWORD`), und alles, was wie eines aussieht. Das Ergebnis kann nur die App
+  lesen; sie löscht es, sobald es in der Datei ist. Vom Datenordner nennt er nur Namen und Größen. Ob das Journal
+  Neustarts übersteht, steht in `system.txt` („dauerhaft gespeichert“ oder „nur seit dem letzten Start“). Einen
+  älteren Pi bringt der Update-Knopf auf diesen Stand; auf dem Mac oder in Docker fehlt dieser Teil, dann steht in
+  `system.txt`, warum. Meldungen: `journalctl -u flowthermpi-logs`.
+
 ## Konfiguration: `heizungen.conf`
 
 Heizungen legst du am einfachsten in der App an: Tab „Geräte“ → **+ Heizung**, bzw. **Bearbeiten**
@@ -451,7 +491,9 @@ WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `te
 Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto. Die
 Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`). Die Zigbee-Programme
 werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.py`: apt, Mosquitto, Node.js, pnpm) –
-ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen.
+ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen. Das Einsammeln der
+Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
+Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet.
 
 ## Ideen für später
 

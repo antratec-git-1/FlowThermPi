@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .service import ActionError
 
-log = logging.getLogger("heizapp")
+log = logging.getLogger(__name__)
 REQUEST, STATUS = "zigbee-request.json", "zigbee-status.json"
 PARTS = ("node", "pnpm", "zigbee2mqtt")
 PHASES = ("check", "mosquitto", "node", "pnpm", "zigbee2mqtt", "dependencies", "build", "finish", "remove")
@@ -181,6 +181,7 @@ class Zigbee:
         rid = self._begin(action, job={"action": action, "state": "waiting", "phase": None, "step": None,
                                        "steps": None, "progress": None, "message": None, "details": None,
                                        "started": _now(), "finished": None})
+        log.info("Zigbee: %s angestoßen", "Installation" if action == "install" else "Entfernen")
         threading.Thread(target=self._follow, args=(rid, self.times[action]), name=f"zigbee-{action}", daemon=True).start()
         return {"zigbee": self.view()}
 
@@ -241,6 +242,8 @@ class Zigbee:
             job = self._job
             if message and job and job["id"] == rid and job["state"] in ("waiting", "running"):
                 job.update(state="failed", phase=None, progress=None, message=message, finished=_now())
+                log.warning("Zigbee: %s hat nicht geklappt – %s", "Installation" if job["action"] == "install"
+                            else "Entfernen", message)
             self._release(rid)
 
     def _wait(self, rid: str, limit: float) -> dict:
@@ -328,10 +331,14 @@ class Zigbee:
             return
         if state == "running":
             self._doing, self._owner, self._adopted = action, rid, True
-        self._absorb(status)   # fills in the progress – or how it ended, with its message
+        self._absorb(status, quiet=True)   # fills in the progress – or how it ended, with its message
+        log.info("Zigbee: zuletzt %s – %s%s", "Installation" if action == "install" else "Entfernen",
+                 {"running": "läuft noch", "done": "fertig", "failed": "fehlgeschlagen"}[state],
+                 f" ({_text(status.get('message'), 300)})" if state != "running" and status.get("message") else "")
 
-    def _absorb(self, status: dict) -> None:
-        """Take what the root service reported: the programs, the job's progress and result."""
+    def _absorb(self, status: dict, quiet: bool = False) -> None:
+        """Take what the root service reported: the programs, the job's progress and result. quiet: at the start of
+        the app – how an earlier job ended is not news."""
         info, state, at = _programs(status.get("zigbee")), status.get("state"), _text(status.get("at"), 40)
         with self._free:
             if info is not None:
@@ -341,6 +348,8 @@ class Zigbee:
                 return
             if state == "running" and job["state"] in ("waiting", "running"):
                 phase = status.get("phase")
+                if not quiet and phase in PHASES and phase != job["phase"]:
+                    log.info("Zigbee: Schritt %s von %s – %s", status.get("step") or "?", status.get("steps") or "?", phase)
                 job.update(state="running", phase=phase if phase in PHASES else job["phase"],
                            step=_number(status.get("step"), 1, 20), steps=_number(status.get("steps"), 1, 20),
                            progress=_number(status.get("progress"), 0, 100))
@@ -348,4 +357,11 @@ class Zigbee:
                 job.update(state=state, phase=None, progress=None, message=_text(status.get("message"), 300),
                            details=_text(status.get("details"), 4000),
                            finished=_text(status.get("finished"), 40) or at or _now())
+                if not quiet:
+                    what = "Installation" if job["action"] == "install" else "Entfernen"
+                    if state == "done":
+                        log.info("Zigbee: %s fertig – %s", what, job["message"] or "ohne Meldung")
+                    else:
+                        log.warning("Zigbee: %s fehlgeschlagen – %s%s", what, job["message"] or "ohne Meldung",
+                                    f"\n{job['details']}" if job["details"] else "")
                 self._release(job["id"])   # in the same step, so the page never sees "done" but busy

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 import threading
@@ -28,6 +29,7 @@ SESSION_TTL = 30 * 60      # seconds without a setup action until the PIN is ask
 FREE_ATTEMPTS = 5          # wrong PINs before the pause starts
 FIRST_PAUSE = 60           # seconds; doubles with every further wrong PIN
 MAX_PAUSE = 15 * 60
+log = logging.getLogger(__name__)   # says what happened with the PIN – never the PIN itself
 
 
 def _hash(pin: str, salt: bytes, iterations: int) -> str:
@@ -59,8 +61,10 @@ class SetupAccess:
             raise ActionError("Die PIN muss aus 4 bis 8 Ziffern bestehen.")
         salt = secrets.token_bytes(16)
         record = {"salt": salt.hex(), "iterations": ITERATIONS, "hash": _hash(pin, salt, ITERATIONS)}
+        had = self.pin_set
         with self.store.edit() as d:
             d.setdefault("settings", {})["pin"] = record
+        log.info("PIN der Einrichtung %s – andere Geräte müssen sie neu eingeben", "geändert" if had else "festgelegt")
         with self._lock:
             keep = token if self._valid(token) else None
             self._sessions.clear()
@@ -69,6 +73,7 @@ class SetupAccess:
     def remove_pin(self) -> None:
         with self.store.edit() as d:
             (d.get("settings") or {}).pop("pin", None)
+        log.info("PIN der Einrichtung entfernt – die Einrichtung ist ohne PIN zugänglich")
         with self._lock:
             self._sessions.clear()
 
@@ -81,6 +86,8 @@ class SetupAccess:
         with self._lock:
             wait = self._paused_until - self.clock()
             if wait > 0:
+                log.warning("PIN-Eingabe abgelehnt: noch %d Sekunden Pause nach zu vielen falschen Versuchen",
+                            int(wait + 0.999))
                 raise ActionError(f"Zu viele falsche Versuche – bitte in {int(wait + 0.999)} Sekunden "
                                   "noch einmal versuchen.", 429)
         pin = str(pin or "").strip()
@@ -92,14 +99,18 @@ class SetupAccess:
                 if self._failures >= FREE_ATTEMPTS:
                     pause = min(MAX_PAUSE, FIRST_PAUSE * 2 ** (self._failures - FREE_ATTEMPTS))
                     self._paused_until = self.clock() + pause
+                    log.warning("Falsche PIN (%d. Versuch in Folge) – %d Sekunden Pause", self._failures, pause)
                     raise ActionError(f"Falsche PIN. Zu viele Versuche – bitte {pause} Sekunden warten.", 403)
+                log.warning("Falsche PIN (%d. Versuch in Folge)", self._failures)
                 raise ActionError("Falsche PIN.", 403)
             self._failures, self._paused_until = 0, 0.0
+            log.info("Einrichtung mit der PIN geöffnet")
             return self._new_session(None)
 
     def lock(self, token: str | None) -> None:
         with self._lock:
-            self._sessions.pop(token or "", None)
+            if self._sessions.pop(token or "", None) is not None:
+                log.debug("Einrichtung geschlossen")
 
     def allowed(self, token: str | None, touch: bool = True) -> bool:
         """May this request change the setup? Always, as long as no PIN is set."""

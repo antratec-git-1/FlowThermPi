@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import re
 import socketserver
+import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,17 +18,18 @@ from . import APP_NAME, COPYRIGHT, LICENSE, REPO_URL, __version__
 from .access import COOKIE, SetupAccess
 from .remote import Remote
 from .service import ActionError, Service
+from .support import Download, Support
 from .update import Updater
 from .wifi import Wifi
 from .zigbee import Zigbee
 
-log = logging.getLogger("heizapp")
+log = logging.getLogger(__name__)
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
 MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 
 
-def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee):
+def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
     return [
@@ -41,6 +43,9 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee):
          lambda m, b, r: s.set_mode("heater", m[1], b.get("mode"), b.get("minutes")), PUBLIC),
         ("POST", r"/api/setup/unlock", lambda m, b, r: r.unlock(b.get("pin")), PUBLIC),
         ("POST", r"/api/setup/lock", lambda m, b, r: r.lock(), PUBLIC),
+        # „Protokoll speichern“ – residents send it to their helper when something goes wrong
+        ("POST", r"/api/logs/prepare", lambda m, b, r: p.prepare(r.local_ip()), PUBLIC),
+        ("GET", r"/api/logs/([0-9a-f]{16})", lambda m, b, r: p.download(m[1]), PUBLIC),
         # setup ("Einrichtung") – needs the PIN once one is set
         ("PUT", r"/api/setup/pin", lambda m, b, r: r.set_pin(b.get("pin")), SETUP),
         ("DELETE", r"/api/setup/pin", lambda m, b, r: r.remove_pin(), SETUP),
@@ -86,6 +91,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee):
         ("POST", r"/api/zigbee/refresh", lambda m, b, r: z.refresh(), SETUP),
         ("POST", r"/api/zigbee/install", lambda m, b, r: z.install(), SETUP),
         ("POST", r"/api/zigbee/remove", lambda m, b, r: z.remove(), SETUP),
+        ("PUT", r"/api/logs/settings", lambda m, b, r: p.change(b), SETUP),
         # Fernhilfe in the residents' view, without PIN: allowing works only in the home network, ending everywhere
         ("POST", r"/api/remote/help", lambda m, b, r: t.help(r.local_ip()), PUBLIC),
         ("POST", r"/api/remote/help/end", lambda m, b, r: t.end(r.local_ip()), PUBLIC),
@@ -94,23 +100,33 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee):
 
 def make_handler(service: Service, password: str | None = None, access: SetupAccess | None = None,
                  updater: Updater | None = None, wifi: Wifi | None = None, remote: Remote | None = None,
-                 zigbee: Zigbee | None = None):
+                 zigbee: Zigbee | None = None, support: Support | None = None):
     updater = updater or Updater(None)   # without it: no update button (e.g. on the Mac or in Docker)
     wifi = wifi or Wifi(None)            # without it: no WLAN setup
     remote = remote or Remote(None)      # without it: no remote maintenance
     zigbee = zigbee or Zigbee(None)      # without it: no Zigbee programs
-    routes = _routes(service, updater, wifi, remote, zigbee)
+    support = support or Support(service, updater, wifi, remote, zigbee, password=bool(password))   # without system logs
+    routes = _routes(service, updater, wifi, remote, zigbee, support)
     access = access or SetupAccess(service.store)
     expected_auth = ("Basic " + base64.b64encode(f"heizung:{password}".encode()).decode()) if password else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"{APP_NAME}/{__version__}"
 
-        def log_message(self, fmt, *args):  # only log changes, not the 5-second polling
-            if self.command != "GET":
-                log.info("%s %s", self.command, self.path)
+        def log_message(self, fmt, *args):  # every request is logged by _dispatch, with its result
+            pass
+
+        def log_error(self, fmt, *args):  # a request that could not be read (or timed out)
+            log.warning("Anfrage von %s nicht lesbar: %s", self._client(), fmt % args)
+
+        def _client(self) -> str:
+            try:
+                return str(self.client_address[0]).removeprefix("::ffff:")
+            except (AttributeError, IndexError, TypeError):
+                return "?"
 
         def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
+            self._status = status
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -154,6 +170,7 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
                              "device": remote.device}
             result["update"] = updater.status()   # also shown to residents: "the app restarts in a moment"
             result["remote"] = remote.summary(self.local_ip())   # residents see when remote maintenance is on
+            result["logs"] = support.view()   # the helper's e-mail address for „Protokoll speichern“
             return result
 
         def local_ip(self) -> str | None:
@@ -183,6 +200,22 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
 
         # ---------------------------------------------------------- dispatch
         def _dispatch(self, method: str) -> None:
+            started, self._status = time.monotonic(), None
+            try:
+                self._handle(method)
+            finally:
+                self._log(method, time.monotonic() - started)
+
+        def _log(self, method: str, seconds: float) -> None:
+            """One entry per request: changes and failures always, the polling of the page only in the detailed log."""
+            status = self._status
+            level = logging.WARNING if status is None or status >= 500 else \
+                logging.DEBUG if method in ("GET", "HEAD") and status < 400 else logging.INFO
+            if log.isEnabledFor(level):
+                log.log(level, "%s %s → %s (%d ms, von %s)", method, urlparse(self.path).path[:200], status or "abgebrochen",
+                        round(seconds * 1000), self._client())
+
+        def _handle(self, method: str) -> None:
             self._set_cookies = []
             if not self._authorized():
                 self._send(401, b"Anmeldung erforderlich", "text/plain; charset=utf-8",
@@ -205,7 +238,11 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
                 try:
                     body = self._read_body()
                     result = fn(match, body, self)
-                    self._json(200, result if result is not None else {})
+                    if isinstance(result, Download):   # a file to save, e.g. „Protokoll speichern“
+                        self._send(200, result.data, result.ctype,
+                                   {"Content-Disposition": f'attachment; filename="{result.name}"'})
+                    else:
+                        self._json(200, result if result is not None else {})
                 except ActionError as exc:
                     self._json(exc.status, {"error": str(exc)})
                 except ValueError as exc:
@@ -271,5 +308,7 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(service: Service, host: str, port: int, password: str | None = None,
                 updater: Updater | None = None, wifi: Wifi | None = None,
-                remote: Remote | None = None, zigbee: Zigbee | None = None) -> ThreadingHTTPServer:
-    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi, remote, zigbee))
+                remote: Remote | None = None, zigbee: Zigbee | None = None,
+                support: Support | None = None) -> ThreadingHTTPServer:
+    return _Server((host, port), make_handler(service, password, SetupAccess(service.store), updater, wifi, remote, zigbee,
+                                              support))

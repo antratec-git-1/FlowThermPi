@@ -332,6 +332,18 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .help-foot { padding: 8px 16px 32px; display: grid; justify-items: center; gap: 8px; text-align: center; }
 .help-foot .big-btn { flex: none; min-width: min(300px, 100%); }
 .help-foot p { margin: 0; font-size: 15px; color: var(--muted); max-width: 520px; }
+/* „Protokoll speichern“: small, at the very bottom – for when something goes wrong */
+.log-foot { padding: 0 16px 28px; display: flex; justify-content: center; }
+.log-foot button { color: var(--muted); font-size: 15px; padding: 8px 14px; touch-action: manipulation; }
+.logs-card h2 { margin-bottom: 8px; }
+.logs-card p { margin: 0 0 10px; }
+.logs-card .logs-email { display: grid; gap: 6px; margin: 4px 0 0; }
+.logs-card .logs-email span { display: flex; gap: 8px; flex-wrap: wrap; }
+.logs-card .logs-email input { flex: 1 1 220px; min-width: 0; }
+.logs-card .hint { margin: 6px 0 12px; }
+.logs-card .logs-detail { padding: 10px 12px; border-radius: 10px; background: var(--bg); margin: 0 0 12px; }
+.logs-card .logs-detail p { margin: 0 0 6px; }
+.logs-card .logs-detail .hint { margin: 0 0 8px; }
 .choices { display: grid; gap: 8px; margin-top: 10px; }
 .choice { display: grid; gap: 3px; text-align: left; padding: 10px 12px; border-radius: 12px; }
 .choice span { color: var(--muted); font-size: 14px; }

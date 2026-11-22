@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .service import ActionError
 
-log = logging.getLogger("heizapp")
+log = logging.getLogger(__name__)
 REQUEST, STATUS = "wifi-request.json", "wifi-status.json"
 COUNTRIES = {"DE": "Deutschland", "AT": "Österreich", "CH": "Schweiz", "LU": "Luxemburg", "LI": "Liechtenstein",
              "NL": "Niederlande", "BE": "Belgien", "FR": "Frankreich", "IT": "Italien", "DK": "Dänemark",
@@ -170,7 +170,11 @@ class Wifi:
     def scan(self, body: dict, local: str | None = None) -> dict:
         status = self._ask("scan", {"action": "scan", "country": check_country(body.get("country"))})
         if status.get("state") != "done":
+            log.warning("WLAN-Suche hat nicht geklappt: %s", _text(status.get("message"), 300) or "ohne Meldung")
             raise ActionError(_text(status.get("message"), 300) or "Die Suche hat nicht geklappt.", 502)
+        found = _networks(status.get("networks")) or []
+        log.info("WLAN-Suche: %d Netz(e)%s", len(found),
+                 (": " + ", ".join(f"„{n['ssid']}“ {n['signal']} %" for n in found[:12])) if found else "")
         return {"wifi": self.view(local)}
 
     def connect(self, body: dict, local: str | None = None) -> dict:
@@ -180,6 +184,7 @@ class Wifi:
                    "country": check_country(body.get("country"))}
         rid = self._begin("connect", request, job={"ssid": ssid, "state": "waiting", "message": None,
                                                    "started": _now(), "finished": None})
+        log.info("WLAN: verbinde mit „%s“%s", ssid, " (verstecktes Netz)" if request["hidden"] else "")   # no password
         threading.Thread(target=self._follow, args=(rid,), name="wifi-connect", daemon=True).start()
         return {"message": f"Verbinde mit „{ssid}“ …", "wifi": self.view(local)}
 
@@ -191,7 +196,9 @@ class Wifi:
             raise ActionError(ONLY_LINK.format(ssid=ssid), 409)
         status = self._ask("forget", {"action": "forget", "ssid": ssid})
         if status.get("state") != "done":
+            log.warning("WLAN „%s“ vergessen hat nicht geklappt: %s", ssid, _text(status.get("message"), 300))
             raise ActionError(_text(status.get("message"), 300) or "Das hat nicht geklappt.", 502)
+        log.info("WLAN: %s", _text(status.get("message"), 300) or f"„{ssid}“ vergessen")
         return {"message": _text(status.get("message"), 300), "wifi": self.view(local)}
 
     # ------------------------------------------------------------------ talking to the WLAN service
@@ -240,6 +247,7 @@ class Wifi:
             job = self._job
             if message and job and job["id"] == rid and job["state"] in ("waiting", "connecting"):
                 job.update(state="failed", message=message, finished=_now())
+                log.warning("WLAN: Verbinden mit „%s“ hat nicht geklappt – %s", job.get("ssid"), message)
             if self._owner == rid:
                 self._doing = self._owner = None
 
@@ -314,5 +322,7 @@ class Wifi:
                     job["state"] = "connecting"
                 elif state in ("done", "failed") and job["state"] != state:
                     job.update(state=state, message=_text(status.get("message"), 300), finished=at or _now())
+                    log.log(logging.INFO if state == "done" else logging.WARNING, "WLAN: %s",
+                            job["message"] or f"Verbinden mit „{job.get('ssid')}“ {'fertig' if state == 'done' else 'fehlgeschlagen'}")
                     if self._owner == job["id"]:   # in the same step, so the page never sees "done" but busy
                         self._doing = self._owner = None

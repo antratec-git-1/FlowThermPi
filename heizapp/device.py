@@ -16,11 +16,13 @@ from Thermotec's "Lokale Datenschnittstelle" (Ausgabe 04.09.2026):
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import time
 from datetime import datetime
 from typing import Callable
 
-from . import coap
+from . import coap, logs
 
 EMPTY_WINDOW = "00:00,00:00,0"
 WINDOWS_PER_DAY = 10
@@ -28,6 +30,7 @@ DAYS = range(1, 8)
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ERROR_TEXT = {-31000: "Vorgang abgelehnt", -31001: "Vorgang fehlgeschlagen", -31002: "Zeitüberschreitung"}
 MODES = {0: "manual", 1: "auto", 2: "boost", 3: "holiday", 4: "standby"}
+log = logging.getLogger(__name__)
 
 FAST_FIELDS = ("room_temp", "setpoint", "heater_state", "operating_mode", "open_window", "boost_remaining")
 SLOW_FIELDS = ("manual_sp", "antifrost_sp", "sp_limit", "auto_mode_en", "heating_plan", "boost_mode_en",
@@ -57,6 +60,7 @@ class Heater:
         self.host = host
         self.port = port
         self.token = token or None
+        logs.keep_secret(self.token)   # never in the log, whatever message it may end up in
         self.timeout = timeout
         self.retries = retries
         self._lock = threading.Lock()  # one request at a time per device
@@ -76,9 +80,13 @@ class Heater:
         if write and not self.token:
             raise ReadOnlyError("kein Token hinterlegt – Heizung ist nur lesbar")
         query = [f"token={self.token}"] if write else None
+        started = time.monotonic()
         with self._lock:
             code, payload = coap.request(self.host, "PUT" if write else "GET", "Json", body, query=query,
                                          port=self.port, timeout=self.timeout, retries=self.retries)
+        if write:   # the detailed log: every write, never the token
+            log.debug("%s: %s = %r → %s %s (%.2f s)", self.host, name, value, code,
+                      payload[:120].decode("utf-8", "replace") if payload else "(leer)", time.monotonic() - started)
         if code == "4.01":
             raise AuthError("Token abgelehnt – Token aus dem QR-Code prüfen")
         if not code.startswith("2."):
