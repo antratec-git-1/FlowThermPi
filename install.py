@@ -80,13 +80,18 @@ TAILSCALE_SOURCE = "/etc/apt/sources.list.d/tailscale.list"
 TAILSCALE_LOGIN_WAIT = 8                 # seconds „tailscale up“ waits; the login link comes within a second or two
 ZIGBEE_UNIT = f"/etc/systemd/system/{NAME}-zigbee.service"   # runs this script for Einrichtung › Zigbee
 ZIGBEE_PATH = f"/etc/systemd/system/{NAME}-zigbee.path"      # watches for the app's requests about it
-ZIGBEE_REQUEST = "zigbee-request.json"   # in DATA_DIR: placed by the app (Einrichtung › Zigbee) – just an action
+ZIGBEE_REQUEST = "zigbee-request.json"   # in DATA_DIR: placed by the app (Einrichtung › Zigbee) – an action, for
+                                         # „setup“ also the radio channel and the stick
 ZIGBEE_STATUS = "zigbee-status.json"     # in DATA_DIR: progress, result and what is installed, for the app
-ZIGBEE_ACTIONS = ("status", "install", "remove")
+ZIGBEE_ACTIONS = ("status", "install", "remove", "setup", "start", "stop")
 ZIGBEE_DIR = f"/opt/{NAME}-zigbee"       # Node.js, pnpm and Zigbee2MQTT – belongs to root
 ZIGBEE_DATA = f"/var/lib/{NAME}-zigbee"  # Zigbee2MQTT's own data (network key, paired devices) – kept on removal
 ZIGBEE_USER = f"{NAME}-zigbee"           # builds and runs Zigbee2MQTT, may use the USB stick (group dialout)
-ZIGBEE_SERVICE = f"{NAME}-zigbee2mqtt"   # Zigbee2MQTT itself – set up in a later step, once the stick is there
+ZIGBEE_SERVICE = f"{NAME}-zigbee2mqtt"   # Zigbee2MQTT itself – set up with „Zigbee einrichten“, once the stick is there
+ZIGBEE_SERVICE_UNIT = f"/etc/systemd/system/{ZIGBEE_SERVICE}.service"
+ZIGBEE_CONFIG = "configuration.yaml"     # in ZIGBEE_DATA: Zigbee2MQTT's settings – it adds the network key itself
+ZIGBEE_NETWORK = ("database.db", "database.db.backup", "coordinator_backup.json", "state.json")   # in ZIGBEE_DATA
+ZIGBEE_CHANNELS = range(11, 27)          # Zigbee's radio channels on 2.4 GHz; the app offers 15, 20 and 25
 ZIGBEE_ENV = f"/etc/{NAME}/zigbee2mqtt.env"   # Zigbee2MQTT's login at Mosquitto – only root reads it, systemd hands it over
 ZIGBEE_LOGIN = "zigbee-mqtt.json"        # in DATA_DIR: the app's login at Mosquitto
 ZIGBEE_INFO = "installed.json"           # in ZIGBEE_DIR: what is installed there
@@ -111,8 +116,10 @@ LOGS_KERNEL = 1500
 HIDDEN = "•••"
 # What a secret looks like – the same list as in heizapp/logs.py (this script cannot import the app), plus the lines of
 # NetworkManager, wpa_supplicant and nmcli that hold a WLAN password
-SECRET_KEYS = r"token|pop|psk|password|passwort|passwd|secret|auth_?key|auth_?url|login_?url|pin"
+SECRET_KEYS = r"token|pop|psk|password|passwort|passwd|secret|auth_?key|auth_?url|login_?url|pin|network_?key"
 SECRET_PATTERNS = (
+    # Zigbee's network key as a list of numbers – before key=value below, which would hide only its first number
+    (re.compile(r"(?i)((?<![A-Za-z0-9])network_?key[\"']?\s*[:=]\s*)\[[^\]\n]{0,400}\]"), rf"\1[{HIDDEN}]"),
     (re.compile(rf"(?i)(?<![A-Za-z0-9])({SECRET_KEYS})=[^\s&\"',;]+"), rf"\1={HIDDEN}"),
     (re.compile(rf"""(?i)(["'])((?:[A-Za-z0-9]+_)*(?:{SECRET_KEYS}))\1(\s*:\s*)(["'])(?:\\.|(?!\4).)*\4"""),
      rf"\1\2\1\3\4{HIDDEN}\4"),
@@ -373,6 +380,78 @@ ZIGBEE_ENV_TEMPLATE = """\
 ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://127.0.0.1:{port}
 ZIGBEE2MQTT_CONFIG_MQTT_USER={user}
 ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD={password}
+"""
+
+# Zigbee2MQTT runs as its own user, with nothing but its data folder to write to and the USB stick (group dialout).
+ZIGBEE2MQTT_UNIT_TEMPLATE = """\
+# Geschrieben von install.py (Einrichtung › Zigbee) – wird bei jedem Update neu geschrieben.
+# Zigbee2MQTT: spricht über den USB-Stick mit den Thermostaten und über Mosquitto mit der App.
+[Unit]
+Description=FlowThermPi – Zigbee2MQTT (Thermostate)
+Wants=mosquitto.service
+After=mosquitto.service network-online.target
+# without the stick it fails at every start: systemd stops trying after a while, the app shows why
+StartLimitIntervalSec=10min
+StartLimitBurst=10
+
+[Service]
+User={user}
+Group={user}
+SupplementaryGroups=dialout
+WorkingDirectory={base}/zigbee2mqtt
+Environment=NODE_ENV=production NO_COLOR=1 FORCE_COLOR=0
+Environment=ZIGBEE2MQTT_DATA={data}
+# no setup pages of its own: FlowThermPi has written its settings
+Environment=Z2M_ONBOARD_NO_SERVER=1
+Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT={port}
+EnvironmentFile={env}
+ExecStart={base}/node/bin/node index.js
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths={data}
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+# Written once, at „Zigbee einrichten“. Zigbee2MQTT rewrites the file at every start (without these comments) and puts
+# a random network key and network numbers in place of GENERATE – its own defaults are the same for everybody.
+ZIGBEE2MQTT_CONFIG_TEMPLATE = """\
+# Geschrieben von FlowThermPi (Einrichtung › Zigbee). Zigbee2MQTT schreibt diese Datei beim Start selbst neu und
+# ergänzt dabei einen zufälligen Netzwerkschlüssel – bitte nicht von Hand ändern.
+version: 5
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://127.0.0.1:{mqtt_port}
+serial:
+  port: '{port}'
+{stick}advanced:
+  channel: {channel}
+  network_key: GENERATE
+  pan_id: GENERATE
+  ext_pan_id: GENERATE
+  log_output:
+    - console
+  log_level: info
+  last_seen: ISO_8601
+  enable_external_js: false
+device_options:
+  retain: true
+frontend:
+  enabled: false
+homeassistant:
+  enabled: false
 """
 
 
@@ -707,6 +786,11 @@ def read_private(folder: int, name: str) -> str | None:
 def write_private(folder: int, name: str, text: str, system: System) -> None:
     """Replace folder/name: 0600 and owned by the service. Written to a new file that is renamed into
     place, so a planted link is replaced, never followed."""
+    write_owned(folder, name, text, system, NAME)
+
+
+def write_owned(folder: int, name: str, text: str, system: System, user: str) -> None:
+    """write_private for a file of another user (Zigbee2MQTT's settings in its own folder)."""
     tmp = f".{name}.{secrets.token_hex(6)}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
     try:
@@ -714,7 +798,7 @@ def write_private(folder: int, name: str, text: str, system: System) -> None:
             fh.write(text)
             fh.flush()
             os.fchmod(fh.fileno(), 0o600)
-            system.fchown(fh.fileno())
+            system.fchown(fh.fileno(), user)
         os.replace(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
     except BaseException:
         try:
@@ -888,6 +972,7 @@ def install(args: argparse.Namespace, system: System) -> None:
                                "Mit „--port 8080“ einen anderen Port wählen.")
         previous = switch_current(app, release)
         write_units(root, port)
+        zigbee_changed = refresh_zigbee2mqtt_unit(root)   # Zigbee2MQTT's service, if it is set up
         system.run("systemctl", "daemon-reload")
         system.run("systemctl", "enable", NAME)
         system.run("systemctl", "enable", "--now", f"{NAME}-update.path")
@@ -896,6 +981,8 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "enable", "--now", f"{NAME}-zigbee.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-logs.path")
         system.run("systemctl", "restart", NAME)
+        if zigbee_changed:
+            system.run("systemctl", "try-restart", ZIGBEE_SERVICE, check=False)
 
         if system.live:
             say("• Starte FlowThermPi …")
@@ -1656,16 +1743,25 @@ def remote_from_app(args: argparse.Namespace, system: System) -> None:
 # commit, its building blocks against the checksums in its own lockfile (pnpm install --frozen-lockfile). Zigbee2MQTT
 # is built (and later run) by its own user, never by root. Mosquitto listens only on this Pi and only with a password
 # – one for the app, one for Zigbee2MQTT, made anew at every installation and never shown or logged. Zigbee2MQTT itself
-# is started in a later step, once the stick is there; until then nothing of it runs.
-def zigbee_request(text: str) -> str:
-    """The app's request, checked: only the action counts, nothing else in it is used."""
+# runs only once it is set up („Zigbee einrichten“, with the stick plugged in): the app names the radio channel and the
+# stick, nothing else – the settings and the service come from the templates here, the network key from Zigbee2MQTT.
+def zigbee_request(text: str) -> dict:
+    """The app's request, checked: the action – for „setup“ also the radio channel and the stick –, nothing else."""
     try:
         raw = json.loads(text)
     except ValueError as exc:
         raise InstallError("Die Anfrage der App zu Zigbee ist unlesbar.") from exc
     if not isinstance(raw, dict) or raw.get("action") not in ZIGBEE_ACTIONS:
         raise InstallError("Unbekannte Anfrage zu Zigbee.")
-    return raw["action"]
+    request = {"action": raw["action"]}
+    if raw["action"] == "setup":
+        channel, port = raw.get("channel"), raw.get("port")
+        if isinstance(channel, bool) or not isinstance(channel, int) or channel not in ZIGBEE_CHANNELS:
+            raise InstallError("Bitte einen Funkkanal von 11 bis 26 wählen.")
+        if port is not None and not (isinstance(port, str) and re.fullmatch(r"[\w.:+-]{1,200}", port)):
+            raise InstallError("Unbekannter Zigbee-Stick.")
+        request.update(channel=channel, port=port)
+    return request
 
 
 def apt_env() -> dict:
@@ -1727,8 +1823,9 @@ def write_zigbee_info(base: Path, info: dict) -> None:
     write_system_file(base / ZIGBEE_INFO, (json.dumps(info, indent=1) + "\n").encode())
 
 
-def zigbee_state(system: System, root: Path) -> dict:
-    """What the app shows: the programs and their versions, Mosquitto, Zigbee2MQTT's service, the USB devices."""
+def zigbee_state(system: System, root: Path, folder: int | None = None) -> dict:
+    """What the app shows: the programs and their versions, Mosquitto, Zigbee2MQTT's service and network, the USB
+    devices. folder: the app's data folder – with it, the service's messages go out without the secrets root knows."""
     base = root / ZIGBEE_DIR.lstrip("/")
     info, arch = zigbee_info(base), debian_arch(system)
     return {"arch": arch or None, "arch_ok": arch in NODE_ARCH, "free_mb": free_mb(base),
@@ -1736,9 +1833,105 @@ def zigbee_state(system: System, root: Path) -> dict:
             "wanted": {part: value["version"] for part, value in ZIGBEE_PARTS.items()},
             "mosquitto": {"version": package_version(system, "mosquitto"),
                           "active": system.ok("systemctl", "is-active", "--quiet", "mosquitto")},
-            "service": {"present": (root / f"etc/systemd/system/{ZIGBEE_SERVICE}.service").exists(),
-                        "active": system.ok("systemctl", "is-active", "--quiet", ZIGBEE_SERVICE)},
+            "service": zigbee2mqtt_state(system, root, folder), "network": zigbee_network(root),
             "ports": serial_ports(root)}
+
+
+def zigbee2mqtt_state(system: System, root: Path, folder: int | None) -> dict:
+    """Zigbee2MQTT's service as systemd sees it – and while it does not run although it should, its last messages."""
+    present = (root / ZIGBEE_SERVICE_UNIT.lstrip("/")).exists()
+    props: dict[str, str] = {}
+    if present:
+        for line in system.run("systemctl", "show", ZIGBEE_SERVICE, "-p", "ActiveState", "-p", "SubState", "-p",
+                               "UnitFileState", "-p", "NRestarts", check=False).splitlines():
+            key, _, value = line.partition("=")
+            props[key.strip()] = value.strip()
+    restarts = props.get("NRestarts", "")
+    state = {"present": present, "enabled": props.get("UnitFileState") == "enabled",
+             "active": props.get("ActiveState") == "active",
+             "failed": props.get("ActiveState") == "failed" or props.get("SubState") == "auto-restart",
+             "restarts": int(restarts) if restarts.isdigit() else 0, "log": None}
+    if present and (state["failed"] or (state["enabled"] and not state["active"])):
+        text = system.run("journalctl", "-u", ZIGBEE_SERVICE, "-n", "40", "--no-pager", "-o", "cat", check=False)
+        known = known_secrets(root, folder) if folder is not None else set()
+        text = scrub(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text), known).strip()
+        state["log"] = text[-4000:] or None
+    return state
+
+
+def zigbee_data(root: Path, system: System | None = None) -> int | None:
+    """Zigbee2MQTT's data folder, opened without following a link – it belongs to ZIGBEE_USER, so nothing in it is
+    trusted. With system: created if missing (0700, owned by ZIGBEE_USER); without: None if it is missing."""
+    data = root / ZIGBEE_DATA.lstrip("/")
+    if system is not None:
+        data.parent.mkdir(parents=True, exist_ok=True)
+        return open_folder(data, system, user=ZIGBEE_USER, mode=0o700)
+    try:
+        return os.open(data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+
+
+def zigbee_config(folder: int) -> dict | None:
+    """What FlowThermPi needs from configuration.yaml – radio channel, stick, network key –, read line by line: we and
+    Zigbee2MQTT write it in YAML's block style. None if there is none."""
+    text = read_private(folder, ZIGBEE_CONFIG)
+    if text is None:
+        return None
+    found: dict = {"channel": None, "port": None, "network_key": None}
+    section = key = None
+    for line in text.splitlines():
+        content = line.strip()
+        if not content or content.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            section, key = content.split(":", 1)[0], None
+        elif indent == 2:
+            key, _, value = (part.strip() for part in content.partition(":"))
+            if section == "advanced" and key == "channel" and value.isdigit():
+                found["channel"] = int(value)
+            elif section == "serial" and key == "port":
+                found["port"] = value.strip("'\"") or None
+            elif section == "advanced" and key == "network_key" and value.startswith("["):
+                found["network_key"] = [int(n) for n in re.findall(r"\d+", value)]
+        elif section == "advanced" and key == "network_key" and (number := re.fullmatch(r"-\s*(\d{1,3})", content)):
+            found["network_key"] = (found["network_key"] or []) + [int(number.group(1))]
+    key = found["network_key"]
+    if key is not None and (len(key) != 16 or any(n > 255 for n in key)):
+        found["network_key"] = None
+    return found
+
+
+def zigbee_devices(folder: int) -> int:
+    """How many devices Zigbee2MQTT has paired – database.db holds one JSON object per line; the coordinator (the stick
+    itself) and groups do not count."""
+    count = 0
+    for line in (read_private(folder, "database.db") or "").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("ieeeAddr") and entry.get("type") not in ("Coordinator", "Group"):
+            count += 1
+    return count
+
+
+def zigbee_network(root: Path) -> dict:
+    """Zigbee2MQTT's network as far as the app shows it: set up, radio channel, stick, number of paired devices."""
+    folder, config, devices = zigbee_data(root), None, 0
+    if folder is not None:
+        try:
+            config, devices = zigbee_config(folder), zigbee_devices(folder)
+        except InstallError:   # a link or something else planted there: shown as not set up
+            config, devices = None, 0
+        finally:
+            os.close(folder)
+    port = zigbee2mqtt_unit_port(root)
+    if port is None and config and config["port"]:
+        port = config["port"].removeprefix("/dev/serial/by-id/") or None
+    return {"configured": config is not None, "channel": config["channel"] if config else None, "port": port,
+            "devices": devices}
 
 
 def fetch_file(url: str, dest: Path, report=None, limit: int = 300 << 20) -> None:
@@ -2139,7 +2332,7 @@ def zigbee_remove(system: System, root: Path, folder: int | None, keep_data: boo
     base = root / ZIGBEE_DIR.lstrip("/")
     info = zigbee_info(base)
     system.run("systemctl", "disable", "--now", ZIGBEE_SERVICE, check=False)
-    unit = root / f"etc/systemd/system/{ZIGBEE_SERVICE}.service"
+    unit = root / ZIGBEE_SERVICE_UNIT.lstrip("/")
     if unit.exists():
         unit.unlink()
         system.run("systemctl", "daemon-reload", check=False)
@@ -2161,6 +2354,118 @@ def zigbee_remove(system: System, root: Path, folder: int | None, keep_data: boo
         shutil.rmtree(root / ZIGBEE_DATA.lstrip("/"), ignore_errors=True)
         system.run("userdel", ZIGBEE_USER, check=False)
     return "Die Zigbee-Programme sind entfernt."
+
+
+def zigbee_stick(port: str) -> str:
+    """The stick's lines in configuration.yaml: SONOFF's Dongle Plus MG24 (chip EFR32MG24, firmware EmberZNet) speaks
+    „ember“ at 115200 baud, without hardware flow control. Other sticks are left to Zigbee2MQTT's own detection."""
+    if re.search(r"mg24|efr32", port, re.I):
+        return "  adapter: ember\n  rtscts: false\n  baudrate: 115200\n"
+    return ""
+
+
+def zigbee_port(root: Path, wanted: str | None) -> str:
+    """The stick to use (its name under /dev/serial/by-id): the one the app named – it must be plugged in – or the only
+    USB device with a serial port."""
+    ports = [port["id"] for port in serial_ports(root)]
+    if wanted is not None:
+        if wanted not in ports:
+            raise InstallError("Der gewählte Zigbee-Stick steckt nicht (mehr) am Pi.")
+        return wanted
+    if len(ports) == 1:
+        return ports[0]
+    raise InstallError("Bitte den Zigbee-Stick am Pi einstecken." if not ports else
+                       "Am Pi stecken mehrere USB-Geräte – bitte den Zigbee-Stick wählen.")
+
+
+def zigbee2mqtt_unit_port(root: Path) -> str | None:
+    """The stick Zigbee2MQTT's service uses (its name under /dev/serial/by-id); None if it is not set up."""
+    try:
+        text = (root / ZIGBEE_SERVICE_UNIT.lstrip("/")).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found = re.search(r"^Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/([\w.:+-]{1,200})$", text, re.M)
+    return found.group(1) if found else None
+
+
+def write_zigbee2mqtt_unit(root: Path, port: str) -> bool:
+    """Zigbee2MQTT's service, with this stick (the setting from the service wins over the one in configuration.yaml).
+    True if the unit changed."""
+    path = root / ZIGBEE_SERVICE_UNIT.lstrip("/")
+    text = ZIGBEE2MQTT_UNIT_TEMPLATE.format(user=ZIGBEE_USER, base=ZIGBEE_DIR, data=ZIGBEE_DATA, env=ZIGBEE_ENV,
+                                            port=f"/dev/serial/by-id/{port}")
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return False
+    except OSError:
+        pass
+    write_system_file(path, text.encode())
+    return True
+
+
+def refresh_zigbee2mqtt_unit(root: Path) -> bool:
+    """At an update of FlowThermPi: Zigbee2MQTT's service – if it is set up – from this version's template."""
+    port = zigbee2mqtt_unit_port(root)
+    return port is not None and write_zigbee2mqtt_unit(root, port)
+
+
+def zigbee_setup(system: System, root: Path, request: dict) -> str:
+    """„Zigbee einrichten“: Zigbee2MQTT's settings – radio channel, stick, a network of its own with a random key – and
+    its service, started now and at every start of the Pi. Again with the same channel, the network and the paired
+    devices stay (another stick, a broken service). Another channel means a new network: only while no device is
+    paired, as they would all have to be paired again."""
+    base = root / ZIGBEE_DIR.lstrip("/")
+    info = zigbee_info(base)
+    if not (info.get("complete") is True and zigbee2mqtt_ready(base, info)):
+        raise InstallError("Bitte zuerst die Zigbee-Programme installieren.")
+    if not (root / ZIGBEE_ENV.lstrip("/")).is_file():
+        raise InstallError("Die Anmeldung von Zigbee2MQTT bei Mosquitto fehlt – bitte die Zigbee-Programme noch einmal "
+                           "installieren.")
+    channel, port = request["channel"], zigbee_port(root, request.get("port"))
+    folder = zigbee_data(root, system)
+    try:
+        config = zigbee_config(folder)
+        if config is not None and config["channel"] == channel:
+            say(f"• Funkkanal {channel} bleibt – das Zigbee-Netz und die angelernten Geräte auch")
+        else:
+            devices = zigbee_devices(folder) if config is not None else 0
+            if devices:
+                raise InstallError(f"Den Funkkanal kann man nur wechseln, solange kein Gerät angelernt ist – sonst "
+                                   f"müsste man alle neu anlernen. Angelernt: {devices}. Bitte zuerst alle entfernen.")
+            system.run("systemctl", "stop", ZIGBEE_SERVICE, check=False)   # before its files go
+            for name in (*ZIGBEE_NETWORK, ZIGBEE_CONFIG):
+                try:
+                    os.unlink(name, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+            write_owned(folder, ZIGBEE_CONFIG, ZIGBEE2MQTT_CONFIG_TEMPLATE.format(
+                mqtt_port=MQTT_PORT, port=f"/dev/serial/by-id/{port}", stick=zigbee_stick(port), channel=channel),
+                system, ZIGBEE_USER)
+            say(f"• Neues Zigbee-Netz auf Funkkanal {channel} – den Schlüssel würfelt Zigbee2MQTT beim ersten Start")
+    finally:
+        os.close(folder)
+    write_zigbee2mqtt_unit(root, port)
+    say(f"• Dienst {ZIGBEE_SERVICE} mit dem Stick {port}")
+    system.run("systemctl", "daemon-reload")
+    system.run("systemctl", "reset-failed", ZIGBEE_SERVICE, check=False)
+    system.run("systemctl", "enable", ZIGBEE_SERVICE)
+    try:
+        system.run("systemctl", "restart", ZIGBEE_SERVICE)
+    except CommandError as exc:
+        raise InstallError(f"Zigbee2MQTT startet nicht ({first_line(exc.detail) or 'ohne Meldung'}).") from None
+    return f"Zigbee2MQTT ist eingerichtet (Funkkanal {channel}) und startet."
+
+
+def zigbee_switch(system: System, root: Path, on: bool) -> str:
+    """„Starten“ and „Anhalten“: Zigbee2MQTT's service – also for the next start of the Pi."""
+    if not (root / ZIGBEE_SERVICE_UNIT.lstrip("/")).exists():
+        raise InstallError("Zigbee2MQTT ist noch nicht eingerichtet.")
+    if on:
+        system.run("systemctl", "reset-failed", ZIGBEE_SERVICE, check=False)   # after too many failed starts
+        system.run("systemctl", "enable", "--now", ZIGBEE_SERVICE)
+        return "Zigbee2MQTT startet."
+    system.run("systemctl", "disable", "--now", ZIGBEE_SERVICE)
+    return "Zigbee2MQTT ist angehalten."
 
 
 def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
@@ -2191,16 +2496,21 @@ def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
             write_private(folder, ZIGBEE_STATUS, json.dumps(status, ensure_ascii=False, indent=1) + "\n", system)
 
         try:
-            status["action"] = action = zigbee_request(text)
+            request = zigbee_request(text)
+            status["action"] = action = request["action"]
             if action != "status":
                 report()   # the app shows at once that it has begun
                 with install_lock(root / ZIGBEE_DIR.lstrip("/")):
                     if action == "install":
                         zigbee_install(system, root, folder, status, report)
-                    else:
+                    elif action == "remove":
                         status["phase"] = "remove"
                         report()
                         status["message"] = zigbee_remove(system, root, folder)
+                    elif action == "setup":
+                        status["message"] = zigbee_setup(system, root, request)
+                    else:
+                        status["message"] = zigbee_switch(system, root, action == "start")
                 say(f"✓ {status['message']}")
             status["state"] = "done"
         except InstallError as exc:   # reported to the app; not an error of the service itself
@@ -2211,7 +2521,7 @@ def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
                 status.update(state="failed", message=f"Unerwarteter Fehler – Meldungen: journalctl -u {NAME}-zigbee")
             status.update(phase=None, step=None, progress=None, finished=now_text())
             try:
-                status["zigbee"] = zigbee_state(system, root)
+                status["zigbee"] = zigbee_state(system, root, folder)
             finally:
                 report()
     finally:
@@ -2245,8 +2555,8 @@ def scrub(text: str, known: set[str]) -> str:
 
 
 def known_secrets(root: Path, folder: int) -> set[str]:
-    """Values that must not leave the Pi: the heaters' tokens, the WLAN passwords, the MQTT logins, the app's password.
-    Files in the data folder are read without following a link (read_private)."""
+    """Values that must not leave the Pi: the heaters' tokens, the WLAN passwords, the MQTT logins, the app's password,
+    Zigbee's network key. Files in the data folders are read without following a link (read_private)."""
     found: set[str] = set()
 
     def take(value) -> None:
@@ -2263,6 +2573,17 @@ def known_secrets(root: Path, folder: int) -> set[str]:
         take(login.get("password") if isinstance(login, dict) else None)
     except ValueError:
         pass
+    zigbee = zigbee_data(root)   # the network key, in the forms it could show up in
+    if zigbee is not None:
+        try:
+            key = (zigbee_config(zigbee) or {}).get("network_key")
+        except InstallError:
+            key = None
+        finally:
+            os.close(zigbee)
+        if key:
+            for form in (",".join(map(str, key)), ", ".join(map(str, key)), bytes(key).hex(), bytes(key).hex().upper()):
+                take(form)
     files = [(root / ZIGBEE_ENV.lstrip("/"), r"^ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=(.+)$"),
              (root / "etc/default" / NAME, r"^\s*(?:export\s+)?HEIZAPP_PASSWORD=(.+)$")]
     for folder_name in ("etc/NetworkManager/system-connections", "etc/wpa_supplicant"):
@@ -2514,7 +2835,7 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
             if path.exists():
                 path.unlink()
         system.run("systemctl", "daemon-reload", check=False)
-        left = [root / name.lstrip("/") for name in (ZIGBEE_DIR, MOSQUITTO_CONF, ZIGBEE_ENV)]
+        left = [root / name.lstrip("/") for name in (ZIGBEE_DIR, MOSQUITTO_CONF, ZIGBEE_ENV, ZIGBEE_SERVICE_UNIT)]
         if args.purge:   # also what „Entfernen“ in the app kept: the paired thermostats and their user
             left.append(root / ZIGBEE_DATA.lstrip("/"))
         if any(path.exists() for path in left) or (args.purge and system.user_exists(ZIGBEE_USER)):

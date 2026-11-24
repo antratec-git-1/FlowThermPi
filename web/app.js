@@ -69,7 +69,7 @@ async function api(method, url, body, retried = false) {
     if (await unlockSetup(true)) return api(method, url, body, true);
     throw new Error("Abgebrochen – ohne PIN lässt sich die Einrichtung nicht ändern.");
   }
-  if (!res.ok) throw new Error(data.error || `Fehler ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `Fehler ${res.status}`), { status: res.status });
   return data;
 }
 
@@ -712,6 +712,7 @@ function renderDialog() {
   el.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
     <h2 id="dialog-title">${esc(d.title)}</h2>
     ${d.text ? `<p>${esc(d.text)}</p>` : ""}
+    ${d.html || ""}
     ${d.fields.map(f => `<label>${esc(f.label)}<input data-dialog-field="${esc(f.id)}" type="password" inputmode="numeric"
       pattern="[0-9]*" maxlength="8" autocomplete="off" ${d.busy ? "disabled" : ""}></label>`).join("")}
     <p class="dialog-error" ${d.error ? "" : "hidden"}>${esc(d.error)}</p>
@@ -2430,31 +2431,49 @@ function renderRemote(el) {
 }
 
 // ------------------------------------------------------------------ Zigbee ("Einrichtung › Zigbee")
-let zigbee = null;          // what api/zigbee answered: programs (versions, Mosquitto, USB devices), job, busy
+let zigbee = null;          // what api/zigbee answered: programs (versions, Mosquitto, Zigbee2MQTT, USB devices), job, busy, net
 let zigbeeError = null;     // api/zigbee could not be loaded
-let zigbeePending = null;   // a button pressed here whose answer is still out: "refresh" | "install" | "remove"
+let zigbeePending = null;   // a button pressed here whose answer is still out: "refresh" | "install" | "remove" | "setup" | "start" | "stop"
+let zigbeeNetPending = null;   // the same for the network: "search" | "unsearch" | the IEEE address of a device being removed
 let zigbeeSeen = null;      // id of the job whose failure was closed with "OK"
-let zigbeeTimer = null;     // polls every 2 s while the Pi installs or removes
+let zigbeeTimer = null;     // looks every 2 s while something changes by itself (installing, searching, starting) …
+let zigbeeEvery = 0;        // … else every 15 s
+let zigbeeAsked = 0;        // when the Pi itself was last asked („Neu prüfen“)
 const ZIGBEE_PHASES = { check: "Prüfe den Pi", mosquitto: "Richte Mosquitto ein", node: "Lade Node.js", pnpm: "Lade pnpm",
   zigbee2mqtt: "Lade Zigbee2MQTT", dependencies: "Lade die Bausteine von Zigbee2MQTT", build: "Baue Zigbee2MQTT",
   finish: "Räume auf", remove: "Entferne die Programme" };
+const ZIGBEE_DOING = { setup: "richte ein …", start: "starte …", stop: "halte an …" };
 
 function zigbeeRunning() { return !!(zigbee && zigbee.job && ["waiting", "running"].includes(zigbee.job.state)); }
 function zigbeeBusy() {     // a quick look at the Pi ("status") does not count: the server waits for it
   return !!zigbeePending || !!(zigbee && zigbee.busy && zigbee.busy !== "status") || zigbeeRunning();
 }
+function zigbeeStarting() { // Zigbee2MQTT should run, Mosquitto is there, but Zigbee2MQTT has not said "online" yet
+  const p = zigbee && zigbee.programs, net = zigbee && zigbee.net;
+  return !!(p && net && p.service.present && (p.service.enabled || p.service.active) && !p.service.failed &&
+    net.broker === "connected" && net.bridge !== "online");
+}
+function zigbeeLive() {
+  if (zigbeeRunning() || zigbeeStarting()) return true;
+  const net = zigbee && zigbee.net;
+  return !!(net && ((net.search && net.search.active) ||
+    (net.devices || []).some(d => d.interview === "pending" || d.interview === "running")));
+}
 
 async function loadZigbee() {
   try { zigbee = await api("GET", "api/zigbee"); zigbeeError = null; }
   catch (e) { zigbeeError = e.message; }
+  // still not running after half a minute: ask the Pi – if it fails, systemd knows and the page shows its messages
+  if (zigbeeStarting() && !zigbeeBusy() && Date.now() - zigbeeAsked > 30000) zigbeeDo("refresh", { quiet: true });
   followZigbee();
   render();
 }
 
 function followZigbee() {
-  const on = zigbeeRunning();
-  if (on && !zigbeeTimer) zigbeeTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "zigbee") loadZigbee(); }, 2000);
-  if (!on && zigbeeTimer) { clearInterval(zigbeeTimer); zigbeeTimer = null; }
+  const every = !(zigbee && zigbee.supported) ? 0 : zigbeeLive() ? 2000 : 15000;
+  if (zigbeeTimer && every !== zigbeeEvery) { clearInterval(zigbeeTimer); zigbeeTimer = null; }
+  if (every && !zigbeeTimer) zigbeeTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "zigbee") loadZigbee(); }, every);
+  zigbeeEvery = every;
 }
 
 async function openZigbeeTab() {  // fresh state from the Pi: the stick may have been plugged in since
@@ -2462,17 +2481,19 @@ async function openZigbeeTab() {  // fresh state from the Pi: the stick may have
   if (zigbee && zigbee.supported && !zigbeeBusy()) zigbeeDo("refresh", { quiet: true });
 }
 
-async function zigbeeDo(action, { quiet = false } = {}) {
+async function zigbeeDo(action, { quiet = false, path = action, body } = {}) {
   zigbeePending = action;
+  if (action === "refresh") zigbeeAsked = Date.now();
   render();
   try {
-    const res = await api("POST", "api/zigbee/" + action);
+    const res = await api("POST", "api/zigbee/" + path, body);
     zigbee = res.zigbee;
     if (!quiet && res.message) toast(res.message);
   } catch (e) {
     if (!quiet || action !== "refresh") toast(e.message, true);
     try { zigbee = await api("GET", "api/zigbee"); } catch (_) { /* shown with the next look */ }
   }
+  if (action !== "refresh") zigbeeAsked = Date.now();   // the answer brought the Pi's state along
   zigbeePending = null;
   followZigbee();
   invalidate();
@@ -2503,6 +2524,84 @@ async function zigbeeRemove() {
   zigbeeDo("remove", { quiet: true });
 }
 
+function zigbeeSticks(p) { return p.ports.filter(x => x.stick); }
+
+async function zigbeeSetup() {
+  const p = zigbee && zigbee.programs;
+  if (!p) return;
+  const sticks = zigbeeSticks(p), change = p.service.present;
+  const port = sticks.length === 1 ? sticks[0].id : p.network.port;
+  const channel = await ask({ title: change ? "Funkkanal ändern" : "Zigbee einrichten",
+    text: "Zigbee funkt wie das WLAN auf 2,4 GHz. Damit sich beide nicht stören, bekommt Zigbee einen eigenen Funkkanal. " +
+      "Welchen Kanal dein WLAN nutzt, zeigt die FRITZ!Box unter WLAN › Funkkanal.",
+    html: `<ul class="zigbee-channels">
+        <li><b>Kanal 25</b> passt, wenn dein WLAN auf Kanal 1 bis 10 funkt – das ist meistens so.</li>
+        <li><b>Kanal 15</b> passt, wenn dein WLAN auf Kanal 7 bis 13 funkt.</li>
+        <li><b>Kanal 20</b> passt, wenn dein WLAN auf Kanal 1 bis 5 oder 12 bis 13 funkt.</li>
+      </ul>
+      <p class="hint">Gibt es im Haus Philips Hue, nimm einen anderen Kanal als die Hue-Bridge – welchen sie nutzt, steht in der Hue-App.
+        ${change ? "Ein neuer Kanal heißt neues Zigbee-Netz: Das geht nur, solange kein Gerät angelernt ist."
+          : "Später lässt sich der Kanal nur ändern, solange noch kein Gerät angelernt ist."}</p>`,
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Kanal 15", value: 15 }, { label: "Kanal 20", value: 20 },
+      { label: "Kanal 25", value: 25, cls: "primary" }] });
+  if (!channel) return;
+  zigbeeDo("setup", { body: { channel, port: port || null } });
+}
+
+async function zigbeeStop() {
+  const yes = await ask({ title: "Zigbee2MQTT anhalten?",
+    text: "Solange Zigbee2MQTT angehalten ist, erreicht der Pi keine Zigbee-Geräte. Die Thermostate behalten so lange ihre " +
+      "letzte Einstellung. Zigbee2MQTT bleibt auch nach einem Neustart des Pi aus, bis du hier „Starten“ drückst.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Anhalten", value: "yes", cls: "danger-solid" }] });
+  if (yes) zigbeeDo("stop", { path: "service", body: { on: false } });
+}
+
+async function zigbeeSearch(on) {
+  zigbeeNetPending = on ? "search" : "unsearch";
+  render();
+  try { zigbee = (await api("POST", "api/zigbee/search", { on })).zigbee; }
+  catch (e) { toast(e.message, true); }
+  zigbeeNetPending = null;
+  followZigbee();
+  invalidate();
+  render();
+}
+
+async function zigbeeRemoveDevice(ieee, force) {   // null when done, else the error
+  zigbeeNetPending = ieee;
+  render();
+  let error = null;
+  try {
+    const res = await api("POST", `api/zigbee/devices/${ieee}/remove`, { force });
+    zigbee = res.zigbee;
+    if (res.message) toast(res.message);
+  } catch (e) { error = e; }
+  zigbeeNetPending = null;
+  invalidate();
+  render();
+  return error;
+}
+
+async function zigbeeForget(ieee) {
+  const d = ((zigbee && zigbee.net && zigbee.net.devices) || []).find(x => x.ieee === ieee);
+  if (!d) return;
+  const it = d.thermostat ? "das Thermostat" : "das Gerät";
+  const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : "Gerät entfernen?",
+    text: `Der Pi meldet ${it} im Zigbee-Netz ab. Willst du es später wieder nutzen, lernst du es einfach neu an.`,
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  const error = await zigbeeRemoveDevice(ieee, false);
+  if (!error) return;
+  if (![502, 504].includes(error.status)) { toast(error.message, true); return; }   // forcing only helps if the device did not answer
+  const force = await ask({ title: "Trotzdem entfernen?",
+    text: `${error.message} Du kannst ${it} trotzdem entfernen: Dann vergisst der Pi es, ohne auf seine Antwort zu warten. ` +
+      "Meldet es sich später noch einmal, erscheint es wieder in der Liste.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Trotzdem entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!force) return;
+  const again = await zigbeeRemoveDevice(ieee, true);
+  if (again) toast(again.message, true);
+}
+
 function zigbeeSize(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " GB" : mb + " MB"; }
 
 function zigbeeStateText(p) {   // [dot, words]
@@ -2521,7 +2620,7 @@ function zigbeePortName(id) {   // usb-SONOFF_SONOFF_Dongle_Plus_MG24_8a2c1d0e-i
 }
 
 function zigbeeStickText(p) {
-  const sticks = p.ports.filter(x => x.stick);
+  const sticks = zigbeeSticks(p);
   if (sticks.length) return "eingesteckt – " + sticks.map(x => zigbeePortName(x.id)).join(", ");
   if (p.ports.length) return "nicht erkannt (eingesteckt: " + p.ports.map(x => zigbeePortName(x.id)).join(", ") + ")";
   return "nicht eingesteckt";
@@ -2571,8 +2670,6 @@ function zigbeeStatusHTML(z) {
     body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b>
         ${!p.arch_ok && p.arch ? `<span class="muted">(dieser hat „${esc(p.arch)}“)</span>` : ""}</span></li></ul>
       ${p.arch_ok ? zigbeeFactsHTML(p) : ""}
-      ${p.complete && !p.service.present ? `<p class="hint">Die Programme sind bereit. Zigbee2MQTT startet erst, wenn der Stick
-        eingerichtet ist – das kommt mit einem der nächsten Updates.</p>` : ""}
       ${z.error ? `<p class="error-text">${esc(z.error)}</p>` : ""}
       <div class="row">${zigbeeButtonsHTML(p, busy)}</div>`;
   }
@@ -2587,6 +2684,111 @@ function zigbeeStatusHTML(z) {
       ${j.details ? `<details><summary>Meldungen des Pi</summary><pre class="zigbee-log">${esc(j.details)}</pre></details>` : ""}
       <button class="small" data-action="zigbee-ok">OK</button></div>` : ""}
     ${z.at && !zigbeeRunning() ? `<p class="hint">Stand ${esc(fmtTime(z.at))}</p>` : ""}
+  </div>`;
+}
+
+function zigbeeNetState(p, net) {   // [dot, words] for Zigbee2MQTT
+  const s = p.service;
+  if (s.failed) return ["offline", "Startet nicht"];
+  if (!s.enabled && !s.active) return ["", "Angehalten"];
+  if (net.broker === "error") return ["offline", "Keine Verbindung zu Mosquitto"];
+  if (net.broker !== "connected") return ["on", "Verbinde mit Mosquitto …"];
+  if (net.bridge === "online") return ["ok", "Läuft"];
+  return ["on", "Startet …"];
+}
+
+function zigbeeNetHTML(z) {
+  const p = z.programs, net = z.net || {};
+  if (!p || !p.complete || zigbeeRunning()) return "";
+  const s = p.service, n = p.network, busy = zigbeeBusy(), sticks = zigbeeSticks(p);
+  const b = (action, label, cls = "") => `<button class="${cls}" data-action="zigbee-${action}" ${busy ? "disabled" : ""}>${
+    zigbeePending === action ? ZIGBEE_DOING[action] : label}</button>`;
+  let body;
+  if (!s.present) {
+    body = sticks.length
+      ? `<p>Der Stick steckt (${esc(zigbeePortName(sticks[0].id))}). Jetzt noch einen Funkkanal wählen – dann startet
+          Zigbee2MQTT, und die Thermostate lassen sich anlernen.</p>
+        <div class="row">${b("setup", "Zigbee einrichten …", "primary")}</div>`
+      : `<p>Bitte den Zigbee-Stick (SONOFF Dongle Plus MG24) in einen USB-Anschluss des Pi stecken – am besten über ein kurzes
+          USB-Verlängerungskabel, ein Stück weg vom Pi. Dann oben „Neu prüfen“ drücken.</p>`;
+  } else {
+    const [dot, words] = zigbeeNetState(p, net);
+    const online = net.bridge === "online", count = online ? (net.devices || []).length : n.devices;
+    const stickIn = !n.port || p.ports.some(x => x.id === n.port);
+    const buttons = s.failed ? b("start", "Neu starten", "primary") + b("stop", "Anhalten")
+      : s.enabled || s.active ? b("stop", "Anhalten") : b("start", "Starten", "primary");
+    body = `<ul class="net-list"><li><span class="dot ${dot}"></span><span class="hname"><b>${esc(words)}</b></span></li></ul>
+      <dl class="about-facts">
+        <dt>Funkkanal</dt><dd>${esc(String(n.channel || net.channel || "–"))}</dd>
+        <dt>Stick</dt><dd>${n.port ? esc(zigbeePortName(n.port)) : "–"}${stickIn ? "" : ` <span class="tag bad">steckt nicht</span>`}</dd>
+        <dt>Angelernt</dt><dd>${count === 1 ? "1 Gerät" : `${count} Geräte`}</dd>
+        ${net.version ? `<dt>Zigbee2MQTT</dt><dd>${esc(net.version)}</dd>` : ""}
+      </dl>
+      ${zigbeeStarting() ? `<p class="hint">Das dauert etwa eine halbe Minute.</p>` : ""}
+      ${s.failed ? `<p class="error-text">Zigbee2MQTT startet nicht${stickIn ? "" : " – der Stick steckt nicht"}.</p>` : ""}
+      ${s.log ? `<details><summary>Meldungen von Zigbee2MQTT</summary><pre class="zigbee-log">${esc(s.log)}</pre></details>` : ""}
+      ${net.broker === "error" && net.problem ? `<p class="error-text">${esc(net.problem)}</p>` : ""}
+      <div class="row">${buttons}${count === 0 && !s.failed ? b("setup", "Funkkanal ändern …") : ""}</div>`;
+  }
+  return `<div class="card zigbee-net"><div class="card-head"><h2>Zigbee-Netz</h2></div>${body}</div>`;
+}
+
+function zigbeeSignal(q) { return q == null ? "" : q >= 100 ? "Funk gut" : q >= 40 ? "Funk mittel" : "Funk schwach"; }
+
+function zigbeeDeviceState(d) {   // [dot, words]
+  if (d.interview === "pending" || d.interview === "running") return ["on", "wird angelernt …"];
+  if (d.interview === "failed") return ["offline", "Anlernen hat nicht geklappt – bitte noch einmal suchen und am Thermostat die mittlere Taste 2 Sekunden drücken"];
+  if (!d.supported) return ["offline", "wird von Zigbee2MQTT nicht unterstützt"];
+  return ["ok", "bereit"];
+}
+
+function zigbeeDeviceHTML(d) {
+  const [dot, words] = zigbeeDeviceState(d);
+  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : "Unbekanntes Gerät");
+  const keep = s => s.replace(/ /g, " ");   // "20,5 °C" and the like stay on one line
+  const facts = [words, d.battery != null ? keep(`Batterie ${Math.round(d.battery)} %`) : "", keep(zigbeeSignal(d.signal)),
+    d.temperature != null ? keep(deg(d.temperature)) : ""].filter(Boolean).join(" · ");
+  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(model)}</b>
+      ${d.new ? `<span class="tag ok">neu</span>` : ""}
+      <span class="muted zigbee-facts">${esc(facts)}</span>
+      <span class="muted zigbee-ieee">${esc(d.ieee)}</span></span>
+    <button class="small" data-action="zigbee-forget" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
+      zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button></li>`;
+}
+
+function zigbeeSearchHTML(net) {
+  const s = net.search || {};
+  if (s.active) {
+    const left = `${Math.floor(s.left / 60)}:${String(s.left % 60).padStart(2, "0")}`;
+    return `<div class="wifi-note zigbee-search">
+      <p class="searching"><b>Suche läuft – noch ${left}</b></p>
+      <ol class="zigbee-steps">
+        <li>Batterien ins Thermostat legen, falls sie noch nicht drin sind.</li>
+        <li>Das Drehrad unter 5 °C drehen, bis das Thermostat aus ist.</li>
+        <li>Die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt.</li>
+        <li>Warten: Nach etwa einer Minute erscheint es unten in der Liste.</li>
+      </ol>
+      <p class="hint">Mehrere Thermostate gehen nacheinander in derselben Suche. Klappt es nicht, das Thermostat zum Anlernen
+        näher an den Pi bringen.</p>
+      <button class="small" data-action="zigbee-unsearch" ${zigbeeNetPending ? "disabled" : ""}>${
+        zigbeeNetPending === "unsearch" ? "beende …" : "Suche beenden"}</button>
+    </div>`;
+  }
+  return `<p>„Thermostate suchen“ öffnet das Zigbee-Netz für ${Math.round((s.seconds || 180) / 60)} Minuten, und die App sagt dir,
+      was am Thermostat zu tun ist.</p>
+    <div class="row"><button class="primary" data-action="zigbee-search" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
+      zigbeeNetPending === "search" ? "öffne das Netz …" : "Thermostate suchen"}</button></div>`;
+}
+
+function zigbeeDevicesHTML(z) {
+  const p = z.programs, net = z.net;
+  if (!p || !net || !p.complete || !p.service.present || zigbeeRunning()) return "";
+  const online = net.bridge === "online", devices = net.devices || [];
+  return `<div class="card zigbee-devices"><div class="card-head"><h2>Thermostate</h2></div>
+    ${online ? zigbeeSearchHTML(net) : `<p class="muted">Thermostate suchen geht, sobald Zigbee2MQTT läuft.</p>`}
+    ${devices.length ? `<ul class="net-list zigbee-list">${devices.map(zigbeeDeviceHTML).join("")}</ul>`
+      : online ? `<p class="muted">Noch kein Thermostat angelernt.</p>` : ""}
+    ${devices.length ? `<p class="hint">Räume und Heizpläne für die Thermostate kommen mit einem der nächsten Updates.</p>` : ""}
   </div>`;
 }
 
@@ -2610,7 +2812,7 @@ function renderZigbee(el) {
   if (!z) return setHTML(el, `<div class="card"><p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p></div>`);
   if (!z.supported) return setHTML(el, `<div class="card"><p>Zigbee gibt es nur, wenn FlowThermPi mit dem
     Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
-  setHTML(el, zigbeeStatusHTML(z) + zigbeeAboutHTML());
+  setHTML(el, zigbeeStatusHTML(z) + zigbeeNetHTML(z) + zigbeeDevicesHTML(z) + zigbeeAboutHTML());
 }
 
 // ------------------------------------------------------------------ events
@@ -2729,6 +2931,12 @@ document.addEventListener("click", e => {
     case "zigbee-install": return zigbeeInstall();
     case "zigbee-remove": return zigbeeRemove();
     case "zigbee-ok": zigbeeSeen = zigbee && zigbee.job && zigbee.job.id; return render();
+    case "zigbee-setup": return zigbeeSetup();
+    case "zigbee-start": return zigbeeDo("start", { path: "service", body: { on: true } });
+    case "zigbee-stop": return zigbeeStop();
+    case "zigbee-search": return zigbeeSearch(true);
+    case "zigbee-unsearch": return zigbeeSearch(false);
+    case "zigbee-forget": return zigbeeForget(t.closest("[data-ieee]").dataset.ieee);
     case "logs-email": return logsEmailSave();
     case "logs-detail": return logsSettings({ detail: t.dataset.on === "1" });
   }

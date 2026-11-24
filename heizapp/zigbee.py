@@ -1,11 +1,14 @@
-"""Zigbee (Einrichtung › Zigbee): die Zusatzprogramme für die SONOFF-Thermostate installieren und entfernen.
+"""Zigbee (Einrichtung › Zigbee): die Zusatzprogramme für die SONOFF-Thermostate, das Zigbee-Netz, Thermostate anlernen.
 
 Die Thermostate funken mit Zigbee. Dafür braucht der Pi drei Programme: Zigbee2MQTT (spricht über den USB-Stick mit
 den Thermostaten), Mosquitto (reicht die Nachrichten zwischen Zigbee2MQTT und dieser App weiter) und Node.js (darauf
 läuft Zigbee2MQTT). Die App darf am System nichts ändern. Sie legt nur zigbee-request.json in ihren Datenordner, darin
-steht nichts als eine von drei Aktionen (status, install, remove), und flowthermpi-zigbee.path startet daraufhin als
-root „install.py --zigbee“. Welche Versionen das lädt, steht fest in install.py; jede Datei wird nach dem Laden
-geprüft. Fortschritt und Ergebnis schreibt es nach zigbee-status.json, am Ende immer mit dem Stand der Programme.
+steht eine Aktion (status, install, remove, setup, start, stop) – bei „setup“ dazu der Funkkanal und der Stick –, und
+flowthermpi-zigbee.path startet daraufhin als root „install.py --zigbee“. Welche Versionen das lädt, steht fest in
+install.py; jede Datei wird nach dem Laden geprüft. Fortschritt und Ergebnis schreibt es nach zigbee-status.json, am
+Ende immer mit dem Stand der Programme und des Dienstes von Zigbee2MQTT.
+
+Läuft Zigbee2MQTT, redet die App über Mosquitto direkt mit ihm (heizapp.zigbee_net): Thermostate suchen und entfernen.
 
 Den Reiter gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_ZIGBEE_DIR.
@@ -23,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .service import ActionError
+from .zigbee_net import IEEE, ZigbeeNet
 
 log = logging.getLogger(__name__)
 REQUEST, STATUS = "zigbee-request.json", "zigbee-status.json"
@@ -34,7 +38,12 @@ TIMES = {"install": 65 * 60.0, "remove": 10 * 60.0}   # systemd stops the root s
 MAX_STATUS = 1 << 20
 BUSY = {"install": "Die Zigbee-Programme werden gerade installiert – das dauert eine Weile.",
         "remove": "Die Zigbee-Programme werden gerade entfernt – bitte einen Moment warten.",
-        "status": "Einen Moment bitte – der Pi wird gerade gefragt."}
+        "status": "Einen Moment bitte – der Pi wird gerade gefragt.",
+        "setup": "Zigbee wird gerade eingerichtet – einen Moment bitte.",
+        "start": "Zigbee2MQTT wird gerade gestartet – einen Moment bitte.",
+        "stop": "Zigbee2MQTT wird gerade angehalten – einen Moment bitte."}
+FAILED = {"status": "Das Nachsehen hat nicht geklappt.", "setup": "Das Einrichten hat nicht geklappt.",
+          "start": "Das Starten hat nicht geklappt.", "stop": "Das Anhalten hat nicht geklappt."}
 VERSION = re.compile(r"[0-9][0-9A-Za-z.+~:-]{0,40}")
 PORT = re.compile(r"[\w.:+-]{1,200}")
 # the stick's name under /dev/serial/by-id, e.g. usb-SONOFF_SONOFF_Dongle_Plus_MG24_…-if00-port0
@@ -90,18 +99,26 @@ def _programs(value) -> dict | None:
     have = {part: _version(installed.get(part)) for part in PARTS}
     want = {part: _version(wanted.get(part)) for part in PARTS}
     complete = value.get("complete") is True and all(have.values())
-    mosquitto, service = obj(value.get("mosquitto")), obj(value.get("service"))
+    mosquitto, service, network = obj(value.get("mosquitto")), obj(value.get("service")), obj(value.get("network"))
+    port = network.get("port")
     ports = []
-    for port in value.get("ports") if isinstance(value.get("ports"), list) else []:
-        if isinstance(port, dict) and isinstance(port.get("id"), str) and PORT.fullmatch(port["id"]):
-            device = port.get("device")
-            ports.append({"id": port["id"], "stick": bool(STICK.search(port["id"])),
+    for item in value.get("ports") if isinstance(value.get("ports"), list) else []:
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and PORT.fullmatch(item["id"]):
+            device = item.get("device")
+            ports.append({"id": item["id"], "stick": bool(STICK.search(item["id"])),
                           "device": device if isinstance(device, str) and re.fullmatch(r"tty\w{1,20}", device) else None})
     return {"arch": _text(value.get("arch"), 20), "arch_ok": value.get("arch_ok") is True,
             "free_mb": _number(value.get("free_mb"), 0, 1 << 40), "installed": have, "wanted": want,
             "complete": complete, "current": complete and all(want.values()) and have == want,
             "mosquitto": {"version": _version(mosquitto.get("version")), "active": mosquitto.get("active") is True},
-            "service": {"present": service.get("present") is True, "active": service.get("active") is True},
+            "service": {"present": service.get("present") is True, "enabled": service.get("enabled") is True,
+                        "active": service.get("active") is True, "failed": service.get("failed") is True,
+                        "restarts": _number(service.get("restarts"), 0, 1 << 30) or 0,
+                        "log": _text(service.get("log"), 4000)},
+            "network": {"configured": network.get("configured") is True,
+                        "channel": _number(network.get("channel"), 11, 26),
+                        "port": port if isinstance(port, str) and PORT.fullmatch(port) else None,
+                        "devices": _number(network.get("devices"), 0, 1 << 20) or 0},
             "ports": ports[:8]}
 
 
@@ -118,6 +135,7 @@ class Zigbee:
         self._at: str | None = None      # … at this time
         self._error: str | None = None   # why the last look at the Pi failed
         self._adopted = False            # a job from before a restart of the app is followed by start()
+        self.net = ZigbeeNet(self.folder)   # Zigbee2MQTT itself, over Mosquitto
         if self.folder:
             status = self._read_status()
             if status:
@@ -132,6 +150,7 @@ class Zigbee:
         update meanwhile), else look at the Pi once, in the background."""
         if not self.supported:
             return
+        self.net.start()
         with self._lock:
             job = self._job if self._adopted and self._job and self._job["state"] == "running" else None
         if job:
@@ -139,6 +158,9 @@ class Zigbee:
                              name="zigbee-follow", daemon=True).start()
         else:
             threading.Thread(target=self._quiet_refresh, name="zigbee-refresh", daemon=True).start()
+
+    def stop(self) -> None:
+        self.net.stop()
 
     # ------------------------------------------------------------------ what the page shows
     def view(self) -> dict:
@@ -148,23 +170,64 @@ class Zigbee:
         if status:
             self._absorb(status)
         with self._lock:
-            return {"supported": True, "programs": dict(self._info) if self._info else None, "at": self._at,
-                    "job": dict(self._job) if self._job else None, "busy": self._doing, "error": self._error}
+            result = {"supported": True, "programs": dict(self._info) if self._info else None, "at": self._at,
+                      "job": dict(self._job) if self._job else None, "busy": self._doing, "error": self._error}
+        result["net"] = self.net.view()
+        return result
 
     # ------------------------------------------------------------------ the actions
     def refresh(self) -> dict:
         """Ask the Pi what is installed (quick: a few seconds)."""
-        try:
-            status = self._ask("status")
-        except ActionError as exc:
-            with self._lock:
-                self._error = str(exc)
-            raise
-        with self._lock:
-            self._error = None
-        if status.get("state") != "done":
-            raise ActionError(_text(status.get("message"), 300) or "Das Nachsehen hat nicht geklappt.", 502)
+        return self._quick("status")
+
+    def setup(self, channel, port=None) -> dict:
+        """„Zigbee einrichten“: Zigbee2MQTT with this radio channel and stick, started at once."""
+        if _number(channel, 11, 26) is None:
+            raise ActionError("Bitte einen Funkkanal von 11 bis 26 wählen.", 400)
+        if port is not None and not (isinstance(port, str) and PORT.fullmatch(port)):
+            raise ActionError("Unbekannter Zigbee-Stick.", 400)
+        return self._quick("setup", {"channel": channel, "port": port})
+
+    def service(self, on) -> dict:
+        """„Starten“ and „Anhalten“ of Zigbee2MQTT."""
+        if not isinstance(on, bool):
+            raise ActionError("Ungültige Anfrage.", 400)
+        return self._quick("start" if on else "stop")
+
+    def search(self, on) -> dict:
+        """„Thermostate suchen“: the network is open for new devices for 3 minutes (on=False closes it again)."""
+        self._require()
+        if not isinstance(on, bool):
+            raise ActionError("Ungültige Anfrage.", 400)
+        self.net.search(on)
         return {"zigbee": self.view()}
+
+    def remove_device(self, ieee, force=None) -> dict:
+        """Unpair a device; force: without its answer."""
+        self._require()
+        if not (isinstance(ieee, str) and IEEE.fullmatch(ieee)) or not isinstance(force, (bool, type(None))):
+            raise ActionError("Ungültige Anfrage.", 400)
+        device = self.net.remove(ieee, force is True)
+        return {"zigbee": self.view(),
+                "message": "Das Thermostat ist entfernt." if device["thermostat"] else "Das Gerät ist entfernt."}
+
+    def _quick(self, action: str, params: dict | None = None) -> dict:
+        """A request that the root service answers in seconds; the page waits for it."""
+        try:
+            status = self._ask(action, params)
+        except ActionError as exc:
+            if action == "status":
+                with self._lock:
+                    self._error = str(exc)
+            raise
+        if action == "status":
+            with self._lock:
+                self._error = None
+        if status.get("state") != "done":
+            raise ActionError(_text(status.get("message"), 300) or FAILED[action], 502)
+        if action != "status":
+            log.info("Zigbee: %s", _text(status.get("message"), 300) or action)
+        return {"zigbee": self.view(), "message": None if action == "status" else _text(status.get("message"), 300)}
 
     def install(self) -> dict:
         """Install or bring up to date; answers at once, the page follows the job (GET /api/zigbee)."""
@@ -191,7 +254,7 @@ class Zigbee:
             raise ActionError("Zigbee gibt es nur, wenn FlowThermPi mit dem Installationsbefehl auf dem Raspberry Pi "
                               "eingerichtet ist.", 409)
 
-    def _begin(self, action: str, job: dict | None = None, wait: float = 10.0) -> str:
+    def _begin(self, action: str, job: dict | None = None, wait: float = 10.0, params: dict | None = None) -> str:
         self._require()
         rid = secrets.token_hex(8)
         deadline = time.monotonic() + wait
@@ -205,7 +268,7 @@ class Zigbee:
             if job is not None:
                 self._job = {"id": rid, **job}
         try:
-            self._place(rid, {"action": action})
+            self._place(rid, {"action": action, **(params or {})})
         except BaseException:
             with self._free:
                 if job is not None and self._job and self._job["id"] == rid:
@@ -220,8 +283,8 @@ class Zigbee:
             self._doing = self._owner = None
             self._free.notify_all()
 
-    def _ask(self, action: str) -> dict:
-        rid = self._begin(action)
+    def _ask(self, action: str, params: dict | None = None) -> dict:
+        rid = self._begin(action, params=params)
         try:
             return self._wait(rid, self.answer)
         finally:
@@ -364,4 +427,5 @@ class Zigbee:
                     else:
                         log.warning("Zigbee: %s fehlgeschlagen – %s%s", what, job["message"] or "ohne Meldung",
                                     f"\n{job['details']}" if job["details"] else "")
+                    self.net.wake()   # a new login (or none any more): no need to wait for the next try
                 self._release(job["id"])   # in the same step, so the page never sees "done" but busy

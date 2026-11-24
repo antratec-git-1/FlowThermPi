@@ -528,6 +528,18 @@ class Support:
                     + (" · neue Versionen verfügbar" if p["complete"] and not p["current"] else "")
                     + f" · Mosquitto {p['mosquitto']['version'] or 'fehlt'}{' (läuft)' if p['mosquitto']['active'] else ''}"
                     + f" · USB: {', '.join(port['id'] for port in p['ports']) or 'kein Gerät'}")
+            service, network = p["service"], p["network"]
+            if service["present"]:
+                text += (f" · Zigbee2MQTT {'an' if service['enabled'] else 'aus'}, "
+                         f"{'läuft' if service['active'] else 'läuft nicht'}"
+                         + (f", {service['restarts']} Neustart(s)" if service["restarts"] else "")
+                         + f" · Kanal {network['channel'] or '?'} · Stick {network['port'] or '?'}"
+                         f" · {network['devices']} Gerät(e) angelernt")
+            elif p["complete"]:
+                text += " · Zigbee2MQTT noch nicht eingerichtet"
+        net = getattr(self.zigbee, "net", None)
+        if net is not None and getattr(net, "folder", None) is not None:
+            text += f" · Netz: {net.summary()}"
         job = view.get("job")
         if job:
             text += (f" · zuletzt {'Installation' if job.get('action') == 'install' else 'Entfernen'}: "

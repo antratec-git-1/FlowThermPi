@@ -2,8 +2,9 @@
 
 Kleine Web-App, die Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler** direkt im
 Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek). Nur die
-freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale, und die geplanten
-[Zigbee-Thermostate](#zigbee-thermostate-in-arbeit) brauchen Zusatzprogramme, die die App auf Knopfdruck installiert.
+freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale, und die
+[Zigbee-Thermostate](#zigbee-thermostate-in-arbeit) (in Arbeit) brauchen Zusatzprogramme, die die App auf Knopfdruck
+installiert.
 
 Inoffizielles Projekt – kein Produkt von Thermotec und nicht von Thermotec unterstützt.
 
@@ -68,7 +69,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Haushalt zu helfen, ohne hinzufahren – von sich aus nur, solange die Bewohner es erlauben. Siehe
   [Fernwartung](#fernwartung-tailscale).
 - **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
-  aktualisieren und entfernen – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
+  aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen –
+  siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
@@ -351,9 +353,9 @@ empfohlen 1 Tag) und **Kalibrierlauf starten**.
 ## Zigbee-Thermostate (in Arbeit)
 
 Geplant: SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
-Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Der erste Schritt ist da (ab
-Version 0.4.4): *Einrichtung › Zigbee* installiert die Zusatzprogramme dafür auf Knopfdruck. Zigbee2MQTT einrichten
-und starten, Thermostate anlernen und steuern kommt in den nächsten Schritten.
+Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Ab Version 0.4.4 installiert
+*Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
+Thermostate an. Räume und Heizpläne für die Thermostate kommen in den nächsten Schritten.
 
 - **Was der Pi lädt:**
   - **Mosquitto** aus dem Paketarchiv von Raspberry Pi OS. Es reicht die Nachrichten zwischen Zigbee2MQTT und der App
@@ -372,20 +374,52 @@ und starten, Thermostate anlernen und steuern kommt in den nächsten Schritten.
   Meldungen des Pi; eine schon installierte Version bleibt dann in Betrieb.
 - **Voraussetzungen:** Raspberry Pi OS **64-bit** (auf einem 32-Bit-System lehnt die App ab, auch auf einem Pi 4),
   mindestens 1,5 GB frei, Internet.
-- **Wo es liegt:** Programme in `/opt/flowthermpi-zigbee`, die Daten von Zigbee2MQTT (später Netzwerkschlüssel und
-  angelernte Thermostate) in `/var/lib/flowthermpi-zigbee`. Zigbee2MQTT wird vom eigenen Benutzer `flowthermpi-zigbee`
-  gebaut und später betrieben – ohne Anmeldung, mit Zugriff auf den USB-Stick, nie als root.
+- **Wo es liegt:** Programme in `/opt/flowthermpi-zigbee`, die Daten von Zigbee2MQTT (Einstellungen,
+  Netzwerkschlüssel, angelernte Thermostate) in `/var/lib/flowthermpi-zigbee` (nur für ihn lesbar). Zigbee2MQTT wird
+  vom eigenen Benutzer `flowthermpi-zigbee` gebaut und betrieben – ohne Anmeldung, mit Zugriff auf den USB-Stick, nie
+  als root.
 - **Passwörter für Mosquitto** erzeugt der Pi bei jeder Installation neu. Mosquitto kennt nur ihre Hashes; im Klartext
   stehen sie nur bei ihren Nutzern: für die App in ihrem Datenordner (`zigbee-mqtt.json`, 0600), für Zigbee2MQTT in
   `/etc/flowthermpi/zigbee2mqtt.env` (nur root; systemd reicht sie beim Start weiter). Die Seite zeigt sie nie.
-- **Entfernen …** löscht die Programme und Mosquitto wieder. Ein Mosquitto, das schon vorher auf dem Pi war, bleibt und
+- **Entfernen …** (bei den Programmen) hält Zigbee2MQTT an und löscht die Programme und Mosquitto wieder. Ein
+  Mosquitto, das schon vorher auf dem Pi war, bleibt und
   verliert nur die Einstellungen von FlowThermPi. Die Daten von Zigbee2MQTT bleiben, damit angelernte Thermostate nach
   einer neuen Installation noch verbunden sind. `--uninstall` nimmt die Programme mit; `--uninstall --purge` auch die
   Daten und den Benutzer.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage in ihren Datenordner; der Dienst
-  `flowthermpi-zigbee` (root) kennt genau drei Aktionen: nachsehen, installieren, entfernen. Was er lädt, kann die
-  App nicht bestimmen. Archive entpackt er selbst, ohne Pfade außerhalb des Programmordners. Meldungen:
-  `journalctl -u flowthermpi-zigbee`.
+  `flowthermpi-zigbee` (root) kennt genau sechs Aktionen: nachsehen, installieren, entfernen, einrichten, starten,
+  anhalten. Was er lädt, kann die App nicht bestimmen; beim Einrichten nimmt er nur einen Funkkanal von 11 bis 26
+  und einen Stick, der wirklich am Pi steckt. Archive entpackt er selbst, ohne Pfade außerhalb des Programmordners.
+  Meldungen: `journalctl -u flowthermpi-zigbee`.
+
+**Zigbee einrichten** (nach der Installation, mit eingestecktem Stick):
+
+- **Funkkanal:** Zigbee funkt wie das WLAN auf 2,4 GHz und bekommt deshalb einen eigenen Kanal. Die App schlägt
+  **Kanal 25** vor – er passt, wenn das WLAN auf Kanal 1 bis 10 funkt (das ist meistens so). Kanal 15 passt zu
+  WLAN-Kanal 7 bis 13, Kanal 20 zu 1 bis 5 und 12 bis 13. Welchen Kanal das WLAN nutzt, zeigt die FRITZ!Box unter
+  *WLAN › Funkkanal*. Gibt es im Haus eine Philips-Hue-Bridge, einen anderen Kanal als sie nehmen (steht in der
+  Hue-App). Den Kanal kann man nur ändern, solange kein Gerät angelernt ist – sonst müsste man alle neu anlernen.
+- **Was dabei passiert:** Der Pi schreibt die Einstellungen von Zigbee2MQTT (Stick, Funkkanal, Verbindung zu
+  Mosquitto) – ohne eigene Weboberfläche, ohne Home Assistant. Den Netzwerkschlüssel würfelt Zigbee2MQTT beim ersten
+  Start selbst aus; die Seite zeigt ihn nie, und im [Protokoll](#protokoll-wenn-etwas-schiefgeht) ist er versteckt.
+  Dann startet der Dienst `flowthermpi-zigbee2mqtt`: mit dem Pi, nach einem Absturz von selbst neu, abgeschottet
+  (schreiben darf er nur in seinen Datenordner).
+- **Anhalten / Starten:** Angehalten bleibt Zigbee2MQTT auch nach einem Neustart des Pi aus, bis man „Starten“
+  drückt. Die Thermostate behalten so lange ihre letzte Einstellung.
+- **Startet nicht:** Die Seite sagt es und zeigt die letzten Meldungen von Zigbee2MQTT (Passwörter und Schlüssel
+  darin versteckt), daneben „Neu starten“. Meldungen: `journalctl -u flowthermpi-zigbee2mqtt`.
+
+**Thermostate anlernen:**
+
+- **Thermostate suchen** öffnet das Zigbee-Netz für 3 Minuten. Die Seite zählt herunter und sagt, was am Thermostat
+  zu tun ist: Batterien einlegen, das Drehrad unter 5 °C drehen, bis es aus ist, dann die mittlere Taste 2 Sekunden
+  drücken, bis das Verbindungszeichen blinkt. Nach etwa einer Minute steht es in der Liste – mit Modell, Batterie,
+  Funkqualität und gemessener Temperatur. Mehrere Thermostate gehen nacheinander in derselben Suche; klappt es nicht,
+  das Thermostat zum Anlernen näher an den Pi bringen.
+- **Entfernen …** (bei einem Thermostat) meldet es im Zigbee-Netz ab. Antwortet es nicht (es schläft oder ist zu weit
+  weg), bietet die Seite **Trotzdem entfernen** an: Dann vergisst der Pi es, ohne auf seine Antwort zu warten.
+- **Wie die App mit Zigbee2MQTT spricht:** über Mosquitto (MQTT), nur auf dem Pi selbst und mit Passwort – mit einem
+  kleinen eigenen MQTT-Baustein (`heizapp/mqtt.py`, nur Python-Standardbibliothek).
 - Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
 
 ## Protokoll: wenn etwas schiefgeht
@@ -490,8 +524,10 @@ beschriebene Verhalten nachbildet – die echten Heizungen werden dabei nicht an
 WLAN-Einrichtung läuft gegen einen nachgebauten NetworkManager (`FakeNM` in `tests/test_install.py`), die
 Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Download, ohne Tailscale-Konto. Die
 Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`). Die Zigbee-Programme
-werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.py`: apt, Mosquitto, Node.js, pnpm) –
-ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen. Das Einsammeln der
+werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.py`: apt, Mosquitto, Node.js, pnpm,
+systemd) – ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen. Für das
+Anlernen gibt es ein nachgebautes Mosquitto und Zigbee2MQTT mit Thermostaten (`tests/fake_mqtt.py`) – ohne Stick und
+ohne echtes Thermostat. Das Einsammeln der
 Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
 Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet.
 

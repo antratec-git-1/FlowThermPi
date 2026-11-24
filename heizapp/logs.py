@@ -34,8 +34,10 @@ RECENT = 60             # warnings and errors kept in memory for the overview of
 
 # What a secret looks like, also where the app does not know its value. install.py has the same list for the system
 # logs it collects (it cannot import the app).
-_KEYS = r"token|pop|psk|password|passwort|passwd|secret|auth_?key|auth_?url|login_?url|pin"
+_KEYS = r"token|pop|psk|password|passwort|passwd|secret|auth_?key|auth_?url|login_?url|pin|network_?key"
 PATTERNS = (
+    # Zigbee's network key as a list of numbers – before key=value below, which would hide only its first number
+    (re.compile(r"(?i)((?<![A-Za-z0-9])network_?key[\"']?\s*[:=]\s*)\[[^\]\n]{0,400}\]"), rf"\1[{HIDDEN}]"),
     # token=… in an address, MQTT_PASSWORD=… in the environment
     (re.compile(rf"(?i)(?<![A-Za-z0-9])({_KEYS})=[^\s&\"',;]+"), rf"\1={HIDDEN}"),
     # "password": "…", "mqtt_password": "…" in JSON

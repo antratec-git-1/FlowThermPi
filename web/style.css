@@ -357,3 +357,9 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
               white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); }
 .zigbee-parts { margin: 8px 0 0; padding-left: 20px; }
 .zigbee-parts li { margin: 4px 0; }
+.zigbee-steps, .zigbee-channels { margin: 8px 0; padding-left: 22px; }
+.zigbee-steps li, .zigbee-channels li { margin: 4px 0; }
+.zigbee-search .hint { margin: 0 0 10px; }
+.zigbee-list .zigbee-facts, .zigbee-list .zigbee-ieee { display: block; margin: 2px 0 0; }
+.zigbee-list .zigbee-ieee { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.zigbee-list .dot { align-self: flex-start; margin-top: 6px; }   /* next to the name, not the middle of the lines */

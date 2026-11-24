@@ -1,7 +1,8 @@
 """Tests for Einrichtung › Zigbee: the root part (install.py --zigbee) and heizapp.zigbee.Zigbee with its API routes.
 
-Nothing is downloaded and nothing is run: FakePi plays dpkg, apt, Mosquitto, systemd, Node.js and pnpm, and the
-downloads are small archives made here – with their real checksums, so the checks of install.py run for real.
+Nothing is downloaded and nothing is run: FakePi plays dpkg, apt, Mosquitto, systemd, Node.js, pnpm and the service of
+Zigbee2MQTT, and the downloads are small archives made here – with their real checksums, so the checks of install.py
+run for real. Zigbee2MQTT itself, behind Mosquitto, is played by tests/fake_mqtt.py.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ import install  # noqa: E402
 from heizapp.server import make_server  # noqa: E402
 from heizapp.service import ActionError, Service  # noqa: E402
 from heizapp.zigbee import Zigbee  # noqa: E402
+from fake_mqtt import FakeBroker, FakeZ2M, thermostat  # noqa: E402
 from test_install import Base as InstallBase  # noqa: E402
 
 COMMIT = "3c841fdfd66c92239921ef84fde8f039c64e1662"
@@ -92,6 +94,10 @@ class FakePi(install.DryRun):
         self.chowned: list[tuple[Path, str]] = []
         self.as_user: list[tuple[str, tuple, Path, dict]] = []
         self.slow = 0.0               # seconds pnpm takes (for the app's tests)
+        self.z2m = {"enabled": False, "active": False, "failed": False, "restarts": 0}   # Zigbee2MQTT's service
+        self.z2m_fails = False        # it ends at once after every start (no stick, broken settings)
+        self.z2m_journal = ""         # what journalctl shows of it
+        self.on_z2m = None            # on_z2m(True | False) when it starts or stops: the simulated Zigbee2MQTT
 
     def user_exists(self, user: str = install.NAME) -> bool:
         return user in self.users
@@ -104,7 +110,43 @@ class FakePi(install.DryRun):
 
     def ok(self, *cmd):
         self.commands.append(cmd)
+        if cmd == ("systemctl", "is-enabled", "--quiet", install.ZIGBEE_SERVICE):
+            return self.z2m["enabled"]
         return cmd == ("systemctl", "is-active", "--quiet", "mosquitto") and self.mosquitto_active
+
+    def zigbee2mqtt(self, args):
+        """systemctl for Zigbee2MQTT's service."""
+        z, verb = self.z2m, args[0]
+        if verb == "show":
+            state = "active" if z["active"] else "failed" if z["failed"] else "inactive"
+            sub = {"active": "running", "failed": "failed", "inactive": "dead"}[state]
+            return 0, (f"NRestarts={z['restarts']}\nActiveState={state}\nSubState={sub}\n"
+                       f"UnitFileState={'enabled' if z['enabled'] else 'disabled'}\n"), ""
+        if verb in ("enable", "restart", "start") and not (self.root / install.ZIGBEE_SERVICE_UNIT.lstrip("/")).exists():
+            return 5, "", f"Failed to {verb} {install.ZIGBEE_SERVICE}.service: Unit not found.\n"
+        if verb in ("enable", "disable"):
+            z["enabled"] = verb == "enable"
+            if "--now" in args:
+                self.z2m_run(verb == "enable")
+        elif verb in ("restart", "try-restart"):
+            if verb == "restart" or z["active"]:
+                self.z2m_run(False)
+                self.z2m_run(True)
+        elif verb == "stop":
+            self.z2m_run(False)
+        elif verb == "reset-failed":
+            z["failed"] = False
+        return 0, "", ""
+
+    def z2m_run(self, on):
+        z = self.z2m
+        if on and self.z2m_fails:
+            z.update(active=False, failed=True, restarts=z["restarts"] + 3)
+            return
+        was = z["active"]
+        z.update(active=on, failed=False)
+        if self.on_z2m and was != on:
+            self.on_z2m(on)
 
     def execute(self, cmd, env, timeout=None):
         self.commands.append(cmd)
@@ -132,6 +174,10 @@ class FakePi(install.DryRun):
             self.hashed.append(lines)
             path.write_text("".join(f"{line.split(':')[0]}:$7$101$c2FsdA==$aGFzaA==\n" for line in lines))
             return 0, "", ""
+        if cmd[0] == "systemctl" and install.ZIGBEE_SERVICE in cmd:
+            return self.zigbee2mqtt(tuple(c for c in cmd[1:] if c != install.ZIGBEE_SERVICE))
+        if cmd[0] == "journalctl":
+            return 0, self.z2m_journal, ""
         if cmd[0] == "systemctl":
             if cmd[1:] == ("restart", "mosquitto"):
                 if not self.mosquitto:
@@ -234,6 +280,18 @@ class Base(unittest.TestCase):
     def path(self, live):
         return self.root / live.lstrip("/")
 
+    def plug(self, name=STICK):
+        """The stick in the Pi: its lasting name under /dev/serial/by-id."""
+        by_id = self.root / "dev/serial/by-id"
+        by_id.mkdir(parents=True, exist_ok=True)
+        (by_id / name).symlink_to("../../ttyUSB0")
+
+    def setup_request(self, channel=25, port=STICK):
+        return json.dumps({"id": "0123abce", "action": "setup", "channel": channel, "port": port})
+
+    def z2m_file(self, name):
+        return self.path(install.ZIGBEE_DATA) / name
+
     def logins(self):
         app = json.loads((self.data / install.ZIGBEE_LOGIN).read_text())
         env = dict(line.split("=", 1) for line in self.path(install.ZIGBEE_ENV).read_text().splitlines()
@@ -295,7 +353,9 @@ class ZigbeeFromAppTest(Base):
                          ("arm64", True, True, {"node": "24.22.3", "pnpm": "11.26.0", "zigbee2mqtt": "2.14.3"},
                           {"node": "24.22.3", "pnpm": "11.26.0", "zigbee2mqtt": "2.14.3"}))
         self.assertEqual(z["mosquitto"], {"version": "2.0.21-1", "active": True})
-        self.assertEqual(z["service"], {"present": False, "active": False})   # Zigbee2MQTT starts in a later step
+        self.assertEqual(z["service"], {"present": False, "enabled": False, "active": False, "failed": False,
+                                        "restarts": 0, "log": None})   # Zigbee2MQTT runs once it is set up
+        self.assertEqual(z["network"], {"configured": False, "channel": None, "port": None, "devices": 0})
 
     def test_passwords_are_never_shown(self):
         self.ask("install")
@@ -447,6 +507,172 @@ class ZigbeeFromAppTest(Base):
         self.assertEqual(self.fetched, [])
 
 
+class SetupTest(Base):
+    """„Zigbee einrichten“, „Starten“ and „Anhalten“: install.py --zigbee with the actions setup, start, stop."""
+
+    def setUp(self):
+        super().setUp()
+        self.ask("install")
+        self.plug()
+
+    def test_setup_writes_the_settings_and_the_service(self):
+        ran = len(self.pi.as_user)
+        status = self.ask(self.setup_request(25))
+        self.assertEqual((status["state"], status["action"]), ("done", "setup"), status)
+        self.assertEqual(status["message"], "Zigbee2MQTT ist eingerichtet (Funkkanal 25) und startet.")
+        config = self.z2m_file("configuration.yaml")
+        self.assertEqual(oct(config.stat().st_mode & 0o777), "0o600")
+        text = config.read_text()
+        for line in ("version: 5\n", "  server: mqtt://127.0.0.1:1883\n", f"  port: '/dev/serial/by-id/{STICK}'\n",
+                     "  adapter: ember\n  rtscts: false\n  baudrate: 115200\n", "  channel: 25\n",
+                     "  network_key: GENERATE\n  pan_id: GENERATE\n  ext_pan_id: GENERATE\n",
+                     "  log_output:\n    - console\n", "  enable_external_js: false\n",
+                     "frontend:\n  enabled: false\n", "homeassistant:\n  enabled: false\n", "  retain: true\n"):
+            self.assertIn(line, text)
+        app, env = self.logins()
+        self.assertNotIn(env["ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD"], text)   # only systemd hands it over
+        unit = self.path(install.ZIGBEE_SERVICE_UNIT).read_text()
+        for line in ("User=flowthermpi-zigbee\n", "SupplementaryGroups=dialout\n",
+                     "WorkingDirectory=/opt/flowthermpi-zigbee/zigbee2mqtt\n",
+                     "Environment=ZIGBEE2MQTT_DATA=/var/lib/flowthermpi-zigbee\n", "Environment=Z2M_ONBOARD_NO_SERVER=1\n",
+                     f"Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/{STICK}\n",
+                     "EnvironmentFile=/etc/flowthermpi/zigbee2mqtt.env\n",
+                     "ExecStart=/opt/flowthermpi-zigbee/node/bin/node index.js\n", "ProtectSystem=strict\n",
+                     "ReadWritePaths=/var/lib/flowthermpi-zigbee\n", "Restart=on-failure\n", "WantedBy=multi-user.target\n"):
+            self.assertIn(line, unit)
+        commands = [" ".join(c) for c in self.pi.commands]
+        for command in ("systemctl daemon-reload", "systemctl enable flowthermpi-zigbee2mqtt",
+                        "systemctl restart flowthermpi-zigbee2mqtt"):
+            self.assertIn(command, commands)
+        z = status["zigbee"]
+        self.assertEqual((z["service"]["present"], z["service"]["enabled"], z["service"]["active"]), (True, True, True))
+        self.assertEqual(z["network"], {"configured": True, "channel": 25, "port": STICK, "devices": 0})
+        self.assertEqual(len(self.pi.as_user), ran)   # nothing of Zigbee2MQTT was run here – systemd starts it
+
+    def test_setup_needs_the_programs_and_the_stick(self):
+        for request, message in (
+                (self.setup_request(30), "Bitte einen Funkkanal von 11 bis 26 wählen."),
+                (self.setup_request("25"), "Bitte einen Funkkanal von 11 bis 26 wählen."),
+                (self.setup_request(True), "Bitte einen Funkkanal von 11 bis 26 wählen."),
+                (self.setup_request(25, "../../etc/passwd"), "Unbekannter Zigbee-Stick."),
+                (self.setup_request(25, "usb-Other_Stick-if00-port0"), "Der gewählte Zigbee-Stick steckt nicht (mehr) am Pi.")):
+            status = self.ask(request)
+            self.assertEqual((status["state"], status["message"]), ("failed", message))
+        (self.root / "dev/serial/by-id" / STICK).unlink()
+        status = self.ask(self.setup_request(25, None))
+        self.assertEqual(status["message"], "Bitte den Zigbee-Stick am Pi einstecken.")
+        self.ask("remove")
+        self.plug()
+        status = self.ask(self.setup_request(25))
+        self.assertEqual(status["message"], "Bitte zuerst die Zigbee-Programme installieren.")
+        self.assertFalse(self.path(install.ZIGBEE_SERVICE_UNIT).exists())
+        self.assertFalse(self.z2m_file("configuration.yaml").exists())
+
+    def test_the_only_usb_device_is_taken(self):
+        status = self.ask(self.setup_request(20, None))
+        self.assertEqual(status["zigbee"]["network"]["port"], STICK)
+
+    def test_the_same_channel_keeps_the_network(self):
+        self.ask(self.setup_request(25))
+        # what Zigbee2MQTT made of it at its first start, and a paired thermostat
+        written = ("version: 5\nmqtt:\n  base_topic: zigbee2mqtt\n  server: mqtt://127.0.0.1:1883\n  password: x\n"
+                   "advanced:\n  channel: 25\n  network_key:\n" + "".join(f"    - {n}\n" for n in range(40, 56)) +
+                   "  pan_id: 11079\n")
+        self.z2m_file("configuration.yaml").write_text(written)
+        self.z2m_file("database.db").write_text('{"id":1,"type":"Coordinator","ieeeAddr":"0x00124b0000000001"}\n'
+                                                '{"id":2,"type":"EndDevice","ieeeAddr":"0x8c65a3fffe1d0001"}\n')
+        status = self.ask(self.setup_request(25))
+        self.assertEqual(status["state"], "done", status)
+        self.assertEqual(self.z2m_file("configuration.yaml").read_text(), written)
+        self.assertTrue(self.z2m_file("database.db").exists())
+        self.assertEqual(status["zigbee"]["network"]["devices"], 1)
+
+    def test_another_channel_only_while_nothing_is_paired(self):
+        self.ask(self.setup_request(25))
+        database = self.z2m_file("database.db")
+        database.write_text('{"id":1,"type":"Coordinator","ieeeAddr":"0x00124b0000000001"}\n'
+                            '{"id":2,"type":"EndDevice","ieeeAddr":"0x8c65a3fffe1d0001"}\n'
+                            '{"id":3,"type":"Group","groupID":1}\n')
+        status = self.ask(self.setup_request(15))
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("Angelernt: 1", status["message"])
+        self.assertIn("  channel: 25\n", self.z2m_file("configuration.yaml").read_text())
+        database.write_text('{"id":1,"type":"Coordinator","ieeeAddr":"0x00124b0000000001"}\n')
+        self.z2m_file("coordinator_backup.json").write_text("{}")
+        status = self.ask(self.setup_request(15))
+        self.assertEqual(status["state"], "done", status)
+        self.assertIn("  channel: 15\n", self.z2m_file("configuration.yaml").read_text())
+        self.assertFalse(database.exists() or self.z2m_file("coordinator_backup.json").exists())   # a new network
+        self.assertIn(("systemctl", "stop", install.ZIGBEE_SERVICE), self.pi.commands)
+
+    def test_start_and_stop(self):
+        status = self.ask("stop")
+        self.assertEqual((status["state"], status["message"]), ("failed", "Zigbee2MQTT ist noch nicht eingerichtet."))
+        self.ask(self.setup_request(25))
+        status = self.ask("stop")
+        self.assertEqual((status["state"], status["message"]), ("done", "Zigbee2MQTT ist angehalten."))
+        self.assertIn(("systemctl", "disable", "--now", install.ZIGBEE_SERVICE), self.pi.commands)
+        self.assertEqual((status["zigbee"]["service"]["enabled"], status["zigbee"]["service"]["active"]), (False, False))
+        before = len(self.pi.commands)
+        status = self.ask("start")
+        self.assertEqual((status["state"], status["message"]), ("done", "Zigbee2MQTT startet."))
+        self.assertEqual(self.pi.commands[before:before + 2], [("systemctl", "reset-failed", install.ZIGBEE_SERVICE),
+                                                               ("systemctl", "enable", "--now", install.ZIGBEE_SERVICE)])
+        self.assertEqual((status["zigbee"]["service"]["enabled"], status["zigbee"]["service"]["active"]), (True, True))
+
+    def test_a_failing_service_shows_its_messages_without_secrets(self):
+        self.ask(self.setup_request(25))
+        _, env = self.logins()
+        password = env["ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD"]
+        self.z2m_file("configuration.yaml").write_text(
+            "advanced:\n  channel: 25\n  network_key:\n" + "".join(f"    - {n}\n" for n in range(200, 216)))
+        self.pi.z2m_fails = True
+        self.pi.z2m_journal = ("\x1b[32mStarting Zigbee2MQTT version 2.14.3\x1b[39m\n"
+                               f"mqtt: connecting with password {password}\n"
+                               "networkKey: [200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215]\n"
+                               "Error: Failed to open the serial port (no such file)\n"
+                               "flowthermpi-zigbee2mqtt.service: Main process exited, code=exited, status=1/FAILURE\n")
+        status = self.ask("start")
+        self.assertEqual(status["state"], "done")
+        service = status["zigbee"]["service"]
+        self.assertEqual((service["failed"], service["active"], service["restarts"]), (True, False, 3))
+        self.assertIn("Failed to open the serial port", service["log"])
+        self.assertNotIn(password, service["log"])
+        self.assertNotIn("200,201,202", service["log"])
+        self.assertNotIn("\x1b[", service["log"])
+
+    def test_the_network_key_never_leaves_the_pi(self):
+        self.ask(self.setup_request(25))
+        self.z2m_file("configuration.yaml").write_text(
+            "advanced:\n  channel: 25\n  network_key:\n" + "".join(f"    - {n}\n" for n in range(100, 116)))
+        folder = install.os.open(self.data, install.os.O_RDONLY)
+        self.addCleanup(install.os.close, folder)
+        known = install.known_secrets(self.root, folder)
+        self.assertIn(",".join(map(str, range(100, 116))), known)
+        self.assertIn(bytes(range(100, 116)).hex(), known)
+        for text, shown in (('"network_key": [1, 3, 5, 7, 9, 11, 13, 15, 0, 2, 4, 6, 8, 10, 12, 13]', '"network_key": [•••]'),
+                            ("network_key=[1,2,3]", "network_key=•••"), ("networkKey: [9, 8]", "networkKey: [•••]")):
+            self.assertEqual(install.scrub(text, set()), shown)   # also a key root does not know
+
+    def test_an_update_of_flowthermpi_brings_the_service_up_to_date(self):
+        self.ask(self.setup_request(25))
+        unit = self.path(install.ZIGBEE_SERVICE_UNIT)
+        current = unit.read_text()
+        unit.write_text(current.replace("Restart=on-failure\n", ""))    # as an older version wrote it
+        self.assertTrue(install.refresh_zigbee2mqtt_unit(self.root))
+        self.assertEqual(unit.read_text(), current)
+        self.assertFalse(install.refresh_zigbee2mqtt_unit(self.root))   # nothing changed: no restart
+
+    def test_remove_takes_the_service_and_keeps_the_network(self):
+        self.ask(self.setup_request(25))
+        status = self.ask("remove")
+        self.assertEqual(status["state"], "done")
+        self.assertFalse(self.path(install.ZIGBEE_SERVICE_UNIT).exists())
+        self.assertIn(("systemctl", "disable", "--now", install.ZIGBEE_SERVICE), self.pi.commands)
+        self.assertTrue(self.z2m_file("configuration.yaml").exists())   # after a new installation: the same network
+        self.assertEqual(status["zigbee"]["network"]["channel"], 25)
+
+
 class UnpackTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
@@ -496,6 +722,17 @@ class InstallerTest(InstallBase):
         commands = [" ".join(c) for c in system.commands]
         self.assertIn("systemctl enable --now flowthermpi-zigbee.path", commands)
         self.assertFalse([c for c in commands if "apt" in c or "mosquitto" in c])
+
+    def test_an_update_rewrites_the_service_of_zigbee2mqtt(self):
+        self.run_install()
+        unit = self.path(install.ZIGBEE_SERVICE_UNIT)
+        unit.write_text(f"[Service]\nEnvironment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/{STICK}\n")
+        system, _ = self.run_install()
+        self.assertIn("Restart=on-failure\n", unit.read_text())
+        self.assertIn(f"/dev/serial/by-id/{STICK}\n", unit.read_text())      # the same stick
+        self.assertIn(("systemctl", "try-restart", install.ZIGBEE_SERVICE), system.commands)
+        system, _ = self.run_install()
+        self.assertNotIn(("systemctl", "try-restart", install.ZIGBEE_SERVICE), system.commands)
 
     def test_uninstall_takes_the_zigbee_programs_along(self):
         self.run_install()
@@ -633,6 +870,26 @@ class ZigbeeAppTest(AppBase):
         self.assertEqual((view["job"]["state"], view["busy"]), ("failed", None))
         self.assertIn("unterbrochen", view["job"]["message"])
 
+    def test_setup_and_service_from_the_app(self):
+        self.ask("install")
+        self.plug()
+        self.start_service()
+        with self.assertRaises(ActionError) as ctx:
+            self.zigbee.setup(27)
+        self.assertEqual(ctx.exception.status, 400)
+        result = self.zigbee.setup(20)
+        self.assertEqual(result["message"], "Zigbee2MQTT ist eingerichtet (Funkkanal 20) und startet.")
+        programs = result["zigbee"]["programs"]
+        self.assertEqual((programs["service"]["active"], programs["network"]["channel"], programs["network"]["port"]),
+                         (True, 20, STICK))
+        self.assertEqual(self.zigbee.service(False)["zigbee"]["programs"]["service"]["enabled"], False)
+        self.assertEqual(self.zigbee.service(True)["message"], "Zigbee2MQTT startet.")
+        self.zigbee.remove()
+        self.view_when(lambda v: v["job"]["state"] == "done" and not v["busy"])
+        with self.assertRaises(ActionError) as ctx:
+            self.zigbee.setup(25)
+        self.assertEqual((ctx.exception.status, str(ctx.exception)), (502, "Bitte zuerst die Zigbee-Programme installieren."))
+
     def test_without_install_py_there_is_no_zigbee(self):
         zigbee = Zigbee(None)
         self.assertEqual(zigbee.view(), {"supported": False})
@@ -677,7 +934,8 @@ class ZigbeeApiTest(AppBase):
         self.call("PUT", "/api/setup/pin", {"pin": "4711"})
         self.cookie = None                                                  # the residents have no PIN
         self.assertTrue(self.call("GET", "/api/zigbee", expect=403)["pin_required"])
-        for path in ("/api/zigbee/refresh", "/api/zigbee/install", "/api/zigbee/remove"):
+        for path in ("/api/zigbee/refresh", "/api/zigbee/install", "/api/zigbee/remove", "/api/zigbee/setup",
+                     "/api/zigbee/service", "/api/zigbee/search", "/api/zigbee/devices/0x8c65a3fffe1d0001/remove"):
             self.call("POST", path, expect=403)
         self.assertFalse((self.data / install.ZIGBEE_REQUEST).exists())    # nothing reached the Pi
         self.assertFalse((self.data / install.ZIGBEE_STATUS).exists())
@@ -694,6 +952,50 @@ class ZigbeeApiTest(AppBase):
             self.call("GET", "/api/zigbee")))
         self.assertFalse(view["programs"]["complete"])
         self.assertNotIn("password", json.dumps(view))
+
+    def test_thermostats_over_the_api(self):
+        """The whole way with a simulated Mosquitto and Zigbee2MQTT: set up, search, a thermostat joins, remove it."""
+        broker = FakeBroker()
+        self.addCleanup(broker.close)
+        z2m = FakeZ2M(broker, channel=25, join_after=0.3, interview=0.3)
+        self.zigbee.net.retry = (0.05,)
+        self.zigbee.net.start()
+        self.addCleanup(self.zigbee.net.stop)
+        self.pi.on_z2m = lambda on: z2m.start() if on else z2m.stop()
+        with mock.patch.object(install, "MQTT_PORT", broker.port):
+            self.call("POST", "/api/zigbee/install")
+            self.until(lambda: self.call("GET", "/api/zigbee")["job"]["state"] == "done", seconds=10)
+        login = json.loads((self.data / install.ZIGBEE_LOGIN).read_text())
+        broker.users = {login["user"]: login["password"]}   # from now on Mosquitto lets only the app's login in
+        broker.drop()
+        self.until(lambda: self.call("GET", "/api/zigbee")["net"]["broker"] == "connected")
+        self.call("POST", "/api/zigbee/search", {"on": True}, expect=409)              # Zigbee2MQTT is not set up yet
+        self.plug()
+        self.call("POST", "/api/zigbee/refresh")
+        self.assertEqual(self.call("POST", "/api/zigbee/setup", {"channel": 25})["message"],
+                         "Zigbee2MQTT ist eingerichtet (Funkkanal 25) und startet.")
+        net = self.until(lambda: (lambda n: n if n["bridge"] == "online" else None)(self.call("GET", "/api/zigbee")["net"]))
+        self.assertEqual((net["version"], net["channel"], net["devices"], net["search"]["active"]), ("2.14.3", 25, [], False))
+        net = self.call("POST", "/api/zigbee/search", {"on": True})["zigbee"]["net"]
+        self.assertTrue(net["search"]["active"])
+        self.assertGreater(net["search"]["left"], 170)
+        request = json.loads(next(p for t, p in broker.published if t == "zigbee2mqtt/bridge/request/permit_join"))
+        self.assertEqual(request["time"], 180)
+        net = self.until(lambda: (lambda n: n if n["devices"] and n["devices"][0]["interview"] == "done"
+                                  and n["devices"][0]["battery"] else None)(self.call("GET", "/api/zigbee")["net"]))
+        device = net["devices"][0]
+        self.assertEqual((device["vendor"], device["model"], device["thermostat"], device["supported"], device["new"]),
+                         ("SONOFF", "TRV-ZBT", True, True, True))
+        self.assertEqual((device["battery"], device["signal"], device["temperature"]), (87, 132, 20.5))
+        self.assertFalse(self.call("POST", "/api/zigbee/search", {"on": False})["zigbee"]["net"]["search"]["active"])
+        z2m.remove_error = "Failed to remove device (Error: ZDO mgmtLeaveRsp timed out after 10000ms)"
+        answer = self.call("POST", f"/api/zigbee/devices/{device['ieee']}/remove", {"force": False}, expect=502)
+        self.assertIn("Das Gerät hat nicht geantwortet", answer["error"])
+        answer = self.call("POST", f"/api/zigbee/devices/{device['ieee']}/remove", {"force": True})
+        self.assertEqual((answer["message"], answer["zigbee"]["net"]["devices"]), ("Das Thermostat ist entfernt.", []))
+        self.call("POST", "/api/zigbee/devices/0x8c65a3fffe1d0001/remove", {}, expect=404)
+        self.call("POST", "/api/zigbee/search", {"on": "ja"}, expect=400)
+        self.assertNotIn(login["password"], json.dumps(self.call("GET", "/api/zigbee")))
 
 
 if __name__ == "__main__":

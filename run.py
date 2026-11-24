@@ -107,6 +107,7 @@ def main() -> int:
     finally:
         service.stop()
         support.stop()
+        zigbee.stop()
         server.server_close()
         log.info("%s %s", APP_NAME, reason)
         logs.mark_stopped()
