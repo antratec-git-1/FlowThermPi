@@ -414,6 +414,7 @@ class ThermostatTest(Base):
         self.service.poll_all()
         h = self.heater()
         self.assertEqual((h["firmware"], h["update"], h["ota"]["message"]), ("1.1.4", False, "Neue Firmware eingespielt."))
+        self.assertEqual(h["restore"], {"state": "waiting", "text": None})   # in a minute: what it forgot
         logged = "\n".join(said.output)
         self.assertIn("Thermostat Thermostat 00AA (0x8c65a3fffe1d00aa): neue Firmware wird eingespielt (Firmware bisher "
                       "1.1.3, Batterie 87 %)", logged)
@@ -466,6 +467,93 @@ class ThermostatTest(Base):
         with self.net._lock:
             self.net._ota[IEEE]["transaction"] = "eine-andere"
         until(lambda: self.ota().get("state") == "done")
+
+    def restored(self, state="done", seconds=10.0):
+        """Run the app's poller until the settings from before the update are back (or it gave up)."""
+        deadline = time.monotonic() + seconds
+        while (self.heater()["restore"] or {}).get("state") != state:
+            self.assertLess(time.monotonic(), deadline, "timed out")
+            self.service.poll_all()
+            time.sleep(0.05)
+        self.service.poll_all()
+        return self.heater()
+
+    def test_settings_come_back_after_a_firmware_update(self):
+        room = self.room()
+        plan = self.service.create_plan({"name": "Bewohnt", "days": week(BEWOHNT)})["id"]
+        self.service.update_room(room, {"plan": plan})
+        self.service.send_plan(room)
+        self.service.set_mode("room", room, "auto")
+        self.service.set_smart(IEEE, True)
+        self.service.calibrate(IEEE, {"correction": 0.4})
+        self.available()
+        factory = "00:00/16 06:00/21 22:00/16"   # as the real one (1.1.0 → 1.1.3): „ab Werk“ and off – here its plan too
+        self.z2m.ota_forgets = {"smart_temperature_control": "OFF", "system_mode": "off",
+                                **{f"weekly_schedule_{d}": factory for d in DAYS}}
+        before = len(self.sets())
+        with mock.patch("heizapp.service.RESTORE_SETTLE", 0.5), self.assertLogs("heizapp", "INFO") as said:
+            self.service.update_firmware(IEEE)
+            until(lambda: self.ota().get("state") == "done", seconds=10)
+            until(lambda: self.heater()["smart"] is False)   # forgotten
+            self.service.poll_all()   # it waits a minute (here 0.5 s) for the thermostat to settle
+            self.assertEqual((self.heater()["restore"], len(self.sets())), ({"state": "waiting", "text": None}, before))
+            time.sleep(0.5)
+            h = self.restored()
+        self.assertEqual((h["smart"], h["mode"], h["temp_corr"], h["setpoint"]), (True, "auto", 0.4, 22.0))
+        text = "sanft, Automatik, Heizplan, Korrektur +0,4 °C, Frostschutz 7 °C"
+        self.assertEqual(h["restore"], {"state": "done", "text": text})
+        self.assertEqual(self.sets()[before:], [
+            {"local_temperature_calibration": 0.4, "frost_protection_temperature": 7, "smart_temperature_control": "ON"},
+            {"schedule_group_to_edit": "1", **{f"weekly_schedule_{d}": "00:00/17 06:00/22 22:00/17" for d in DAYS}},
+            {"system_mode": "auto", "schedule_active_group": "1"}])
+        self.assertEqual(self.z2m.plans[IEEE]["1"]["monday"], "00:00/17 06:00/22 22:00/17")
+        logged = "\n".join(said.output)
+        self.assertIn(f"Thermostat Thermostat 00AA (0x8c65a3fffe1d00aa): gemerkt für nach dem Update: {text}", logged)
+        self.assertIn(f"Thermostat Thermostat 00AA (0x8c65a3fffe1d00aa) nach dem Update zurückgestellt: {text} – es meldete "
+                      "vorher: ab Werk, aus, einen anderen Heizplan", logged)
+        self.assertEqual(self.z2m.refused, [])
+
+    def test_what_is_set_during_the_update_comes_back(self):
+        self.available()
+        self.z2m.ota_every = 0.3
+        with mock.patch("heizapp.service.RESTORE_SETTLE", 0), self.assertLogs("heizapp", "INFO") as said:
+            self.service.update_firmware(IEEE)
+            self.service.set_setpoint("heater", IEEE, 19.5)   # it heats on meanwhile, and someone wants it cooler
+            self.assertEqual(self.ota()["state"], "running")
+            until(lambda: self.ota().get("state") == "done", seconds=10)
+            h = self.restored()
+        self.assertEqual((h["mode"], h["setpoint"], h["smart"]), ("manual", 19.5, False))
+        self.assertEqual(self.sets()[-1], {"system_mode": "heat", "occupied_heating_setpoint": 19.5})
+        self.assertIn("zurückgestellt: ab Werk, fest auf 19,5 °C, Heizplan, Korrektur ±0,0 °C, Frostschutz 7 °C – es "
+                      "meldete vorher: aus", "\n".join(said.output))
+
+    def test_settings_that_do_not_come_back(self):
+        self.available()
+        with mock.patch.multiple("heizapp.service", RESTORE_SETTLE=0, RESTORE_RETRY=0.2), \
+                mock.patch.object(trv.Thermostat, "answer", 0.3), self.assertLogs("heizapp", "INFO") as said:
+            self.service.update_firmware(IEEE)
+            until(lambda: self.ota().get("state") == "done", seconds=10)
+            self.z2m.asleep.add(IEEE)   # it does not take the commands
+            h = self.restored("failed")
+        self.assertEqual(h["restore"], {"state": "failed", "text": "Die Einstellungen von vorher ließen sich nicht wieder "
+                                        "einstellen – bitte Regelung, Aus/Automatik/Ein und Heizplan prüfen."})
+        logged = "\n".join(said.output)
+        self.assertEqual(logged.count("Zurückstellen nach dem Update hat nicht geklappt"), 2)   # 3 tries in all
+        self.assertIn("Einstellungen nach dem Update nicht zurückgestellt (" + trv.NOT_ANSWERED + ") – bitte Regelung, "
+                      "Aus/Automatik/Ein und Heizplan prüfen", logged)
+        self.service.poll_all()
+        self.assertEqual(self.heater()["restore"]["state"], "failed")   # stays on the page for a day
+
+    def test_a_failed_update_changes_nothing(self):
+        self.available()
+        self.z2m.ota_error = "Device didn't respond to OTA request"
+        with mock.patch("heizapp.service.RESTORE_SETTLE", 0):
+            self.service.update_firmware(IEEE)
+            self.assertEqual(self.heater()["restore"], {"state": "waiting", "text": None})
+            until(lambda: self.ota().get("state") == "failed")
+            self.service.poll_all()
+        self.assertIsNone(self.heater()["restore"])   # the thermostat kept its settings
+        self.assertEqual(self.sets(), [])
 
     def test_removed_in_the_app(self):
         room = self.room()
@@ -583,9 +671,14 @@ class ApiTest(Base):
         self.z2m.report(IEEE, update={"state": "available", "installed_version": 4353, "latest_version": 4354})
         until(lambda: self.net.thermostat(IEEE)["values"]["update"]["state"] == "available")
         self.assertIn("10 bis 100 Minuten", self.call("POST", f"/api/heaters/{IEEE}/firmware")["message"])
-        h = until(lambda: next((h for h in self.call("GET", "/api/state")["heaters"]
-                                if h["id"] == IEEE and (h["ota"] or {}).get("state") == "done"), None))
+        heater = lambda: next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == IEEE)   # noqa: E731
+        until(lambda: (heater()["ota"] or {}).get("state") == "done", seconds=10)
+        self.assertIs(until(lambda: heater()["smart"] is False), True)   # the thermostat forgot „sanft“ …
+        with mock.patch("heizapp.service.RESTORE_SETTLE", 0):
+            self.service.poll_all()   # … the app's poller writes it back
+            h = until(lambda: (h := heater())["restore"]["state"] == "done" and h)
         self.assertIs(h["smart"], True)
+        self.assertEqual(h["restore"]["text"], "sanft, fest auf 21 °C, Heizplan, Korrektur ±0,0 °C, Frostschutz 7 °C")
 
 
 class OverviewTextTest(unittest.TestCase):

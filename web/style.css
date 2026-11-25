@@ -74,6 +74,14 @@ input[type="number"] { width: 72px; }
 .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .modes button { padding: 8px 4px; font-size: 14px; }
 .modes button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* two choices side by side, the chosen one marked like a mode button (thermostat: „Sanft“ / „Ab Werk“) */
+.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.segmented button { border: 0; border-radius: 0; padding: 5px 16px; font-size: 14px; }
+.segmented button + button { border-left: 1px solid var(--line); }
+.segmented button:hover:not(:disabled):not(.active) { background: var(--bg); }
+.segmented button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.segmented button.active:disabled { opacity: 1; }
+.segmented-text { font-size: 13px; margin-top: 4px; }
 
 .plan-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
 .plan-row select { flex: 1; min-width: 140px; }

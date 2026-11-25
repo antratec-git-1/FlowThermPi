@@ -26,7 +26,9 @@ gelesen am 25.11.2026):
 
 Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach (…/get, höchstens alle 30 Minuten).
 Eine neue Firmware spielt heizapp.zigbee_net ein; die App verlangt dafür mindestens 70 % Batterie (Rat von
-Zigbee2MQTT: ein Update braucht viel Strom).
+Zigbee2MQTT: ein Update braucht viel Strom). Nach dem Update (1.1.0 → 1.1.3 am 25.11.2026) hatte das echte Thermostat
+„sanft“ vergessen und stand auf Aus. Deshalb merkt sich die App vorher, was eingestellt ist (keep_settings, KEEP), nimmt
+jeden Befehl während des Updates dazu und stellt danach alles wieder ein (restore_settings).
 
 Erreichbar ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat (Zigbee2MQTT schreibt die Zeit
 als last_seen dazu). Ist es 30 Minuten still, fragt die App einmal nach seiner Temperatur (…/get) – höchstens alle
@@ -57,6 +59,10 @@ BOOST_MAX = 180            # minutes
 BATTERY_LOW = 20           # per cent: „Batterie bald wechseln“
 OTA_BATTERY = 70           # per cent the battery needs at least for a firmware update
 SMART = "smart_temperature_control"   # "ON": „sanft regeln“ – the thermostat's own smart control (PID)
+# what the app sets and writes back after a firmware update – in this order: correction, frost protection and „sanft“,
+# then the plan the thermostat is to run, then its mode (with the setpoint only when it is fixed: "heat")
+KEEP = ("local_temperature_calibration", "frost_protection_temperature", SMART, "schedule_group_to_edit",
+        *(f"weekly_schedule_{d}" for d in DAY_KEYS), "system_mode", "schedule_active_group", "occupied_heating_setpoint")
 CORR_STEP, CORR_MAX = 2, 100   # 0.1 °C: the correction goes in 0.2 °C steps up to ±10 °C
 FAULTS = {"temperature_sensor_issue_detected": "Temperaturfühler gestört",
           "valve_adjustment_issue_detected": "Ventil lässt sich nicht richtig stellen",
@@ -124,6 +130,32 @@ def plan_problems(days: dict[int, list[str]], frost: int | None) -> list[str]:
             for d in range(1, 8) if (n := len(day_points(days.get(d, []), frost))) > MAX_POINTS]
 
 
+def _deg(value: float) -> str:
+    return f"{value:g} °C".replace(".", ",")
+
+
+def describe(values: dict, plan: str = "Heizplan") -> str:
+    """Settings of a thermostat (Zigbee2MQTT's names, see KEEP) in words for the log: „sanft, Automatik, Heizplan,
+    Korrektur +0,4 °C, Frostschutz 7 °C“. plan: the word for weekly schedules among them."""
+    words = []
+    if values.get(SMART) is not None:
+        words.append({"ON": "sanft", "OFF": "ab Werk"}.get(values[SMART], f"Regelung {values[SMART]}"))
+    mode, setpoint = values.get("system_mode"), _number(values.get("occupied_heating_setpoint"))
+    if mode == "heat" and setpoint is not None:
+        words.append(f"fest auf {_deg(setpoint)}")
+    elif mode is not None:
+        words.append({"auto": "Automatik", "heat": "fest eingestellt", "off": "aus"}.get(mode, f"Betrieb {mode}"))
+    if any(k.startswith("weekly_schedule_") for k in values):
+        words.append(plan)
+    corr = _number(values.get("local_temperature_calibration"))
+    if corr is not None:
+        words.append("Korrektur " + ("±0,0" if abs(corr) < 0.05 else f"{corr:+.1f}".replace(".", ",")) + " °C")
+    frost = _number(values.get("frost_protection_temperature"))
+    if frost is not None:
+        words.append(f"Frostschutz {_deg(frost)}")
+    return ", ".join(words)
+
+
 def _same(have, want) -> bool:
     if _number(want) is not None:
         return _number(have) is not None and abs(have - want) < 0.05
@@ -148,6 +180,8 @@ class Thermostat:
         self._smart_asked = 0.0            # … and of the last one how it regulates
         self._boost_started: float | None = None   # when the app started the boost that runs now
         self._boost_asked = False          # the boost should be over: asked once whether it is
+        self._kept: dict | None = None     # a firmware update runs: the settings to write back afterwards (KEEP)
+        self._keep_lock = threading.Lock()
 
     # ---------------------------------------------------------------- what Zigbee2MQTT knows
     def _state(self) -> dict:
@@ -241,6 +275,7 @@ class Thermostat:
         with self._lock:
             st = self.net.thermostat(self.ieee)
             if not force and st and st["values"] and _matches(st["values"], payload):
+                self._keep(payload)
                 return
             seq = self.net.send(self.ieee, payload)
             if seq is None:
@@ -248,7 +283,52 @@ class Thermostat:
             if self.net.wait(self.ieee, seq, lambda values: _matches(values, payload), timeout or self.answer) is None:
                 log.warning("Zigbee: Thermostat %s hat %s nicht bestätigt", self.ieee, ", ".join(payload))
                 raise NoAnswer(NOT_ANSWERED)
+            self._keep(payload)
         log.debug("Zigbee: Thermostat %s: %s bestätigt", self.ieee, payload)
+
+    def _keep(self, payload: dict) -> None:
+        """While a firmware update runs, what the app sets is to come back after it too (see keep_settings)."""
+        with self._keep_lock:
+            if self._kept is not None:
+                self._kept.update({k: x for k, x in payload.items() if k in KEEP})
+
+    # ---------------------------------------------------------------- around a firmware update
+    def keep_settings(self) -> dict:
+        """Before a firmware update: remember the thermostat's settings (KEEP) – and from now on every command of the
+        app – to write them back afterwards with restore_settings(). Returns what it remembered."""
+        values = (self.net.thermostat(self.ieee) or {}).get("values") or {}
+        with self._keep_lock:
+            self._kept = {k: values[k] for k in KEEP if values.get(k) not in (None, "")}
+            return dict(self._kept)
+
+    def forget_settings(self) -> None:
+        """The update failed (the thermostat kept its settings) or is long over: nothing to write back."""
+        with self._keep_lock:
+            self._kept = None
+
+    def restore_settings(self) -> tuple[dict, dict]:
+        """After a firmware update: write back what keep_settings() remembered – all of it, also what looks the same:
+        Zigbee2MQTT may still show values the thermostat has forgotten. Returns (what it reported differently, what
+        was written). Raises NoAnswer if the thermostat did not confirm; what was remembered stays, to try again."""
+        with self._keep_lock:
+            kept = dict(self._kept or {})
+        values = (self.net.thermostat(self.ieee) or {}).get("values") or {}
+        mode = kept.get("system_mode")
+        plan = {"schedule_group_to_edit": kept["schedule_group_to_edit"],
+                **{k: kept[k] for k in KEEP if k.startswith("weekly_schedule_") and k in kept}} \
+            if "schedule_group_to_edit" in kept else {}
+        steps = [{k: kept[k] for k in ("local_temperature_calibration", "frost_protection_temperature", SMART) if k in kept},
+                 plan,
+                 {k: kept[k] for k in ("system_mode", "schedule_active_group" if mode == "auto" else "",
+                                       "occupied_heating_setpoint" if mode == "heat" else "") if k in kept}]
+        for payload in steps:
+            if payload:
+                self._send(payload, timeout=self.plan_answer if payload is plan else None, force=True)
+        with self._keep_lock:
+            self._kept = None
+        written = {k: x for payload in steps for k, x in payload.items()}
+        return ({k: values[k] for k in written if values.get(k) is not None and not _same(values[k], written[k])},
+                written)
 
     def set(self, name: str, value, verify: bool = True) -> None:
         """Write one field (in the AeroFlow's units), rounded to the thermostat's step."""

@@ -37,6 +37,12 @@ MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby
 VIEW_MODES = {**MODES, trv.OFF: "off"}   # operating_mode -> mode on the page; „off“ only from a thermostat
 SMART_WORDS = {True: "regelt jetzt sanft", False: "regelt jetzt wie ab Werk (ganz auf, ganz zu)"}   # „Sanft regeln“
 SUMMARY_EVERY = 15 * 60   # seconds between two lines „Stand: …“ in the log
+RESTORE_SETTLE = 60       # seconds after a firmware update until the app writes the thermostat's settings back …
+RESTORE_RETRY = 5 * 60    # … and between attempts while it does not confirm them
+RESTORE_TRIES = 3
+RESTORE_KEEP = 24 * 3600  # seconds the page says what came back
+RESTORE_FAILED = ("Die Einstellungen von vorher ließen sich nicht wieder einstellen – bitte Regelung, Aus/Automatik/Ein "
+                  "und Heizplan prüfen.")
 
 
 def host_clock_synced() -> bool:
@@ -182,6 +188,8 @@ class Service:
         self._sensor_live: dict[str, dict] = {}    # sensor id -> latest reading (data.json gets one every 15 min)
         self._sensors_polled = self._sensors_saved = self._sensors_searched = 0.0
         self._last_heal = 0.0
+        self._restore: dict[str, dict] = {}   # thermostat -> its settings coming back after a firmware update
+        self._restore_lock = threading.Lock()
         self._last_daily_sync = None
         self._clock_trusted = False
         self._clock_warned = False
@@ -267,6 +275,7 @@ class Service:
     def poll_all(self, full: bool = False) -> None:
         self._sync_thermostats()
         list(self._pool.map(lambda e: self.refresh(e, full), self.entries))
+        self._after_updates()
 
     # ------------------------------------------------------------------ thermostats (Zigbee)
     def attach_zigbee(self, net) -> None:
@@ -302,6 +311,8 @@ class Service:
             with self.store.edit() as d:
                 d["heaters"].pop(ieee, None)
             log.info("Thermostat %s aus der App entfernt", ieee)
+        with self._restore_lock:
+            self._restore.pop(ieee, None)
         self._sync_thermostats()
         return result if result is not None else {}
 
@@ -348,11 +359,95 @@ class Service:
         if other:
             raise ActionError(f"Gerade wird die Firmware von „{self._name(other)}“ eingespielt – bitte warten, bis sie "
                               "fertig ist.", 409)
-        self.zigbee.firmware(e.id)
+        kept = e.device.keep_settings()   # to come back afterwards, with what the app sets meanwhile
+        try:
+            self.zigbee.firmware(e.id)
+        except Exception:
+            e.device.forget_settings()
+            raise
+        with self._restore_lock:
+            if kept:
+                self._restore[e.id] = {"state": "waiting", "done": None, "next": 0.0, "tries": 0, "text": None, "at": None}
+            else:
+                self._restore.pop(e.id, None)
+        if not kept:   # it has not reported any setting yet: nothing to write back
+            e.device.forget_settings()
         log.info("Thermostat %s: neue Firmware wird eingespielt (Firmware bisher %s, Batterie %d %%)", self._who(e),
                  e.values.get("active_fw_ver") or "?", info["battery"])
+        if kept:
+            log.info("Thermostat %s: gemerkt für nach dem Update: %s", self._who(e), trv.describe(kept))
         return {"message": "Das Einspielen hat begonnen. Es dauert 10 bis 100 Minuten – das Thermostat heizt dabei "
                            "weiter und startet am Ende kurz neu."}
+
+    def _after_updates(self) -> None:
+        """After a firmware update a thermostat may have forgotten its settings: the real TRV-ZBT came back from
+        1.1.0 → 1.1.3 (25.11.2026) „ab Werk“ instead of „sanft“, and switched off. So once an update is done and the
+        thermostat has had a minute to settle, the app writes back what it had (Thermostat.keep_settings – with what
+        was set during the update). After a failed update the thermostat keeps its settings: nothing to do."""
+        if not self._restore:
+            return
+        now = time.time()
+        for e in [x for x in self.entries if x.zigbee]:
+            with self._restore_lock:
+                job = self._restore.get(e.id)
+                if job is None or job["state"] == "busy":
+                    continue
+                if job["state"] in ("done", "failed"):
+                    if now - job["at"] > RESTORE_KEEP:
+                        self._restore.pop(e.id, None)
+                    continue
+            ota = (e.device.info()["ota"] or {}).get("state")
+            if ota == "running":
+                continue
+            if ota != "done":   # failed – or its result is a day old and the thermostat never came back
+                e.device.forget_settings()
+                with self._restore_lock:
+                    self._restore.pop(e.id, None)
+                if job["done"]:
+                    log.warning("Thermostat %s: %s", self._who(e), RESTORE_FAILED)
+                continue
+            with self._restore_lock:
+                job["done"] = job["done"] or now
+                if now - job["done"] < RESTORE_SETTLE or now < job["next"] or not e.online:
+                    continue
+                job["state"] = "busy"
+            self._pool.submit(self._restore_settings, e, job)
+
+    def _restore_settings(self, e: HeaterState, job: dict) -> None:
+        """Write back the settings from before the firmware update – in the pool: it may take a minute."""
+        try:
+            differed, written = e.device.restore_settings()
+        except Exception as exc:   # not confirmed (or something unexpected): again in 5 minutes, 3 times in all
+            reason = str(exc) if isinstance(exc, (DeviceError, coap.CoapError)) else f"{type(exc).__name__}: {exc}"
+            with self._restore_lock:
+                job["tries"] += 1
+                last = job["tries"] >= RESTORE_TRIES
+                if last:
+                    job.update(state="failed", at=time.time(), text=RESTORE_FAILED)
+                else:
+                    job.update(state="waiting", next=time.time() + RESTORE_RETRY)
+            if last:
+                e.device.forget_settings()
+                log.warning("Thermostat %s: Einstellungen nach dem Update nicht zurückgestellt (%s) – bitte Regelung, "
+                            "Aus/Automatik/Ein und Heizplan prüfen", self._who(e), reason)
+            else:
+                log.info("Thermostat %s: Zurückstellen nach dem Update hat nicht geklappt (%s) – nächster Versuch in "
+                         "%d Minuten", self._who(e), reason, RESTORE_RETRY // 60)
+            return
+        text = trv.describe(written)
+        with self._restore_lock:
+            job.update(state="done", at=time.time(), text=text)
+        log.info("Thermostat %s nach dem Update zurückgestellt: %s – %s", self._who(e), text,
+                 f"es meldete vorher: {trv.describe(differed, 'einen anderen Heizplan')}" if differed
+                 else "es meldete nichts Abweichendes")
+        self.refresh(e, full=True)
+
+    def _restore_view(self, ieee: str) -> dict | None:
+        """For the page: the settings coming back after a firmware update – {state: waiting | done | failed, text}."""
+        with self._restore_lock:
+            job = self._restore.get(ieee)
+            return None if job is None else {"state": "waiting" if job["state"] == "busy" else job["state"],
+                                             "text": job["text"]}
 
     def refresh(self, e: HeaterState, full: bool = False) -> None:
         with e.refresh_lock:
@@ -1751,5 +1846,6 @@ class Service:
         if e.zigbee:   # battery, radio, faults; the last sign of life is the thermostat's own, not the last look
             info = e.device.info()
             view.update(host="Zigbee", hostname=info.pop("model"), mac=None,
-                        last_seen=self._iso(info.pop("heard")) or view["last_seen"], **info)
+                        last_seen=self._iso(info.pop("heard")) or view["last_seen"], restore=self._restore_view(e.id),
+                        **info)
         return view

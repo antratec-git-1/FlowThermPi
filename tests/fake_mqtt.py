@@ -12,7 +12,8 @@ with a fresh last_seen; …/get brings the state, too. A thermostat in `asleep` 
 
 A firmware update (bridge/request/device/ota_update/update) goes as the Zigbee2MQTT guide describes it (read on
 25.11.2026): the device reports its progress `ota_steps` times, `ota_every` seconds apart; only at the end comes the
-answer, with the firmware before and after – or with `ota_error`.
+answer, with the firmware before and after – or with `ota_error`. When it restarts with the new firmware, the
+thermostat forgets `ota_forgets` – as the real one did (1.1.0 → 1.1.3, 25.11.2026: „sanft“ off, switched off).
 """
 from __future__ import annotations
 
@@ -322,6 +323,7 @@ class FakeZ2M:
         self.ota_every = 0.05               # … this many seconds apart (real: every 30 s, 10 to 100 minutes in all)
         self.ota_error: str | None = None   # why a firmware update fails (e.g. the device does not take part)
         self.ota_firmware = "1.1.4"         # the firmware (software_build_id) after an update
+        self.ota_forgets = {"smart_temperature_control": "OFF", "system_mode": "off"}   # … and what it forgets then
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
         broker.hooks.append(self._command)
@@ -550,7 +552,15 @@ class FakeZ2M:
                 return later(self.ota_every, lambda: step(n + 1))
             with self.lock:
                 found["software_build_id"] = self.ota_firmware
-            self.report(ieee, update={"state": "idle", "installed_version": latest, "latest_version": latest})
+                state = self.states.setdefault(ieee, trv_state())
+                plans = self.plans.setdefault(ieee, {g: {d: state[f"weekly_schedule_{d}"] for d in DAYS} for g in "123"})
+                for key, value in self.ota_forgets.items():   # a forgotten plan is gone from the thermostat too
+                    if key.startswith("weekly_schedule_"):
+                        plans[state["schedule_group_to_edit"]][key[16:]] = value
+                forgets = {**self.ota_forgets, **({"running_state": "idle"}
+                                                 if self.ota_forgets.get("system_mode") == "off" else {})}
+            self.report(ieee, update={"state": "idle", "installed_version": latest, "latest_version": latest},
+                        **forgets)
             self._devices()
             self.broker.publish(topic, {**answer, "status": "ok", "data": {
                 "id": ieee, "from": {"software_build_id": old, "file_version": before},

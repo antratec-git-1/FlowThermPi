@@ -543,6 +543,18 @@ function planText(g, online, target) {
   return `Bis ${whenText(at, p.windowEnd)} auf ${degShort(target)} gestellt, danach wieder nach Plan.`;
 }
 
+function planLabel(g, target) {
+  // under the target in Automatik (Einrichtung › Räume): from the plan – or set by hand until its time window ends
+  const plan = planOfGroup(g);
+  const at = weekMinute(serverNow());
+  const p = plan && planNow(plan, at);
+  if (!p || p.constant || target == null) return "Soll laut Heizplan";
+  const frost = (g.heaters.find(h => h.online && h.antifrost != null) || {}).antifrost ?? 5;
+  const near = (a, b) => a != null && Math.abs(a - b) < 0.25;
+  if (near(target, p.temp ?? frost) || (near(target, p.next ?? frost) && p.until - at <= 180)) return "Soll laut Heizplan";
+  return `Soll bis ${whenText(at, p.windowEnd)}, dann Heizplan`;
+}
+
 function homeStatus(g, online, mode, target, writable) {
   if (!online.length) {
     const thermostats = g.heaters.every(h => h.kind === "zigbee");
@@ -957,7 +969,7 @@ function roomCard(g) {
       <div><span class="big">${deg(temps.length ? avg(temps) : null)}</span><span class="label">Raumtemperatur</span></div>
       <div class="target ${p ? "pending" : ""}">
         <button class="round" data-action="sp" data-delta="-0.5" ${dis} aria-label="kälter">−</button>
-        <div><span class="big">${deg(target)}</span><span class="label">${mode === "auto" ? "Soll bis Fensterende" : "Solltemperatur"}</span></div>
+        <div><span class="big">${deg(target)}</span><span class="label">${mode === "auto" ? planLabel(g, target) : "Solltemperatur"}</span></div>
         <button class="round" data-action="sp" data-delta="0.5" ${dis} aria-label="wärmer">+</button>
       </div>
     </div>
@@ -1116,6 +1128,18 @@ function timeOptions(list, value) {
 function renderEditor() {
   const el = document.getElementById("tab-plans");
   el.className = "tab single";
+  setHTML(el, editorHTML());
+}
+
+function updateDayBar(dayEl) {
+  // after a new temperature only the day's bar changes: a redraw would replace the field under the mouse, and holding
+  // its arrows would stop after one step
+  const old = dayEl.querySelector(".day-head .bar");
+  if (old) old.outerHTML = bar(editing.days[dayEl.dataset.day]);
+  document.getElementById("tab-plans")._html = editorHTML();   // what the page shows now, for setHTML's comparison
+}
+
+function editorHTML() {
   const days = DAY_LONG.map((name, i) => {
     const d = String(i + 1);
     const ws = editing.days[d];
@@ -1136,7 +1160,7 @@ function renderEditor() {
       </div>
     </section>`;
   }).join("");
-  setHTML(el, `<article class="card">
+  return `<article class="card">
       <div class="editor-head"><input id="plan-name" placeholder="Name, z. B. Wohnzimmer werktags" value="${esc(editing.name)}"></div>
       <p class="hint">Zwischen den Zeitfenstern hält die Heizung ihre Frostschutztemperatur (meist 5 °C). Für eine Absenkung,
       z. B. nachts 17 °C, ein eigenes Zeitfenster anlegen oder die Lücken füllen lassen. Raster: Viertelstunden, Tagesende 23:59,
@@ -1147,7 +1171,7 @@ function renderEditor() {
       ${days}
       <div class="actions"><button class="primary" data-action="plan-save">Speichern</button>
         <button data-action="plan-cancel">Abbrechen</button></div>
-    </article>`);
+    </article>`;
 }
 
 function addWindow(d) {
@@ -1790,14 +1814,18 @@ function thermostatFactsHTML(h, roomOptions) {  // a SONOFF thermostat over Zigb
   </dl>`;
 }
 
-function smartHTML(h) {  // „Sanft regeln“: the thermostat's own smart control – or fully open, then closed (factory)
+function smartHTML(h) {
+  // „Regelung“: two buttons like Aus/Automatik/Ein, the chosen one marked – „Sanft“ (the thermostat's own smart
+  // control) or „Ab Werk“ (fully open until warm, then closed); one short line says what the chosen one does
   const sending = busy.has("smart:" + h.id);
-  const text = h.smart === true ? "sanft – öffnet das Ventil nur so weit wie nötig"
-    : h.smart === false ? "ganz auf, bis es warm ist, dann ganz zu (wie ab Werk)" : "noch nicht bekannt";
-  const button = h.online ? `<button class="small" data-action="trv-smart" data-on="${h.smart ? "0" : "1"}"
-    ${sending ? "disabled" : ""}>${sending ? "wird gesendet …" : h.smart ? "Wie ab Werk" : "Sanft regeln"}</button>` : "";
-  return `<dt>Regelung</dt><dd>${esc(text)} ${button}
-    ${h.smart ? "" : '<span class="muted">· sanft heizt gleichmäßiger, wie ein normaler Thermostatkopf</span>'}</dd>`;
+  const choice = (on, label) => `<button class="${h.smart === on ? "active" : ""}" data-action="trv-smart"
+    data-on="${on ? "1" : "0"}" aria-pressed="${h.smart === on}" ${h.online && !sending ? "" : "disabled"}>${label}</button>`;
+  const text = sending ? "wird gesendet …"
+    : h.smart === true ? "Öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf."
+    : h.smart === false ? "Ganz auf, bis es warm ist, dann ganz zu. „Sanft“ heizt gleichmäßiger."
+    : "Das Thermostat hat noch nicht gemeldet, wie es regelt.";
+  return `<dt>Regelung</dt><dd><div class="segmented" role="group" aria-label="Regelung">${choice(true, "Sanft")}${
+    choice(false, "Ab Werk")}</div><div class="segmented-text muted">${esc(text)}</div></dd>`;
 }
 
 const OTA_BATTERY = 70;   // per cent the battery needs for a firmware update (heizapp.trv.OTA_BATTERY)
@@ -1810,7 +1838,11 @@ function firmwareHTML(h) {  // the firmware and its update: start, progress (rep
       o.remaining ? `, noch etwa ${Math.max(1, Math.round(o.remaining / 60))} min` : ""}
       <span class="muted">(das Thermostat heizt dabei weiter)</span>`;
   } else if (o && o.state === "done") {
-    more = " · ✓ neue Firmware eingespielt";
+    const r = h.restore;   // what the thermostat forgot with the update comes back a minute later
+    more = " · ✓ neue Firmware eingespielt" + (!r ? ""
+      : r.state === "waiting" ? ' <span class="muted">· die Einstellungen von vorher kommen gleich wieder …</span>'
+      : r.state === "done" ? ` <span class="muted">· Einstellungen von vorher wieder eingestellt${r.text ? ` (${esc(r.text)})` : ""}</span>`
+      : ` · <span class="error-text">${esc(r.text)}</span>`);
   } else if (o && o.state === "failed") {
     more = ` · <span class="error-text">Einspielen hat nicht geklappt: ${esc(o.message)}</span>`;
   }
@@ -3131,7 +3163,8 @@ document.addEventListener("click", e => {
     case "dev-save": return saveDevice();
     case "dev-delete": return deleteDevice();
     case "calib-open": return openCalib(t.closest(".device").dataset.heater);
-    case "trv-smart": return setSmart(t.closest(".device").dataset.heater, t.dataset.on === "1");
+    case "trv-smart":   // the chosen one again: nothing to do
+      return t.classList.contains("active") ? undefined : setSmart(t.closest(".device").dataset.heater, t.dataset.on === "1");
     case "trv-firmware": return startFirmware(t.closest(".device").dataset.heater);
     case "calib-cancel": calibForm = null; return render();
     case "calib-save": return saveCalib(null);
@@ -3173,7 +3206,7 @@ document.addEventListener("change", e => {
   if (editing && t.closest(".win")) {
     const w = editing.days[dayOf(t)][Number(t.closest(".win").dataset.idx)];
     w[t.dataset.field] = t.dataset.field === "temp" ? parseFloat(String(t.value).replace(",", ".")) : t.value;
-    return renderEditor();
+    return t.dataset.field === "temp" ? updateDayBar(t.closest(".day")) : renderEditor();
   }
   if (sensorForm && t.dataset.sfield) { sensorForm[t.dataset.sfield] = t.value; return; }
   if (pillForm && t.dataset.pfield) { pillForm[t.dataset.pfield] = t.value; return; }

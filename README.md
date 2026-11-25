@@ -365,8 +365,9 @@ SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zi
 Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Ab Version 0.4.4 installiert
 *Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
 Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten); ab 0.4.9
-regeln sie auf Wunsch sanft und bekommen neue Firmware per Knopf. Noch nicht dabei: Heizpläne aus einem Thermostat
-auslesen und die Shelly Pill als Fühler für ein Thermostat.
+regeln sie auf Wunsch sanft und bekommen neue Firmware per Knopf; ab 0.4.10 stellt die App danach ihre Einstellungen
+wieder ein. Noch nicht dabei: Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für ein
+Thermostat.
 
 - **Was der Pi lädt:**
   - **Mosquitto** aus dem Paketarchiv von Raspberry Pi OS. Es reicht die Nachrichten zwischen Zigbee2MQTT und der App
@@ -455,14 +456,19 @@ auslesen und die Shelly Pill als Fühler für ein Thermostat.
 - **Erreichbar** ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat. Nach 30 Minuten Stille
   fragt die App einmal nach seiner Temperatur. Schweigt es länger, hilft meist ein Druck auf die mittlere Taste.
 - Die Uhr der Thermostate stellt Zigbee2MQTT.
-- **Sanft regeln** (ab 0.4.9, *Einrichtung › Geräte*, Zeile „Regelung“): Ab Werk öffnet das Thermostat das Ventil ganz,
-  bis die Temperatur erreicht ist, und schließt es dann ganz. „Sanft regeln“ schaltet seine eigene „smarte
-  Regelung“ ein: Es öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf. „Wie ab Werk“ schaltet
-  sie wieder aus. Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach.
+- **Sanft regeln** (ab 0.4.9, *Einrichtung › Geräte*, Zeile „Regelung“ mit den Knöpfen „Sanft“ und „Ab Werk“): Ab Werk
+  öffnet das Thermostat das Ventil ganz, bis die Temperatur erreicht ist, und schließt es dann ganz. „Sanft“ schaltet
+  seine eigene „smarte Regelung“ ein: Es öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf.
+  Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach.
 - **Firmware einspielen** (ab 0.4.9, Zeile „Firmware“): Liegt bei Zigbee2MQTT eine neue Firmware bereit, spielt der
   Knopf sie über Funk ein. Das dauert 10 bis 100 Minuten; das Thermostat heizt dabei weiter und startet am Ende kurz
   neu. Die Seite zeigt, wie weit es ist. Es geht immer nur ein Thermostat zur Zeit und nur mit mindestens 70 %
   Batterie, wie Zigbee2MQTT es rät.
+- **Nach dem Update** (ab 0.4.10): Das echte Thermostat hatte nach seinem Update „sanft“ vergessen und stand auf Aus.
+  Deshalb merkt sich die App vor dem Einspielen Regelung, Aus/Automatik/Ein, Heizplan, Korrektur und Frostschutz –
+  auch was während des Updates in der App eingestellt wird – und stellt alles eine Minute nach dem Update wieder ein.
+  Klappt das nicht, versucht sie es noch zweimal im Abstand von 5 Minuten; dann steht auf der Seite, was zu prüfen
+  ist. Das Protokoll sagt, was das Thermostat nach dem Update gemeldet hat und was die App zurückgestellt hat.
 
 ## Protokoll: wenn etwas schiefgeht
 
