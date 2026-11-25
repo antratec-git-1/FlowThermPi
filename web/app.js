@@ -235,6 +235,7 @@ function setBanner(text, info = false) {  // info: blue note instead of a red wa
 }
 
 function showView(name) {
+  closeHistory();   // a Verlauf from the setup shows the costs: it does not stay open on the home page
   view = name;
   if (name === "setup") sessionStorage.setItem("heizung.view", "setup");
   else sessionStorage.removeItem("heizung.view");
@@ -702,6 +703,7 @@ function homeTile(g) {
     ${battery}
     ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
     ${tileDevicesHTML(g, sensors)}
+    ${tileHistoryHTML(g)}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
     ${heating && !isOff ? WAVE : ""}
   </article>`;
@@ -808,6 +810,349 @@ async function helpDo(url) {
     if (res.message) toast(res.message);
   } catch (e) { toast(e.message, true); }
   helpPending = false;
+  await refresh();
+}
+
+// ------------------------------------------------------------------ Verlauf und Kosten (a room's day, Strom und Kosten)
+let hist = null;       // the open „Verlauf“: {kind, id, from: "home"|"setup", day, data, error, loading, table}
+let histHover = null;  // start (s) of the five minutes under the finger or the mouse
+let histResize = 0;
+let costForm = null;   // „Strom und Kosten“ while it is being typed in: {price, show, powers: {heater id: text}}
+const POWER_VALUES = [650, 1200, 1300, 1600, 1950, 2000, 2450];   // W, the FlexiSmart Pro models A01–A14 (manual)
+
+function durText(s) {  // 7800 -> "2 Std. 10 Min."
+  const m = Math.round((s || 0) / 60), h = Math.floor(m / 60), r = m % 60;
+  if (!m) return s > 0 ? "unter 1 Min." : "0 Min.";
+  return h ? (r ? `${h} Std. ${r} Min.` : `${h} Std.`) : `${r} Min.`;
+}
+function euroText(x) { return x.toFixed(2).replace(".", ",") + " €"; }
+function kwhText(x) { return x.toFixed(x < 1 ? 2 : x < 10 ? 1 : 0).replace(".", ",") + " kWh"; }
+function ctText(x) { return String(x).replace(".", ","); }
+function costsShown(from) { return from === "setup" || !!(state && state.costs && state.costs.show); }   // the switch
+function recordingKnown() { return !!(state && state.history && (state.history.recording || state.history.first_day)); }
+function todayOf(g) { return g.kind === "room" ? g.room && g.room.today : g.heaters[0] && g.heaters[0].today; }
+function addDays(day, n) {  // "2026-11-25", -1 -> "2026-11-24" (calendar days)
+  const d = new Date(day + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function histClock(t, d) {  // "14:35" in the app's time zone
+  const opt = { hour: "2-digit", minute: "2-digit" };
+  try { return new Date(t * 1000).toLocaleTimeString("de-DE", d.tz ? Object.assign({ timeZone: d.tz }, opt) : opt); }
+  catch (_) { return new Date(t * 1000).toLocaleTimeString("de-DE", opt); }
+}
+
+function todayText(t, from) {  // "Heute 2 Std. 10 Min. geheizt · etwa 0,90 €" – in the setup with the kWh as well
+  let text = t.heat_s >= 60 ? `Heute ${durText(t.heat_s)} geheizt` : "Heute noch nicht geheizt";
+  if (!costsShown(from) || t.heat_s < 60) return text;
+  if (t.kwh != null && (from === "setup" || t.eur == null)) text += ` · etwa ${kwhText(t.kwh)}`;
+  if (t.eur != null) text += ` · ${from === "setup" ? "" : "etwa "}${euroText(t.eur)}`;
+  return text;
+}
+
+function tileHistoryHTML(g) {  // on the home tile: how long the room heated today – a tap opens its „Verlauf“
+  const t = todayOf(g);
+  if (!t || !recordingKnown()) return "";
+  return `<button class="tile-history" data-action="history"><span>${esc(todayText(t, "home"))}</span>` +
+    '<span class="go">Verlauf ›</span></button>';
+}
+
+function cardHistoryHTML(g) {  // the same in the setup's room card, with the energy
+  const t = todayOf(g);
+  if (!t || !recordingKnown()) return "";
+  return `<div class="today-row"><span>${esc(todayText(t, "setup"))}</span>` +
+    '<button class="small" data-action="history">Verlauf</button></div>';
+}
+
+function openHistory(card, from) {
+  const g = groupFor(card);
+  if (!g || !state) return;
+  hist = { kind: g.kind, id: g.id, from, day: state.now.slice(0, 10), data: null, error: "", loading: true, table: false };
+  histHover = null;
+  renderHistory();
+  loadHistory();
+}
+
+function closeHistory() {
+  if (!hist) return;
+  hist = null;
+  renderHistory();
+}
+
+async function loadHistory(day) {
+  const h = hist;
+  if (!h) return;
+  if (day && day !== h.day) { h.day = day; h.loading = true; histHover = null; renderHistory(); }
+  try {
+    const data = await api("GET", `${apiBase(h)}/history/${h.day}`);
+    if (hist !== h || data.day !== h.day) return;   // closed, or another day chosen meanwhile
+    h.data = data;
+    h.error = "";
+  } catch (e) {
+    if (hist !== h) return;
+    h.error = e.message;
+  }
+  h.loading = false;
+  renderHistory();
+}
+
+function renderHistory() {
+  const el = document.getElementById("history");
+  document.body.classList.toggle("sheet-open", !!hist);
+  if (!hist || !state) { el.hidden = true; el.innerHTML = ""; el._html = null; return; }
+  const h = hist, d = h.data && h.data.day === h.day ? h.data : null;
+  const today = state.now.slice(0, 10), first = state.history && state.history.first_day;
+  const prev = first && h.day > first ? addDays(h.day, -1) : null, next = h.day < today ? addDays(h.day, 1) : null;
+  const g = groups().find(x => x.kind === h.kind && x.id === h.id);
+  const name = d ? d.name : g ? g.name : "";
+  const step = (to, label, sym) => `<button class="day-step" data-action="hist-day" data-day="${to || ""}" ${
+    to && !h.loading ? "" : "disabled"} aria-label="${label}">${sym}</button>`;
+  setHTML(el, `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="hist-title">
+    <div class="sheet-head"><h2 id="hist-title"><span class="kicker">Verlauf</span>${esc(name)}</h2>
+      <button class="sheet-close" data-action="hist-close">Schließen</button></div>
+    <div class="hist-day">${step(prev, "Tag davor", "‹")}<span class="day-label">${
+      esc(d ? d.label : h.loading ? "…" : "")}</span>${step(next, "Tag danach", "›")}</div>
+    ${d ? historyBodyHTML(d, h.from) : `<p class="hist-empty">${esc(h.error || "Der Verlauf wird geladen …")}</p>`}
+  </div>`);
+  el.hidden = false;
+  drawHistoryChart();
+}
+
+function historyBodyHTML(d, from) {
+  const costs = costsShown(from), setup = from === "setup", m = histModel(d);
+  const win = d.points.reduce((a, p) => a + (p.fenster || 0), 0);
+  const stats = [["Geheizt", durText(d.heat_s)]];
+  if (costs && d.kwh != null) stats.push(["Strom", "etwa " + kwhText(d.kwh)]);
+  if (costs && d.eur != null) stats.push(["Kosten", "etwa " + euroText(d.eur)]);
+  if (win >= 60) stats.push(["Fenster offen", durText(win)]);
+  const legend = [["ist", "im Raum"], ["soll", "eingestellt"], ["heat", "heizt"]]
+    .concat(m.hasWin ? [["win", "Fenster offen"]] : [], m.gaps.length ? [["gap", "keine Werte"]] : []);
+  const devices = d.devices.length > 1 || setup ? `<ul class="hist-devices">${d.devices.map(x => `<li>${
+    deviceIcon({ kind: x.kind, online: true })}<span>${esc(x.name)}</span><span class="dval">${esc(durText(x.heat_s))}${
+    costs && x.kwh != null ? ` · etwa ${esc(kwhText(x.kwh))}` : ""}${
+    setup && x.kind !== "zigbee" && !x.power_w ? " · Leistung fehlt" : ""}</span></li>`).join("")}</ul>` : "";
+  const notes = [];
+  if (!d.points.length) notes.push(d.now ? "Heute gibt es noch keine Werte." : "Für diesen Tag gibt es keine Werte.");
+  if (d.now && state.history && !state.history.recording)
+    notes.push("Gerade wird nichts aufgezeichnet. Nach dem Einschalten wartet die App, bis die Uhrzeit stimmt.");
+  if (costs && d.kwh != null)
+    notes.push(`Strom und Kosten sind geschätzt: Heizdauer × Leistung der Heizung${d.price_ct != null
+      ? ` × Strompreis (${ctText(d.price_ct)} ct/kWh)` : ""}.`);
+  if (setup && d.power_missing.length)
+    notes.push(`Ohne Leistung kein Strom: ${d.power_missing.join(", ")}. Eintragen unter „Räume“ › „Strom und Kosten“.`);
+  if (setup && d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Räume“ › „Strom und Kosten“.");
+  if (costs && d.devices.some(x => x.kind === "zigbee")) notes.push("Thermostate zählen nur die Heizdauer, die Wärme kommt vom Heizkessel.");
+  return `<dl class="hist-stats">${stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+    <div class="hist-chart" id="hist-chart"></div>
+    <ul class="hist-legend">${legend.map(([k, label]) => `<li><span class="key ${k}" aria-hidden="true"></span>${label}</li>`).join("")}</ul>
+    ${devices}
+    ${notes.length ? `<ul class="hist-notes">${notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${hourTableHTML(d)}`;
+}
+
+function histModel(d) {  // the day in five-minute steps: points by time, the stretches without values, until when
+  const byT = new Map(d.points.map(p => [p.t, p]));
+  const until = d.now != null ? Math.min(d.end, Math.floor(d.now / d.slot) * d.slot + d.slot) : d.end;
+  const gaps = [];
+  for (let t = d.start; t < until; t += d.slot) {
+    const p = byT.get(t);
+    if (p && (p.da || p.ist != null)) continue;   // the heaters answered, or a sensor measured
+    const last = gaps[gaps.length - 1];
+    if (last && last[1] === t) last[1] = t + d.slot; else gaps.push([t, t + d.slot]);
+  }
+  if (d.now != null && gaps.length && gaps[gaps.length - 1][1] === until && !byT.has(until - d.slot))
+    gaps[gaps.length - 1][1] = Math.min(until, Math.max(gaps[gaps.length - 1][0], d.now));   // not past „jetzt“
+  return { byT, gaps, until, hasWin: d.points.some(p => p.fenster > 0) };
+}
+
+function runs(points, slot, test) {  // neighbouring five minutes that pass test(), as lists
+  const out = [];
+  for (const p of points) {
+    if (!test(p)) continue;
+    const last = out[out.length - 1];
+    if (last && last[last.length - 1].t + slot === p.t) last.push(p); else out.push([p]);
+  }
+  return out;
+}
+
+function drawHistoryChart() {
+  const box = document.getElementById("hist-chart");
+  const d = hist && hist.data && hist.data.day === hist.day ? hist.data : null;
+  if (!box || !d) return;
+  const m = histModel(d), n = v => v.toFixed(1);
+  const W = Math.max(280, Math.round(box.clientWidth || 600));
+  const left = 42, right = 12, top = 22, plotH = W < 520 ? 170 : 220, laneH = 22;
+  const laneTop = top + plotH + 10, laneBase = laneTop + laneH, axisY = laneBase + 20, H = axisY + 6;
+  const x0 = left, x1 = W - right, span = d.end - d.start;
+  const X = t => x0 + (t - d.start) / span * (x1 - x0);
+  // temperature scale around what the room measured; a setpoint far below (switched off) sits on the bottom edge
+  const ist = d.points.map(p => p.ist).filter(v => v != null), soll = d.points.map(p => p.soll).filter(v => v != null);
+  const base = ist.length ? ist : soll.length ? soll : [18, 22];
+  let lo = Math.min(...base), hi = Math.max(...base);
+  for (const v of soll) if (v >= lo - 3 && v <= hi + 3) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  lo = Math.floor(lo - 0.5);
+  hi = Math.ceil(hi + 0.5);
+  if (hi - lo < 4) { lo = Math.floor((lo + hi) / 2 - 2); hi = lo + 4; }
+  const step = hi - lo <= 6 ? 1 : hi - lo <= 12 ? 2 : 5;
+  const Y = v => top + (hi - Math.max(lo, Math.min(hi, v))) / (hi - lo) * plotH;
+  const parts = ['<defs><pattern id="hist-hatch" width="6" height="6" patternUnits="userSpaceOnUse" ' +
+    'patternTransform="rotate(45)"><line x1="1" y1="0" x2="1" y2="6" class="gap-line"/></pattern></defs>'];
+  for (const [a, b] of m.gaps)   // no values: hatched over the curve and the heating strip
+    parts.push(`<rect class="gap" x="${n(X(a))}" y="${top}" width="${n(X(b) - X(a))}" height="${laneBase - top}"/>`);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step)
+    parts.push(`<line class="grid" x1="${x0}" x2="${x1}" y1="${n(Y(v))}" y2="${n(Y(v))}"/>` +
+      `<text class="ylab" x="${x0 - 8}" y="${n(Y(v) + 4)}">${v}°</text>`);
+  for (const tick of d.ticks) {
+    const x = X(tick.t), anchor = tick.t <= d.start ? "start" : tick.t >= d.end ? "end" : "middle";
+    if (tick.t > d.start && tick.t < d.end) parts.push(`<line class="grid" x1="${n(x)}" x2="${n(x)}" y1="${top}" y2="${laneBase}"/>`);
+    parts.push(`<text class="xlab" x="${n(x)}" y="${axisY}" text-anchor="${anchor}">${esc(tick.label)}</text>`);
+  }
+  // heating strip: every five minutes as high as it heated in them; window open in blue behind it
+  for (const r of runs(d.points, d.slot, p => p.fenster > 0))
+    parts.push(`<rect class="win" x="${n(X(r[0].t))}" y="${laneTop}" width="${n(X(r[r.length - 1].t + d.slot) - X(r[0].t))}" height="${laneH}"/>`);
+  for (const r of runs(d.points, d.slot, p => p.heizt > 0)) {
+    let path = `M${n(X(r[0].t))} ${laneBase}`;
+    for (const p of r) path += `V${n(laneBase - Math.max(2, laneH * Math.min(1, p.heizt / d.slot)))}H${n(X(p.t + d.slot))}`;
+    parts.push(`<path class="heat" d="${path}V${laneBase}Z"/>`);
+  }
+  parts.push(`<line class="lane-base" x1="${x0}" x2="${x1}" y1="${laneBase}" y2="${laneBase}"/>` +
+    `<text class="ylab" x="${x0 - 8}" y="${laneBase - 6}">heizt</text>`);
+  // setpoint as steps (dashed) and room temperature as a line – both broken where values are missing
+  let sollPath = "", istPath = "", before = null;
+  for (const p of d.points) {
+    const joined = before && before.t + d.slot === p.t;
+    if (p.soll != null) sollPath += joined && before.soll != null ? `V${n(Y(p.soll))}H${n(X(p.t + d.slot))}`
+      : `M${n(X(p.t))} ${n(Y(p.soll))}H${n(X(p.t + d.slot))}`;
+    if (p.ist != null) istPath += `${joined && before.ist != null ? "L" : "M"}${n(X(p.t + d.slot / 2))} ${n(Y(p.ist))}`;
+    before = p;
+  }
+  if (sollPath) parts.push(`<path class="soll" d="${sollPath}"/>`);
+  if (istPath) parts.push(`<path class="ist" d="${istPath}"/>`);
+  for (const p of d.points)   // a lone value between gaps would not show as a line
+    if (p.ist != null && !m.byT.has(p.t - d.slot) && !m.byT.has(p.t + d.slot))
+      parts.push(`<circle class="ist-dot" cx="${n(X(p.t + d.slot / 2))}" cy="${n(Y(p.ist))}" r="2.5"/>`);
+  if (d.now != null && d.now < d.end) {
+    const x = X(d.now);
+    parts.push(`<line class="now" x1="${n(x)}" x2="${n(x)}" y1="${top - 4}" y2="${laneBase}"/>` +
+      `<text class="now-lab" x="${n(x)}" y="${top - 8}" text-anchor="${x > x1 - 24 ? "end" : x < x0 + 24 ? "start" : "middle"}">jetzt</text>`);
+  }
+  parts.push(`<g class="cross" visibility="hidden"><line y1="${top}" y2="${laneBase}"/><circle r="5"/></g>`);
+  box.innerHTML = `<svg class="hist-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${
+    esc(`Temperatur im Raum und Heizzeiten, ${d.label}`)}">${parts.join("")}</svg><div class="hist-tip" hidden></div>`;
+  box._geo = { d, m, X, Y, x0, x1, top, W };
+  box.onpointermove = box.onpointerdown = ev => {
+    const t = histSlotAt(ev);
+    if (t !== histHover) { histHover = t; showHistHover(); }
+  };
+  box.onpointerleave = ev => { if (ev.pointerType === "mouse") { histHover = null; showHistHover(); } };
+  showHistHover();
+}
+
+function histSlotAt(ev) {  // start of the five minutes under the pointer, null beside the chart or in the future
+  const box = document.getElementById("hist-chart"), g = box && box._geo;
+  if (!g) return null;
+  const x = ev.clientX - box.getBoundingClientRect().left, d = g.d;
+  if (x < g.x0 - 10 || x > g.x1 + 10) return null;
+  const t = d.start + Math.floor(Math.max(0, Math.min(1, (x - g.x0) / (g.x1 - g.x0))) * (d.end - d.start - 1) / d.slot) * d.slot;
+  return t < g.m.until ? t : null;
+}
+
+function showHistHover() {  // crosshair and the values of the five minutes at histHover
+  const box = document.getElementById("hist-chart"), g = box && box._geo;
+  if (!g) return;
+  const cross = box.querySelector(".cross"), tip = box.querySelector(".hist-tip"), t = histHover;
+  if (t == null || t < g.d.start || t >= g.m.until) { cross.setAttribute("visibility", "hidden"); tip.hidden = true; return; }
+  const d = g.d, p = g.m.byT.get(t), x = g.X(t + d.slot / 2), dot = cross.querySelector("circle");
+  const line = cross.querySelector("line");
+  line.setAttribute("x1", x);
+  line.setAttribute("x2", x);
+  dot.setAttribute("visibility", p && p.ist != null ? "visible" : "hidden");
+  if (p && p.ist != null) { dot.setAttribute("cx", x); dot.setAttribute("cy", g.Y(p.ist)); }
+  cross.setAttribute("visibility", "visible");
+  const lines = [`<b>${esc(histClock(t, d))} Uhr</b>`];
+  if (!p) lines.push("nicht aufgezeichnet");
+  else {
+    if (p.ist != null) lines.push(`im Raum ${deg(p.ist)}`);
+    if (p.soll != null) lines.push(`eingestellt ${degShort(p.soll)}`);
+    if (p.da === 0) lines.push("keine Verbindung");
+    else if (p.da != null) lines.push(p.heizt >= 30 ? `heizt ${durText(p.heizt)}` : "heizt nicht");
+    if (p.fenster >= 30) lines.push("Fenster offen");
+  }
+  tip.innerHTML = lines.map(l => `<span>${l}</span>`).join("");
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  tip.style.left = `${Math.round(x + 14 + w <= g.W ? x + 14 : Math.max(0, x - 14 - w))}px`;
+  tip.style.top = `${g.top}px`;
+}
+
+function hourTableHTML(d) {  // „Stunde für Stunde“: the same day as a table (also for screen readers)
+  const rows = new Map();
+  for (const p of d.points) {
+    const hour = Number(histClock(p.t, d).slice(0, 2));
+    const r = rows.get(hour) || { hour, ist: [], soll: null, heat: 0, win: 0 };
+    if (p.ist != null) r.ist.push(p.ist);
+    if (p.soll != null) r.soll = p.soll;
+    r.heat += p.heizt || 0;
+    r.win += p.fenster || 0;
+    rows.set(hour, r);
+  }
+  const list = [...rows.values()].sort((a, b) => a.hour - b.hour);
+  if (!list.length) return "";
+  const anyWin = list.some(r => r.win >= 60);
+  return `<details class="hist-table" ${hist && hist.table ? "open" : ""}><summary>Stunde für Stunde</summary><table>
+    <thead><tr><th>Uhrzeit</th><th>im Raum</th><th>eingestellt</th><th>geheizt</th>${anyWin ? "<th>Fenster offen</th>" : ""}</tr></thead>
+    <tbody>${list.map(r => `<tr><td>${r.hour} Uhr</td><td>${r.ist.length ? deg(avg(r.ist)) : "–"}</td><td>${
+      r.soll == null ? "–" : degShort(r.soll)}</td><td>${durText(r.heat)}</td>${
+      anyWin ? `<td>${r.win >= 60 ? durText(r.win) : "–"}</td>` : ""}</tr>`).join("")}</tbody></table></details>`;
+}
+
+// „Strom und Kosten“ at the end of „Räume“: one price for the household, the power of every AeroFlow, the switch
+function costValues() {
+  if (costForm) return costForm;
+  const c = state.costs || {};
+  return { price: c.price_ct == null ? "" : ctText(c.price_ct), show: !!c.show,
+           powers: Object.fromEntries(state.heaters.filter(h => h.kind !== "zigbee")
+             .map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])) };
+}
+function editCosts() { if (!costForm) costForm = clone(costValues()); return costForm; }
+
+function costsCardHTML() {
+  const heaters = state.heaters.filter(h => h.kind !== "zigbee");
+  if (!heaters.length) return "";
+  const f = costValues(), saving = busy.has("costs");
+  const powers = heaters.map(h => `<label class="power-row"><span class="pname">${deviceIcon(h)}${esc(h.name)}</span>
+      <span class="unit-input"><input data-cpower="${esc(h.id)}" inputmode="numeric" list="power-values" autocomplete="off"
+        value="${esc(f.powers[h.id] ?? "")}" placeholder="z. B. 1300" aria-label="Leistung von ${esc(h.name)} in Watt"><span>W</span></span></label>`).join("");
+  return `<article class="card costs-card">
+    <div class="card-head"><h2>Strom und Kosten</h2></div>
+    <p class="hint">Die Heizungen melden keinen Verbrauch. Die App schätzt ihn: Heizdauer × Leistung × Strompreis.</p>
+    <div class="costs-form">
+      <label>Strompreis<span class="unit-input"><input data-cfield="price" inputmode="decimal" autocomplete="off"
+        value="${esc(f.price)}" placeholder="z. B. 32,5"><span>ct/kWh</span></span></label>
+      <fieldset><legend>Leistung der Heizungen</legend>${powers}
+        <p class="hint">Steht auf dem Typenschild, bei der FlexiSmart Pro je nach Größe 650 bis 2450 W. Genauer wird es,
+          wenn du einmal einen Tag lang mit einem Zwischenstecker mit Strommessung nachmisst.</p></fieldset>
+      <datalist id="power-values">${POWER_VALUES.map(w => `<option value="${w}">`).join("")}</datalist>
+      <label class="check"><input type="checkbox" data-cfield="show" ${f.show ? "checked" : ""}>
+        <span>Strom und Kosten auch auf der Startseite zeigen</span></label>
+      <div class="row">
+        <button class="primary" data-action="costs-save" ${saving ? "disabled" : ""}>${saving ? "speichere …" : "Speichern"}</button>
+        ${costForm ? '<button data-action="costs-cancel">Verwerfen</button>' : ""}
+      </div>
+    </div>
+  </article>`;
+}
+
+async function saveCosts() {
+  const f = costValues();
+  busy.add("costs");
+  render();
+  try {
+    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers });
+    costForm = null;
+    toast(res.message || "Gespeichert.");
+  } catch (e) { toast(e.message, true); }
+  busy.delete("costs");
   await refresh();
 }
 
@@ -962,7 +1307,7 @@ function renderRooms(el) {
   if (!gs.length) { setHTML(el, head + '<p class="empty">Keine Heizungen konfiguriert – unter „Geräte“ über „+ Heizung“ anlegen.</p>'); return; }
   setHTML(el, head + gs.map(roomCard).join("") + (state.rooms.length || adding ? "" :
     '<p class="empty">Tipp: Über „+ Raum“ einen Raum anlegen und die Heizungen ankreuzen, die dazugehören. ' +
-    'So lassen sich mehrere Heizungen gemeinsam steuern und Heizpläne senden.</p>'));
+    'So lassen sich mehrere Heizungen gemeinsam steuern und Heizpläne senden.</p>') + costsCardHTML());
 }
 
 function roomFormHTML(f) {
@@ -1020,6 +1365,7 @@ function roomCard(g) {
     <div class="modes">${buttons}</div>
     ${g.kind === "room" ? planRow(g, writable) : '<p class="hint">Für Heizpläne diese Heizung unter „Geräte“ einem Raum zuordnen.</p>'}
     ${roomDevicesHTML(g)}
+    ${cardHistoryHTML(g)}
     ${!writable && online.length ? '<p class="hint">Nur Anzeige: In heizungen.conf fehlt der Token.</p>' : ""}
   </article>`;
 }
@@ -3148,6 +3494,7 @@ function dayOf(t) { return t.closest(".day").dataset.day; }
 
 document.addEventListener("click", e => {
   if (e.target.id === "dialog") return closeDialog(null);   // tap next to the dialog = cancel
+  if (e.target.id === "history") return closeHistory();     // tap next to the Verlauf = close
   const t = e.target.closest("button");
   if (!t || t.disabled) return;
   if (t.dataset.dialogButton !== undefined) return dialogButton(Number(t.dataset.dialogButton));
@@ -3164,6 +3511,11 @@ document.addEventListener("click", e => {
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
     case "logs-save": return logsBusy ? undefined : logsSave();
+    case "history": return openHistory(t.closest("article.tile, article.card"), view);
+    case "hist-close": return closeHistory();
+    case "hist-day": return loadHistory(t.dataset.day);
+    case "costs-save": return saveCosts();
+    case "costs-cancel": costForm = null; return render();
   }
   if (t.dataset.subtab) {
     deviceTab = t.dataset.subtab;
@@ -3287,6 +3639,7 @@ document.addEventListener("change", e => {
     if (pw) pw.type = t.checked ? "text" : "password";
     return;
   }
+  if (t.dataset.cfield === "show") { editCosts().show = t.checked; return; }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {
@@ -3323,6 +3676,8 @@ document.addEventListener("input", e => {
   }
   if (e.target.dataset.field === "scan-network") scanNet = e.target.value;
   if (e.target.dataset.lfield === "email") { logsEmail = e.target.value; return; }
+  if (e.target.dataset.cfield === "price") { editCosts().price = e.target.value; return; }
+  if (e.target.dataset.cpower) { editCosts().powers[e.target.dataset.cpower] = e.target.value; return; }
   if (wifiForm && ["ssid", "password"].includes(e.target.dataset.wfield)) { wifiForm[e.target.dataset.wfield] = e.target.value; return; }
   if (sensorForm && e.target.dataset.sfield) { sensorForm[e.target.dataset.sfield] = e.target.value; return; }
   if (deviceForm && e.target.closest(".device-form")) updateDeviceForm(e.target);
@@ -3338,6 +3693,8 @@ document.addEventListener("keydown", e => {
     }
     return;
   }
+  if (hist && e.key === "Escape") return closeHistory();
+  if (e.key === "Enter" && (e.target.dataset.cfield === "price" || e.target.dataset.cpower)) { e.target.blur(); return saveCosts(); }
   if (e.key === "Enter" && calibForm && e.target.closest(".calib-form")) return saveCalib(null);
   if (e.key === "Enter" && wifiForm && e.target.closest(".wifi-form")) return connectWifi();
   if (e.key === "Enter" && e.target.dataset.field === "scan-network") { e.target.blur(); return runScan(scanNet.trim() || null); }
@@ -3346,6 +3703,10 @@ document.addEventListener("keydown", e => {
   if (e.key === "Enter" && roomForm && e.target.closest(".room-form") && e.target.dataset.field === "name") saveRoom();
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+document.addEventListener("toggle", e => {   // „Stunde für Stunde“ stays open when the Verlauf is redrawn
+  if (hist && e.target.classList && e.target.classList.contains("hist-table")) hist.table = e.target.open;
+}, true);
+window.addEventListener("resize", () => { cancelAnimationFrame(histResize); histResize = requestAnimationFrame(drawHistoryChart); });
 document.addEventListener("pointerdown", touchSetup, true);
 document.addEventListener("keydown", touchSetup, true);
 
@@ -3356,3 +3717,6 @@ document.addEventListener("keydown", touchSetup, true);
   if (wanted === "setup" && state && state.setup.unlocked) { showView("setup"); render(); }
 })();
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+setInterval(() => {   // today's Verlauf goes on every minute while it is open
+  if (hist && !document.hidden && state && hist.day === state.now.slice(0, 10)) loadHistory();
+}, 60000);

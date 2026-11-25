@@ -281,6 +281,91 @@ dd { margin: 0; word-break: break-word; }
 .home-empty { font-size: 19px; color: var(--muted); grid-column: 1 / -1; }
 .view-home #toast { font-size: 18px; padding: 14px 20px; }
 
+/* „Verlauf“ of a room (opened from its tile or its card in the setup) and „Strom und Kosten“.
+   Chart colours checked for colour blindness and 3:1 against the card, light and dark: heating warm, window open blue;
+   no values hatched grey (texture, named in the legend and the tooltip). */
+:root { --chart-heat: #8a3412; --chart-win: #2f7fc0; }
+@media (prefers-color-scheme: dark) { :root { --chart-heat: #c8743e; --chart-win: #4a9ad6; } }
+.tile-history { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 52px;
+                padding: 8px 14px; border: 0; border-radius: 14px; background: var(--pill); font-size: 17px; text-align: left;
+                touch-action: manipulation; }
+.tile-history .go { color: var(--primary); font-weight: 600; white-space: nowrap; }
+.today-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px;
+             font-size: 14px; }
+body.sheet-open { overflow: hidden; }
+.sheet-backdrop { position: fixed; inset: 0; z-index: 15; background: rgba(0, 0, 0, .45); overflow-y: auto;
+                  overscroll-behavior: contain; padding: 24px 16px; }
+.sheet { background: var(--card); color: var(--text); border-radius: 22px; padding: 18px 18px 22px; max-width: 920px;
+         margin: 0 auto; display: grid; gap: 14px; align-content: start; box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+         font-size: 17px; }
+@media (max-width: 560px) {
+  .sheet-backdrop { padding: 0; }
+  .sheet { border-radius: 0; min-height: 100%; padding: 14px 12px 28px; }
+}
+.sheet-head { display: flex; align-items: center; gap: 10px; }
+.sheet-head h2 { flex: 1; font-size: 24px; font-weight: 500; line-height: 1.2; }
+.sheet-head .kicker { display: block; font-size: 15px; color: var(--muted); font-weight: 400; }
+.sheet-close { min-height: 48px; padding: 8px 16px; border-radius: 12px; font-size: 17px; }
+.hist-day { display: grid; grid-template-columns: 60px 1fr 60px; align-items: center; gap: 8px; }
+.day-step { min-height: 52px; font-size: 28px; line-height: 1; border-radius: 14px; touch-action: manipulation; }
+.day-label { text-align: center; font-size: 20px; font-weight: 500; }
+.hist-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 0; }
+.hist-stats div { background: var(--bg); border-radius: 14px; padding: 8px 14px; min-width: 130px; }
+.hist-stats dt { font-size: 15px; color: var(--muted); }
+.hist-stats dd { margin: 0; font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hist-chart { position: relative; touch-action: pan-y; user-select: none; -webkit-user-select: none; min-height: 120px; }
+.hist-svg { display: block; overflow: visible; }
+.hist-svg .grid { stroke: var(--line); stroke-width: 1; }
+.hist-svg .lane-base { stroke: var(--muted); stroke-width: 1; }
+.hist-svg .ylab, .hist-svg .xlab, .hist-svg .now-lab { fill: var(--muted); font-size: 13px; }
+.hist-svg .ylab { text-anchor: end; }
+.hist-svg .now-lab { fill: var(--text); }
+.hist-svg .ist { fill: none; stroke: var(--text); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.hist-svg .ist-dot { fill: var(--text); }
+.hist-svg .soll { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.hist-svg .heat { fill: var(--chart-heat); }
+.hist-svg .win { fill: var(--chart-win); }
+.hist-svg .gap { fill: url(#hist-hatch); }
+.hist-svg .gap-line { stroke: var(--off); stroke-width: 2; }
+.hist-svg .now { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
+.hist-svg .cross line { stroke: var(--text); stroke-width: 1; }
+.hist-svg .cross circle { fill: var(--text); stroke: var(--card); stroke-width: 2; }
+.hist-tip { position: absolute; top: 0; left: 0; pointer-events: none; display: grid; gap: 1px; padding: 8px 10px;
+            border-radius: 10px; background: var(--text); color: var(--bg); font-size: 15px; line-height: 1.35;
+            white-space: nowrap; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
+.hist-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: -6px 0 0; padding: 0; list-style: none; font-size: 15px;
+               color: var(--muted); }
+.hist-legend li { display: flex; align-items: center; gap: 7px; }
+.key { display: inline-block; width: 18px; height: 12px; border-radius: 3px; flex: none; }
+.key.ist { height: 0; border-radius: 0; border-top: 2.5px solid var(--text); }
+.key.soll { height: 0; border-radius: 0; border-top: 2px dashed var(--muted); }
+.key.heat { background: var(--chart-heat); }
+.key.win { background: var(--chart-win); }
+.key.gap { background: repeating-linear-gradient(45deg, var(--off) 0 2px, transparent 2px 5px); box-shadow: inset 0 0 0 1px var(--off); }
+.hist-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 16px; }
+.hist-devices li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.hist-devices .dico svg { width: 22px; height: 22px; display: block; }
+.hist-devices .dval { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.hist-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 15px; color: var(--muted); }
+.hist-empty { margin: 0; color: var(--muted); }
+.hist-table summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--primary); font-size: 16px; }
+.hist-table table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
+.hist-table th, .hist-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.hist-table th:first-child, .hist-table td:first-child { text-align: left; }
+.hist-table th { color: var(--muted); font-weight: 500; }
+.costs-form { display: grid; gap: 12px; margin-top: 10px; }
+.costs-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.costs-form fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin: 0; display: grid; gap: 8px; }
+.costs-form legend { font-size: 13px; color: var(--muted); padding: 0 4px; }
+.costs-form .power-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 14px; }
+.costs-form .pname { display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.costs-form .pname .dico svg { width: 18px; height: 18px; display: block; }
+.costs-form label.check { display: flex; align-items: flex-start; gap: 8px; color: var(--text); font-size: 14px; }
+.costs-form label.check input { margin-top: 3px; flex: none; }
+.costs-form .row { margin-top: 0; }
+.unit-input { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
+.unit-input input { width: 112px; font-size: 15px; color: var(--text); text-align: right; }
+
 /* dialog (confirmations, PIN) */
 .dialog-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: grid; place-items: center;
                    padding: 16px; z-index: 30; }

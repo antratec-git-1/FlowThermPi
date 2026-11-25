@@ -42,6 +42,10 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", rf"/api/heaters/{h}/setpoint", lambda m, b, r: s.set_setpoint("heater", m[1], b.get("temp")), PUBLIC),
         ("POST", rf"/api/heaters/{h}/mode",
          lambda m, b, r: s.set_mode("heater", m[1], b.get("mode"), b.get("minutes")), PUBLIC),
+        ("GET", rf"/api/rooms/{i}/history/(\d{{4}}-\d{{2}}-\d{{2}})",   # Verlauf of one day
+         lambda m, b, r: s.history_view("room", m[1], m[2]), PUBLIC),
+        ("GET", rf"/api/heaters/{h}/history/(\d{{4}}-\d{{2}}-\d{{2}})",
+         lambda m, b, r: s.history_view("heater", m[1], m[2]), PUBLIC),
         ("POST", r"/api/setup/unlock", lambda m, b, r: r.unlock(b.get("pin")), PUBLIC),
         ("POST", r"/api/setup/lock", lambda m, b, r: r.lock(), PUBLIC),
         # „Protokoll speichern“ – residents send it to their helper when something goes wrong
@@ -50,6 +54,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         # setup ("Einrichtung") – needs the PIN once one is set
         ("PUT", r"/api/setup/pin", lambda m, b, r: r.set_pin(b.get("pin")), SETUP),
         ("DELETE", r"/api/setup/pin", lambda m, b, r: r.remove_pin(), SETUP),
+        ("PUT", r"/api/costs", lambda m, b, r: s.set_costs(b), SETUP),   # Strom und Kosten
         ("POST", r"/api/rooms", lambda m, b, r: s.create_room(b), SETUP),
         ("PATCH", rf"/api/rooms/{i}", lambda m, b, r: s.update_room(m[1], b), SETUP),
         ("DELETE", rf"/api/rooms/{i}", lambda m, b, r: s.delete_room(m[1]), SETUP),

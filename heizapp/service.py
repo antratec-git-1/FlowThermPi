@@ -11,10 +11,10 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable
 
-from . import coap, discovery, plans, shelly, trv
+from . import coap, discovery, history, plans, shelly, trv
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
@@ -178,6 +178,9 @@ class Service:
         self.zigbee = None   # heizapp.zigbee_net.ZigbeeNet, from attach_zigbee(): brings the thermostats
         self.poll_interval = poll_interval
         self.tz = _local_tz()
+        # Verlauf: five-minute entries of every device in history/ next to data.json (heizapp.history)
+        self.history = history.History(os.path.join(os.path.dirname(os.path.abspath(data_path)), "history"), self.tz)
+        self._record_failed = False   # a failing Verlauf is said once in the protocol, not every 10 s
         self._stop = threading.Event()
         self._entries_lock = threading.Lock()  # guards changes of the heater list / heizungen.conf
         self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="heizung")
@@ -230,6 +233,7 @@ class Service:
 
     def stop(self) -> None:
         self._stop.set()
+        self.history.flush()   # the finished entries of the last minutes
 
     def _run(self) -> None:
         self.poll_all(full=True)
@@ -240,6 +244,7 @@ class Service:
                 self.poll_all()
                 self._heal()
                 self.poll_sensors()
+                self._record()
                 now = self.now()
                 if now.hour == DAILY_SYNC_HOUR and self._last_daily_sync != now.date():
                     self._last_daily_sync = now.date()
@@ -1784,11 +1789,129 @@ class Service:
                     room["plan"] = None
         return {}
 
+    # ------------------------------------------------------------------ Verlauf und Kosten (heizapp.history)
+    MAX_PRICE_CT = 200   # ct/kWh accepted as electricity price
+    MAX_POWER_W = 5000   # W accepted for a heater (the FlexiSmart Pro models have 650 to 2450 W)
+
+    def _record(self, now: float | None = None) -> None:
+        """What every device shows now, for its five-minute entry – only with a clock that is right."""
+        if not self.clock_trusted():
+            return
+        try:   # the Verlauf must never hold up the rest of the loop (clocks, protocol)
+            devices = [{"id": e.id, "online": e.online, "temp": e.values.get("room_temp"),
+                        "soll": e.values.get("setpoint"), "heating": e.values.get("heater_state") == 1,
+                        "window": e.values.get("open_window") == 1} for e in list(self.entries)]
+            sensors = [{"id": sid, "at": r.get("at"), "temp": r.get("temp"), "humidity": r.get("humidity")}
+                       for sid, r in list(self._sensor_live.items())]
+            self.history.sample(time.time() if now is None else now, devices, sensors)
+            self._record_failed = False
+        except Exception:
+            if not self._record_failed:
+                self._record_failed = True
+                log.exception("Verlauf: Aufzeichnen fehlgeschlagen")
+
+    @staticmethod
+    def _costs(data: dict) -> dict:
+        c = (data.get("settings") or {}).get("costs") or {}
+        return {"price_ct": c.get("price_ct"), "show": bool(c.get("show"))}
+
+    def _heater_infos(self, data: dict, ids: list[str]) -> list[dict]:
+        """Name, kind and power of heaters, for heizapp.history.totals."""
+        by_id = {e.id: e for e in self.entries}
+        return [{"id": i, "name": data["heaters"].get(i, {}).get("name") or self._device_name(by_id[i]),
+                 "kind": "zigbee" if by_id[i].zigbee else "aeroflow", "power_w": data["heaters"].get(i, {}).get("power_w")}
+                for i in ids if i in by_id]
+
+    def _today(self, rows: dict, data: dict, heaters: list[str], sensors: list[str]) -> dict:
+        """Heated so far today, with energy and costs as far as power and price are known – for the tiles."""
+        tot = history.totals(rows, self._heater_infos(data, heaters), history.series(rows, heaters, sensors),
+                             self._costs(data)["price_ct"])
+        return {"heat_s": tot["heat_s"], "kwh": tot["kwh"], "eur": tot["eur"], "power_missing": tot["power_missing"]}
+
+    def set_costs(self, body: dict) -> dict:
+        """Strom und Kosten: the electricity price, whether residents see energy and costs, the power of heaters."""
+        price = body.get("price_ct")
+        if price in ("", None):
+            price = None
+        else:
+            try:
+                price = round(float(str(price).strip().replace(",", ".")), 2)
+            except ValueError:
+                raise ActionError("Der Strompreis muss eine Zahl sein, zum Beispiel 32,5.") from None
+            if not 0 < price <= self.MAX_PRICE_CT:
+                raise ActionError(f"Der Strompreis muss über 0 und höchstens {self.MAX_PRICE_CT} ct/kWh sein.")
+        powers = body.get("powers") or {}
+        if not isinstance(powers, dict):
+            raise ValueError("powers muss ein Objekt sein")
+        clean = {}
+        for heater_id, watts in powers.items():
+            e = self._entry(heater_id)
+            if e.zigbee:
+                raise ActionError("Ein Thermostat hat keine eigene Leistung – die Wärme kommt vom Heizkessel.")
+            if watts in ("", None):
+                clean[e.id] = None
+                continue
+            try:
+                watts = int(str(watts).strip())
+            except ValueError:
+                raise ActionError(f"{self._name(e)}: Die Leistung bitte als ganze Zahl in Watt, "
+                                  "zum Beispiel 1300.") from None
+            if not 0 < watts <= self.MAX_POWER_W:
+                raise ActionError(f"{self._name(e)}: Die Leistung muss zwischen 1 und {self.MAX_POWER_W} W liegen.")
+            clean[e.id] = watts
+        show = bool(body.get("show"))
+        with self.store.edit() as d:
+            d.setdefault("settings", {})["costs"] = {"price_ct": price, "show": show}
+            for heater_id, watts in clean.items():
+                meta = d["heaters"].setdefault(heater_id, self._new_meta(self._entry(heater_id)))
+                if watts is None:
+                    meta.pop("power_w", None)
+                else:
+                    meta["power_w"] = watts
+        log.info("Strom und Kosten gespeichert: Strompreis %s, auf der Startseite %s%s",
+                 f"{_num(price, '.2f')} ct/kWh" if price is not None else "keiner", "ja" if show else "nein",
+                 "".join(f", {self._name(self._entry(i))} {f'{w} W' if w else 'ohne Leistung'}" for i, w in clean.items()))
+        return {"message": "Gespeichert."}
+
+    def history_view(self, kind: str, ident: str, day_text: str) -> dict:
+        """Verlauf of a room (or of a heater without one) on one day: the points of the chart and what it cost."""
+        try:
+            day = date.fromisoformat(day_text)
+        except ValueError:
+            raise ActionError("Unbekanntes Datum") from None
+        data = self.store.snapshot()
+        if kind == "room":
+            room = data["rooms"].get(ident)
+            if room is None:
+                raise ActionError("Raum nicht gefunden", 404)
+            name = room["name"]
+            heaters = [e.id for e in self.entries if data["heaters"].get(e.id, {}).get("room") == ident]
+            sensors = [sid for sid, meta in data["sensors"].items() if meta.get("room") == ident]
+        else:
+            e = self._entry(ident)
+            name, heaters, sensors = data["heaters"].get(e.id, {}).get("name") or self._device_name(e), [e.id], []
+        today = self.now().date()
+        rows = self.history.day_rows(day, set(heaters + sensors)) if day <= today else {}
+        points = history.series(rows, heaters, sensors)
+        costs = self._costs(data)
+        return {"kind": kind, "id": ident, "name": name, "day": day.isoformat(), "label": self.history.label(day, today),
+                "tz": getattr(self.tz, "key", None),   # the page shows the times in it (None: the browser's own)
+                "start": self.history.moment(day), "end": self.history.moment(day, 24),
+                "now": time.time() if day == today else None, "slot": history.SLOT,
+                "ticks": [{"t": self.history.moment(day, h), "label": f"{h} Uhr" if h in (0, 24) else str(h)}
+                          for h in (0, 6, 12, 18, 24)],
+                "points": points, "has_sensor": bool(sensors),
+                **history.totals(rows, self._heater_infos(data, heaters), points, costs["price_ct"]),
+                "price_ct": costs["price_ct"], "show_costs": costs["show"]}
+
     # ------------------------------------------------------------------ snapshot for the UI
     def state(self) -> dict:
         self._sync_thermostats()
         data = self.store.snapshot()
         heaters = [self._heater_view(e, data) for e in self.entries]
+        today = self.history.day_rows(self.now().date(), files=False)   # Verlauf: heated so far, for the tiles
+        for h in heaters:   # None: not known (yet) – rather than „Heute noch nicht geheizt“
+            h["today"] = None if today is None else self._today(today, data, [h["id"]], [])
         rooms = []
         for room_id, room in data["rooms"].items():
             plan = data["plans"].get(room.get("plan") or "")
@@ -1809,11 +1932,16 @@ class Service:
                                                      and sent.get("fingerprint") == plans.fingerprint(plan)),
                 "heaters": members,
                 "sensors": [sid for sid, meta in data["sensors"].items() if meta.get("room") == room_id],
+                "today": None if today is None else self._today(
+                    today, data, members, [sid for sid, meta in data["sensors"].items() if meta.get("room") == room_id]),
             })
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
+                "costs": self._costs(data),
+                "history": {"recording": self.history.active,
+                            "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,
                                 "hours": self.CALIB_DEFAULT_HOURS, "max_hours": self.CALIB_MAX_HOURS,
                                 "spread_warn": self.CALIB_SPREAD_WARN}}
@@ -1833,6 +1961,7 @@ class Service:
             "host": e.label,
             "hostname": self._device_name(e),
             "room": room if room in data["rooms"] else None,
+            "power_w": None if e.zigbee else meta.get("power_w"),
             "online": e.online,
             "writable": e.device.writable,
             "error": e.error,

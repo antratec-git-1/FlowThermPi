@@ -34,6 +34,12 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   Geräte haben „aus“, Fühler kein Soll. Ein Fühler ohne frischen Messwert fehlt in der Liste. Ab 0.4.12 steht vor
   jedem Gerät ein Symbol (Heizkörper oder Thermometer) und unter jeder Heizung, wie weit sie vom Fühler abweicht, etwa
   „+1,2 °C zum Fühler“ – gelb, wenn es mehr als ±0,5 °C sind.
+- **Verlauf** (ab 0.4.13): Unten auf jeder Kachel steht, wie lange der Raum heute geheizt hat, etwa „Heute 2 Std.
+  10 Min. geheizt“. Ein Tipp darauf öffnet den **Verlauf** des Tages: die Raumtemperatur als Linie, das Eingestellte
+  gestrichelt, darunter warme Balken, wann geheizt wurde, blau „Fenster offen“ und schraffiert, wo es keine Werte
+  gibt. Mit ‹ › geht es zu den Tagen davor; ein Tipp auf die Kurve zeigt die Werte dieser fünf Minuten, „Stunde für
+  Stunde“ dasselbe als Tabelle. Strom und Kosten („etwa 0,90 €“) stehen nur dabei, wenn sie in der Einrichtung
+  eingeschaltet sind – siehe [Verlauf und Kosten](#verlauf-und-kosten).
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 - **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
@@ -58,6 +64,10 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat. Ab 0.4.12 mit
   Symbol vor jedem Gerät (der Heizkörper ist warm gefärbt, solange er heizt, und rot ohne Verbindung) und unter jeder
   Heizung der Abweichung zum Fühler.
+- **Strom und Kosten** (Tab „Räume“, ganz unten, ab 0.4.13): einen Strompreis für den Haushalt (ct/kWh) und die
+  Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter zeigt Strom und Kosten auch
+  auf der Startseite (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
+  **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten).
 - **Heizpläne:** in der App verwalten (bis zu 10 Zeitfenster pro Tag, Viertelstunden-Raster)
   und an die Heizungen eines Raums **senden**. Die Heizung führt den Plan im Modus
   „Automatik“ selbst aus – auch wenn die App aus ist.
@@ -490,6 +500,36 @@ Thermostat.
   Klappt das nicht, versucht sie es noch zweimal im Abstand von 5 Minuten; dann steht auf der Seite, was zu prüfen
   ist. Das Protokoll sagt, was das Thermostat nach dem Update gemeldet hat und was die App zurückgestellt hat.
 
+## Verlauf und Kosten
+
+Die Heizungen melden keinen Verbrauch und führen keinen Verlauf – weder im Gerät noch in der Cloud (Thermotecs
+Data-Act-Infoblatt). Ab 0.4.13 schreibt die App deshalb selbst mit, was sie ohnehin alle 10 Sekunden abfragt; die
+Heizungen werden dafür nicht öfter gefragt.
+
+- **Was:** je Heizung, Thermostat und Fühler und je fünf Minuten die Raumtemperatur (Mittel), die eingestellte
+  Temperatur und wie viele Sekunden das Gerät geheizt hat, „Fenster offen“ hatte und erreichbar war; bei Fühlern
+  Temperatur und Luftfeuchte.
+- **Wo:** `history/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/history/`), eine Datei je
+  Monat, etwa 40 KB am Tag bei vier Geräten. Die App sammelt im Speicher und schreibt alle 15 Minuten – das schont
+  die Speicherkarte; bei Stromausfall fehlen höchstens die letzten 15 Minuten. Aufgezeichnet wird erst, wenn die
+  Uhrzeit stimmt (der Pi hat keine Batterie-Uhr). Lücken bleiben Lücken, nichts wird aufgefüllt.
+- **Strom und Kosten sind eine Schätzung:** Heizdauer × eingetragene Leistung × Strompreis, ohne Grundpreis. Ob die
+  Heizung beim Heizen immer die volle Leistung zieht, ist nicht geprüft (die Anleitung nennt als „maximale
+  kontinuierliche Wärmeleistung“ teils weniger). Genauer wird es mit einem Zwischenstecker mit Strommessung: einen
+  Tag lang nachmessen und die Leistung anpassen. Eine geänderte Leistung oder ein neuer Preis gilt auch für die
+  vergangenen Tage. Thermostate an Wasser-Heizkörpern zählen nur die Heizdauer – die Wärme kommt vom Heizkessel.
+- **Ein Raum** zeigt die Temperatur seiner Fühler, wenn sie gemessen haben, sonst die seiner Heizungen; „geheizt“
+  ist die Zeit, in der mindestens eine seiner Heizungen geheizt hat. Zieht eine Heizung um, nimmt sie ihren Verlauf
+  mit.
+- **Datenschutz:** Der Verlauf zeigt, wann jemand zu Hause ist. Er bleibt auf dem Pi und kommt nicht in „Protokoll
+  speichern“.
+- **Noch nicht da** (geplant für 0.4.14): Woche und Monat als Balken, der Vergleich mit Vorwoche und Vormonat, „Als
+  Tabelle speichern“ und das Aufräumen (5-Minuten-Werte 13 Monate, Tagessummen unbegrenzt). Bis dahin bleiben alle
+  Dateien liegen.
+- **Schnittstelle:** `GET /api/rooms/<id>/history/JJJJ-MM-TT` und `GET /api/heaters/<id>/history/JJJJ-MM-TT` (ohne
+  PIN, wie die Startseite), `PUT /api/costs` (Einrichtung); in `GET /api/state` stehen `costs`, `history` und je Raum
+  und Heizung `today`.
+
 ## Protokoll: wenn etwas schiefgeht
 
 Ab Version 0.4.5 schreibt die App mit, was passiert: wann eine Heizung oder ein Fühler nicht antwortet und wann wieder, was in der App
@@ -562,7 +602,8 @@ steht in `.gitignore`. Räume, Namen und Heizpläne speichert die App in `data/d
 - **Aus** = manueller Modus auf Frostschutztemperatur.
 - **Boost** heizt 30 Minuten mit voller Leistung; erneutes Tippen beendet ihn und kehrt zum
   vorherigen Modus zurück.
-- Die Heizung speichert keinen Verlauf.
+- Die Heizung speichert keinen Verlauf und meldet keinen Verbrauch – beides führt die App selbst, siehe
+  [Verlauf und Kosten](#verlauf-und-kosten).
 
 ## Schnittstelle – was am Gerät gemessen wurde (Firmware 00.01.08)
 
@@ -599,13 +640,14 @@ Stick und ohne echtes Thermostat; es prüft und beantwortet Befehle so, wie es d
 Zigbee2MQTT vorgibt, und spielt ein Firmware-Update so, wie die Anleitung von Zigbee2MQTT es beschreibt. Wie sich das
 echte Thermostat verhält, prüfen die Tests nicht. Das Einsammeln der
 Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
-Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet.
+Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet. Verlauf und Kosten laufen mit
+erfundenen Uhrzeiten und Werten (`tests/test_history.py`), auch über Monatswechsel und Sommer-/Winterzeit.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
-- Verlauf und Kosten (Heizdauer × Nennleistung × Strompreis).
+- Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.14).
 - Heizungen zusätzlich in Apple Home einbinden.
 
 ## Lizenz
