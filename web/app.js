@@ -40,6 +40,8 @@ let updateRun = loadUpdateRun();   // update started in this browser: {from: bui
 let loadedBuild = null;  // version|commit this page came with – another one answering means: reload
 const pending = {};      // debounced setpoint changes: cardKey -> {temp, timer}
 const busy = new Set();  // cards with a running action
+const sentAt = {};       // cardKey -> Date.now() when every heater took the new temperature: „✓ gesendet“ for a moment
+const SENT_MS = 2000;
 
 // ------------------------------------------------------------------ helpers
 function hhmm(min) { return String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0"); }
@@ -432,7 +434,29 @@ function degShort(t) {  // targets come in 0.5 steps: 21 -> "21 °C", 21.5 -> "2
   const r = Math.round(t * 10) / 10;
   return (Number.isInteger(r) ? String(r) : r.toFixed(1).replace(".", ",")) + " °C";
 }
+function degBig(t) { return t == null || Number.isNaN(t) ? "–" : t.toFixed(1).replace(".", ",") + "°"; }  // the tiles' numbers
 function tempWord(t) { return t == null ? "aus" : degShort(t); }   // null = gap in the plan (frost protection)
+
+// A tile takes on the warmth of its room: blue-grey at 12 °C, warm paper at 20 °C, apricot at 25 °C. Straight lines
+// between these points, computed here (old iPads know no CSS color-mix). Every text colour on the tiles keeps its
+// contrast on all of them (checked for 10 to 27 °C in half degrees; the weakest is the grey text at 25 °C, 5 : 1).
+const TINTS = [[12, [0xe3, 0xec, 0xf2]], [17, [0xf1, 0xee, 0xe6]], [20, [0xfd, 0xeb, 0xdd]], [22, [0xfc, 0xe0, 0xcb]],
+               [25, [0xf9, 0xd2, 0xba]]];
+const TINT_OFFLINE = "#f1eee6";   // no connection: neutral, no warmth to show
+function tileTint(t) {
+  let i = 1;
+  while (i < TINTS.length - 1 && t > TINTS[i][0]) i++;
+  const [t0, c0] = TINTS[i - 1], [t1, c1] = TINTS[i];
+  const f = Math.max(0, Math.min(1, (t - t0) / (t1 - t0)));
+  return "#" + c0.map((v, k) => Math.round(v + (c1[k] - v) * f).toString(16).padStart(2, "0")).join("");
+}
+function boostLeft(online) {  // share of „volle Kraft“ still to go – only when it fits a start from the app (30 minutes)
+  const h = online.find(x => x.mode === "boost" && x.boost_remaining);
+  const min = h ? parseInt(String(h.boost_remaining), 10) : NaN;
+  return Number.isFinite(min) && min >= 0 && min <= BOOST_MINUTES ? min / BOOST_MINUTES : null;
+}
+const WAVE = '<svg class="wave" viewBox="0 0 400 16" preserveAspectRatio="none" aria-hidden="true">' +
+  '<path d="M0 8Q25 0 50 8T100 8T150 8T200 8T250 8T300 8T350 8T400 8V16H0Z" fill="currentColor"/></svg>';
 function uhr(min) { const h = Math.floor(min / 60) % 24, m = min % 60; return m ? `${h}:${String(m).padStart(2, "0")} Uhr` : `${h} Uhr`; }
 
 function serverNow() {  // the server's local time (the heaters' clocks follow it), advanced since the last refresh
@@ -569,6 +593,8 @@ function homeTile(g) {
   const isOff = ["off", "standby", "holiday"].includes(mode);
   const say = homeStatus(g, online, mode, target, writable);
   const dis = writable ? "" : "disabled";
+  const now = temps.length ? avg(temps) : null;
+  const felt = sensors.length ? avg(sensors.map(s => s.temp)) : now;   // what the tint (and the colour at night) follows
   const actions = [];
   if (online.length) {
     if (isOff) {
@@ -579,20 +605,37 @@ function homeTile(g) {
       actions.push(`<button class="big-btn quiet" data-action="home-off" ${dis}>Ausschalten</button>`);
     }
   }
-  const setter = isOff || !online.length ? "" : `<div class="tile-set ${p ? "pending" : ""}">
+  const label = p || busy.has(key) ? '<span class="set-label sending">wird gesendet …</span>'
+    : Date.now() - (sentAt[key] || 0) < SENT_MS ? '<span class="set-label sending">✓ gesendet</span>'
+    : '<span class="set-label">eingestellt</span>';
+  const setter = isOff || !online.length ? "" : `<div class="tile-set">
       <button class="step cold" data-action="home-sp" data-delta="-0.5" ${dis} aria-label="Kälter"><span class="sym">−</span><span class="word">kälter</span></button>
-      <div class="set-val"><span class="set-temp">${degShort(target)}</span><span class="set-label">eingestellt</span></div>
+      <div class="set-val"><span class="set-temp">${degBig(target)}</span>${label}</div>
       <button class="step warm" data-action="home-sp" data-delta="0.5" ${dis} aria-label="Wärmer"><span class="sym">+</span><span class="word">wärmer</span></button>
     </div>`;
-  return `<article class="tile ${isOff ? "is-off" : ""} ${busy.has(key) ? "busy" : ""}" data-kind="${g.kind}" data-id="${esc(g.id)}">
-    <div class="tile-head"><h2>${esc(g.name)}</h2>${heating && !isOff ? '<span class="heat-badge">heizt gerade</span>' : ""}</div>
+  const badge = !online.length ? ""
+    : mode === "holiday" ? '<span class="badge off">Urlaub</span>'
+    : isOff ? '<span class="badge off">aus</span>'
+    : online.some(h => h.window_open) ? '<span class="badge hint">Fenster offen</span>'
+    : mode === "boost" ? '<span class="badge">volle Kraft</span>'
+    : heating ? '<span class="badge">heizt</span>' : "";
+  const tint = !online.length ? TINT_OFFLINE : isOff || felt == null ? "" : tileTint(felt);
+  const glow = online.length && !isOff && felt != null && felt >= 18 ? "warm" : "cool";   // the number's colour at night
+  const boost = mode === "boost" ? boostLeft(online) : null;
+  const classes = ["tile", glow, isOff ? "is-off" : "", online.length ? "" : "offline", heating && !isOff ? "heating" : "",
+                   busy.has(key) ? "busy" : ""].filter(Boolean).join(" ");
+  return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
+    <div class="tile-head"><h2>${esc(g.name)}</h2>${badge}</div>
     <div class="tile-measure">
-      <div class="tile-now"><span class="now-temp">${deg(temps.length ? avg(temps) : null)}</span><span class="now-label">${sensors.length ? "an der Heizung" : "im Raum"}</span></div>
+      <div class="tile-now"><span class="now-temp">${degBig(now)}</span>${now == null ? ""
+        : `<span class="now-label">${sensors.length ? "an der Heizung" : "im Raum"}</span>`}</div>
       ${homeSensorsHTML(sensors)}
     </div>
     ${setter}
-    <p class="say ${say.tone}">${esc(say.text)}</p>
+    <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ' <span class="more">Die App versucht es immer wieder.</span>'}</p>
+    ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
+    ${heating && !isOff ? WAVE : ""}
   </article>`;
 }
 
@@ -605,8 +648,12 @@ function renderHome() {
   renderHelp();
   renderLogFoot();
   const gs = groups().filter(g => g.heaters.length);
-  setHTML(document.getElementById("tiles"), gs.length ? gs.map(homeTile).join("")
-    : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>');
+  const tiles = document.getElementById("tiles");
+  const html = gs.length ? gs.map(homeTile).join("")
+    : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>';
+  if (html !== tiles._html)   // new tiles: their heat waves go on where the old ones were, instead of starting over
+    document.documentElement.style.setProperty("--wave-delay", `-${(performance.now() % 8000 / 1000).toFixed(2)}s`);
+  setHTML(tiles, html);
 }
 
 function homeReport(g, okText, data) {
@@ -952,6 +999,10 @@ function changeSetpoint(card, delta) {
   if (pending[key]) clearTimeout(pending[key].timer);
   pending[key] = { temp, timer: setTimeout(() => commitSetpoint(g, temp), 1000) };
   render();
+  if (view === "home") {   // the number hops at each tap – not when the tile is merely drawn again
+    const num = document.querySelector(`#tiles .tile[data-kind="${g.kind}"][data-id="${CSS.escape(g.id)}"] .set-temp`);
+    if (num) num.classList.add("pop");
+  }
 }
 
 function commitSetpoint(g, temp) {
@@ -961,6 +1012,10 @@ function commitSetpoint(g, temp) {
       const data = await api("POST", apiBase(g) + "/setpoint", { temp });
       if (view === "home") homeReport(g, `${degShort(temp)} eingestellt`, data);
       else report("Solltemperatur", data);
+      if (!((data && data.results) || []).some(r => !r.ok)) {   // „✓ gesendet“ on the tile for a moment
+        sentAt[key] = Date.now();
+        setTimeout(render, SENT_MS + 50);
+      }
     } finally { delete pending[key]; }
   });
 }

@@ -576,6 +576,15 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/logo.jpg", timeout=5) as res:   # picture on the "Über" tab
             self.assertEqual(res.headers["Content-Type"], "image/jpeg")
 
+    def test_font_is_served(self):   # the page's font comes from the Pi itself, with its licence
+        with urllib.request.urlopen(self.base + "/style.css", timeout=5) as res:
+            self.assertIn(b'url("fonts/atkinson-hyperlegible-next.woff2")', res.read())
+        with urllib.request.urlopen(self.base + "/fonts/atkinson-hyperlegible-next.woff2", timeout=5) as res:
+            self.assertEqual(res.headers["Content-Type"], "font/woff2")
+            self.assertEqual(res.read(4), b"wOF2")
+        with urllib.request.urlopen(self.base + "/fonts/OFL.txt", timeout=5) as res:
+            self.assertIn(b"SIL Open Font License", res.read())
+
     PILL = "shellypill-aabbccddeeff"
 
     def pill_search(self, *pills):

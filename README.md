@@ -20,6 +20,13 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   vorher lief: Heizplan bzw. die vorherige Temperatur; ohne beides 20 °C bzw. der Plan des Raums.
 - **Wieder nach Plan** erscheint, wenn ein Raum fest eingestellt ist, aber einen Heizplan hat.
 - Hinweise wie „Fenster offen – die Heizung macht eine Pause“ oder „Keine Verbindung zur Heizung“.
+- **Aussehen:** Jede Kachel färbt sich nach der Raumtemperatur, von kühlem Blaugrau (12 °C) bis Aprikose (25 °C);
+  ausgeschaltete Räume sind grau. Oben rechts steht ein Schild: „heizt“, „volle Kraft“, „Fenster offen“, „aus“ oder
+  „Urlaub“. Solange die Heizung heizt, läuft unten auf der Kachel eine sanfte Wärmewelle (sie steht still, wenn das
+  Gerät „Bewegung reduzieren“ eingestellt hat). Nach **wärmer / kälter** steht unter der Zahl „wird gesendet …“, dann
+  kurz „✓ gesendet“. Steht das Gerät auf dunkel, wird auch die Seite dunkel, mit warm leuchtenden Zahlen. Die Schrift
+  ist [Atkinson Hyperlegible Next](https://github.com/googlefonts/atkinson-hyperlegible-next), gemacht für schwache
+  Augen; sie liegt in der App, nichts wird aus dem Internet geladen.
 - **Raumfühler:** Hat der Raum einen [Fühler](#raumfühler-shelly-pill), steht unter der großen Zahl zusätzlich
   „Fühler: 21,3 °C“ (beim DHT22 mit Luftfeuchte); die große Zahl heißt dann „an der Heizung“. Ein Messwert, der älter
   als 15 Minuten ist, erscheint dort nicht.
@@ -546,3 +553,6 @@ FlowThermPi ist freie Software unter der **GNU General Public License, Version 3
 (siehe [LICENSE](LICENSE)): Sie darf genutzt, verändert und weitergegeben werden – wer eine
 veränderte Version weitergibt, muss deren Quellcode ebenfalls unter dieser Lizenz offenlegen.
 FlowThermPi wird ohne jede Gewährleistung bereitgestellt.
+
+Die Schrift Atkinson Hyperlegible Next (Braille Institute; lateinischer Teil, von Google Fonts) in `web/fonts/` steht
+unter der SIL Open Font License 1.1 (siehe [web/fonts/OFL.txt](web/fonts/OFL.txt)).

@@ -25,6 +25,7 @@ from .zigbee import Zigbee
 
 log = logging.getLogger(__name__)
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
+mimetypes.add_type("font/woff2", ".woff2")   # the font in web/fonts – older Pythons and slim images do not know it
 MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
 

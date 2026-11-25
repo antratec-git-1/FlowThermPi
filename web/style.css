@@ -1,17 +1,32 @@
+/* Font: Atkinson Hyperlegible Next (Braille Institute), SIL Open Font License 1.1 – see fonts/OFL.txt. Latin subset
+   from Google Fonts, one variable file for all weights; it lives on the Pi, nothing is loaded from the internet. */
+@font-face {
+  font-family: "Atkinson Hyperlegible Next"; font-style: normal; font-weight: 200 800; font-display: swap;
+  src: url("fonts/atkinson-hyperlegible-next.woff2") format("woff2");
+}
+/* Colours „Sonnig“ (concept in the handover): warm paper, ink, petrol for the main action, warm tones for heat.
+   Text pairs reach 7:1, secondary text at least 4.5:1, borders and symbols 3:1. */
 :root {
-  --bg: #f3f4f6; --card: #ffffff; --text: #1c2430; --muted: #6b7280; --line: #e5e7eb;
-  --accent: #e8590c; --accent-soft: #fff1e6; --primary: #1c64f2; --danger: #c81e1e;
-  --ok: #0e9f6e; --off: #9ca3af; --cold: #3f83f8;
+  --bg: #fbf6ef; --card: #ffffff; --text: #2a2420; --muted: #625650; --line: #e8ded3;
+  --accent: #8a3412; --accent-soft: #fdebdd; --primary: #0d5960; --on-primary: #ffffff;
+  --danger: #8e2a1c; --danger-fill: #8e2a1c; --ok: #1f6b48; --off: #a3978e; --cold: #1f4f73; --warm: #8a3412;
+  --pill: #ffffff; --pill-line: #85756b; --badge: #f9d5bf; --on-badge: #6b260c;
+  --hint: #fcefc7; --on-hint: #6b4500; --bad: #fbe9e7; --on-bad: #8e2a1c;
+  --tile-off: #eceff1; --on-tile-off: #4e5b62; --sending: #0d5960; --wave: #f7c6a3;
   --radius: 14px;
   color-scheme: light dark;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #11161d; --card: #1a212b; --text: #e8edf3; --muted: #9aa5b1; --line: #2a3340;
-          --accent-soft: #3a2414; --off: #4b5563; }
+@media (prefers-color-scheme: dark) {   /* „Abendruhe“: dark petrol, warm numbers */
+  :root { --bg: #13232a; --card: #1c313a; --text: #eaf2f3; --muted: #a9bec4; --line: #2c4550;
+          --accent: #ffb37e; --accent-soft: #3d2b20; --primary: #ffb37e; --on-primary: #2a1608;
+          --danger: #ffb4a8; --ok: #86d3a8; --off: #56707a; --cold: #cfe3ea; --warm: #ffd2b0;
+          --pill: #24404b; --pill-line: #6f909c; --badge: #3d2b20; --on-badge: #ffb37e;
+          --hint: #3a3218; --on-hint: #ffd58a; --bad: #3a2222; --on-bad: #ffb4a8;
+          --tile-off: #1c313a; --on-tile-off: #a9bec4; --sending: #9fc3d6; --wave: #3d2b20; }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+body { margin: 0; font: 15px/1.45 "Atkinson Hyperlegible Next", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
        background: var(--bg); color: var(--text); padding-bottom: env(safe-area-inset-bottom); }
 header { display: flex; align-items: baseline; gap: 12px; padding: 14px 16px 6px; flex-wrap: wrap; }
 h1 { font-size: 22px; margin: 0; }
@@ -42,7 +57,7 @@ button, select, input { font: inherit; color: inherit; }
 button { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 7px 12px; cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--muted); }
 button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+button.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
 button.danger { color: var(--danger); }
 button.small { padding: 3px 8px; font-size: 13px; }
 select, input { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 6px 8px; }
@@ -163,43 +178,70 @@ dd { margin: 0; word-break: break-word; }
 .view-home { font-size: 18px; }
 .home-head { display: flex; align-items: center; gap: 12px; padding: 18px 16px 10px; }
 .home-title { flex: 1; }
-.home-title h1 { font-size: 30px; }
+.home-title h1 { font-size: 30px; font-weight: 500; }
 .clock { margin: 2px 0 0; font-size: 18px; color: var(--muted); }
 .setup-link { font-size: 15px; color: var(--muted); padding: 10px 14px; border-radius: 12px; }
-.banner { margin: 0 16px 14px; padding: 14px 16px; border-radius: 14px; background: var(--danger); color: #fff; font-size: 18px; }
+.banner { margin: 0 16px 14px; padding: 14px 16px; border-radius: 14px; background: var(--danger-fill); color: #fff; font-size: 18px; }
 .tiles { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); align-items: start; }
-.tile { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 18px 18px 16px;
-        display: grid; gap: 16px; }
+/* a tile takes on the warmth of its room (--tint, set by app.js); switched off it is grey */
+.tile { position: relative; overflow: hidden; background: var(--tint, var(--card)); border-radius: 24px;
+        padding: 18px 18px 16px; display: grid; gap: 16px; }
+.tile.is-off { background: var(--tile-off); }
+.tile.heating { padding-bottom: 32px; }   /* room for the heat wave */
+.tile.busy { opacity: 1; }                /* while sending the label says so – the tile stays readable */
 .tile-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.tile-head h2 { flex: 1; font-size: 26px; line-height: 1.2; }
-.heat-badge { font-size: 16px; font-weight: 600; color: var(--accent); background: var(--accent-soft);
-              padding: 4px 12px; border-radius: 99px; white-space: nowrap; }
-.tile-now { display: flex; align-items: baseline; gap: 10px; }
-.now-temp { font-size: 56px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.now-label { font-size: 19px; color: var(--muted); }
-.tile-measure { display: grid; gap: 6px; }
-.tile-sensor { margin: 0; font-size: 19px; color: var(--muted); }
-.tile-sensor b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px;
-            background: var(--bg); border-radius: 18px; padding: 10px; }
-.step { display: grid; justify-items: center; gap: 2px; min-height: 88px; padding: 8px 6px; border-radius: 16px;
-        border: 2px solid var(--line); background: var(--card); touch-action: manipulation; }
-.step .sym { font-size: 44px; line-height: 1; font-weight: 400; }
-.step .word { font-size: 18px; }
-.step.cold .sym { color: var(--cold); }
-.step.warm .sym { color: var(--accent); }
+.tile-head h2 { flex: 1; font-size: 26px; font-weight: 500; line-height: 1.2; }
+.badge { font-size: 16px; font-weight: 500; padding: 4px 12px; border-radius: 99px; white-space: nowrap;
+         background: var(--badge); color: var(--on-badge); }
+.badge.hint { background: var(--hint); color: var(--on-hint); }
+.badge.off { background: none; color: var(--on-tile-off); padding-right: 0; }
+.tile-now { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.now-temp { font-size: 60px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.now-label { font-size: 18px; color: var(--muted); }
+.tile.is-off .now-temp, .tile.offline .now-temp { color: var(--on-tile-off); }
+.tile-measure { display: grid; gap: 8px; }
+.tile-sensor { margin: 0; justify-self: start; padding: 8px 14px; border-radius: 14px; background: var(--pill);
+               font-size: 18px; color: var(--muted); }
+.tile-sensor b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
+.step { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 6px; min-height: 64px;
+        padding: 6px 10px; border-radius: 28px; border: 1.5px solid var(--pill-line); background: var(--pill);
+        touch-action: manipulation; }
+.step .sym { font-size: 30px; line-height: 1; }
+.step .word { font-size: 19px; }
+.step.cold { color: var(--cold); }
+.step.warm { color: var(--warm); }
 .step:active:not(:disabled) { transform: scale(.97); }
-.set-val { text-align: center; min-width: 118px; }
-.set-temp { display: block; font-size: 40px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.set-label { font-size: 16px; color: var(--muted); }
-.tile-set.pending .set-temp { color: var(--accent); }
-.say { margin: 0; font-size: 19px; line-height: 1.45; }
-.say.warn { color: var(--accent); font-weight: 600; }
-.say.bad { color: var(--danger); font-weight: 600; }
-.tile-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.big-btn { flex: 1 1 140px; min-height: 60px; font-size: 19px; border-radius: 16px; border-width: 2px; touch-action: manipulation; }
+.set-val { text-align: center; min-width: 104px; }
+.set-temp { display: block; font-size: 30px; font-weight: 500; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.set-label { font-size: 17px; color: var(--muted); }
+.set-label.sending { color: var(--sending); }
+.set-temp.pop { animation: pop .25s ease-out; }
+@keyframes pop { 40% { transform: scale(1.12); } }
+.say { margin: 0; font-size: 18px; line-height: 1.45; }
+.say.warn, .say.bad { padding: 12px 14px; border-radius: 16px; font-weight: 500; }
+.say.warn { background: var(--hint); color: var(--on-hint); }
+.say.bad { background: var(--bad); color: var(--on-bad); }
+.say .more { display: block; margin-top: 4px; font-weight: 400; }
+.boost-bar { height: 8px; margin-top: -6px; border-radius: 99px; background: var(--badge); overflow: hidden; }
+.boost-bar span { display: block; height: 100%; border-radius: 99px; background: var(--accent); }
+.tile-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.big-btn { flex: 1 1 140px; min-height: 60px; font-size: 19px; border-radius: 999px; border: 1.5px solid var(--pill-line);
+           background: var(--pill); padding: 8px 18px; touch-action: manipulation; }
+.big-btn.primary { border-color: var(--primary); }
 .big-btn.quiet { color: var(--muted); }
-.tile.is-off .now-temp { color: var(--muted); }
+.tile-actions .big-btn.quiet { flex: 0 1 auto; min-height: 56px; padding: 8px 4px; border-color: transparent; background: none;
+                                text-decoration: underline; text-underline-offset: 4px; }
+/* heat wave along the bottom while the room heats – the „Flow“ in the name; still with „Bewegung reduzieren“ */
+.wave { position: absolute; left: 0; bottom: 0; width: 200%; height: 16px; color: var(--wave); pointer-events: none;
+        animation: wave 8s linear infinite; animation-delay: var(--wave-delay, 0s); }
+@keyframes wave { to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) { .wave, .set-temp.pop { animation: none; } }
+@media (prefers-color-scheme: dark) {   /* no tint at night: the number glows warm or cool */
+  .tile { background: var(--card); }
+  .tile.warm .now-temp { color: #ffb37e; }
+  .tile.cool .now-temp { color: #9fc3d6; }
+}
 .home-empty { font-size: 19px; color: var(--muted); grid-column: 1 / -1; }
 .view-home #toast { font-size: 18px; padding: 14px 20px; }
 
@@ -215,12 +257,12 @@ dd { margin: 0; word-break: break-word; }
 .dialog .dialog-error { color: var(--danger); font-weight: 600; }
 .dialog-buttons { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
 .dialog-buttons button { min-height: 50px; font-size: 17px; padding: 8px 18px; border-radius: 12px; }
-button.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.danger-solid { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 
 #toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
          background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; max-width: min(92vw, 560px);
          box-shadow: 0 6px 24px rgba(0,0,0,.25); z-index: 20; font-size: 14px; }
-#toast.error { background: var(--danger); color: #fff; }
+#toast.error { background: var(--danger-fill); color: #fff; }
 
 /* app name: small label above "Heizung" and footer of the setup */
 .brand { margin: 0 0 2px; font-size: 13px; font-weight: 600; letter-spacing: .06em; color: var(--accent); }
@@ -240,7 +282,7 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .updates .update-new { padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); margin-bottom: 4px; }
 .updates .update-new p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .updates .update-new button { font-size: 16px; padding: 9px 16px; }
-.banner.info { background: var(--primary); }
+.banner.info { background: var(--primary); color: var(--on-primary); }
 
 /* sensor search mode in "Geräte" */
 .steps { margin: 10px 0 4px; padding-left: 22px; }
