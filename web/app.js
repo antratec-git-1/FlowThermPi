@@ -544,7 +544,11 @@ function planText(g, online, target) {
 }
 
 function homeStatus(g, online, mode, target, writable) {
-  if (!online.length) return { text: "Keine Verbindung zur Heizung.", tone: "bad" };
+  if (!online.length) {
+    const thermostats = g.heaters.every(h => h.kind === "zigbee");
+    return { text: !thermostats ? "Keine Verbindung zur Heizung." : g.heaters.length > 1 ? "Keine Verbindung zu den Thermostaten."
+                                 : "Keine Verbindung zum Thermostat.", tone: "bad" };
+  }
   if (online.some(h => h.window_open)) return { text: "Fenster offen – die Heizung macht eine Pause.", tone: "warn" };
   let text = "";
   if (mode === "off" || mode === "standby") text = "Ausgeschaltet – schützt nur vor Frost.";
@@ -622,6 +626,11 @@ function homeTile(g) {
   const tint = !online.length ? TINT_OFFLINE : isOff || felt == null ? "" : tileTint(felt);
   const glow = online.length && !isOff && felt != null && felt >= 18 ? "warm" : "cool";   // the number's colour at night
   const boost = mode === "boost" ? boostLeft(online) : null;
+  // a thermostat that has been silent for hours wakes up with a press of its middle button
+  const silent = g.heaters.some(h => h.kind === "zigbee" && !h.online && /mittlere Taste/.test(h.error || ""));
+  const low = g.heaters.filter(h => h.kind === "zigbee" && h.battery_low);
+  const battery = !low.length ? "" : `<p class="tile-note">${g.heaters.length === 1 ? "Batterie im Thermostat bald wechseln."
+    : "Batterie bald wechseln: " + esc(low.map(h => h.name).join(", ")) + "."}</p>`;
   const classes = ["tile", glow, isOff ? "is-off" : "", online.length ? "" : "offline", heating && !isOff ? "heating" : "",
                    busy.has(key) ? "busy" : ""].filter(Boolean).join(" ");
   return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
@@ -632,7 +641,9 @@ function homeTile(g) {
       ${homeSensorsHTML(sensors)}
     </div>
     ${setter}
-    <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ' <span class="more">Die App versucht es immer wieder.</span>'}</p>
+    <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ` <span class="more">${silent
+      ? "Am Thermostat einmal die mittlere Taste drücken." : "Die App versucht es immer wieder."}</span>`}</p>
+    ${battery}
     ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
     ${heating && !isOff ? WAVE : ""}
@@ -985,6 +996,8 @@ function heaterLine(h) {
   if (h.window_open) tags.push('<span class="tag warn">Fenster offen</span>');
   if (h.mode && h.mode !== "manual") tags.push(`<span class="tag">${esc(MODE_TEXT[h.mode] || h.mode)}</span>`);
   if (!h.writable) tags.push('<span class="tag">nur lesen</span>');
+  if (h.battery_low) tags.push('<span class="tag warn">Batterie schwach</span>');
+  if ((h.faults || []).some(f => !f.startsWith("Batterie"))) tags.push('<span class="tag bad">Störung</span>');
   if (h.online && h.clock_drift != null && Math.abs(h.clock_drift) > 60) tags.push('<span class="tag bad">Uhr falsch</span>');
   return `<li><span class="dot ${dot}"></span><span class="hname">${esc(h.name)}</span>
     <span class="hvals">${h.online ? `${deg(h.room_temp)} → ${deg(h.setpoint)}` : "offline"}</span>${tags.join("")}</li>`;
@@ -1208,6 +1221,19 @@ function clockText(h) {
 
 function deviceFormHTML(f) {
   const saving = busy.has("devform");
+  if (f.zigbee) {
+    const removing = zigbeeNetPending === f.id;
+    return `<div class="device-form">
+      <label>Name<input data-field="name" value="${esc(f.name)}" placeholder="${esc(f.placeholderName)}" autocomplete="off"></label>
+      <p class="hint">Das Thermostat funkt über Zigbee – es braucht keine Adresse und keinen Token. Den Raum wählst du in
+        der Übersicht, den Heizplan bekommt es über seinen Raum.</p>
+      <div class="row">
+        <button class="primary" data-action="dev-save" ${saving || removing ? "disabled" : ""}>${saving ? "speichere …" : "Speichern"}</button>
+        <button data-action="dev-cancel">Abbrechen</button>
+        <button class="danger" data-action="dev-delete" ${saving || removing ? "disabled" : ""}>${removing ? "entferne …" : "Thermostat entfernen"}</button>
+      </div>
+    </div>`;
+  }
   const tokenHint = f.mode === "edit" && f.hasToken ? "hinterlegt – leer lassen = unverändert"
                                                      : "24 Zeichen (Feld „pop“) oder ganzen QR-Inhalt einfügen";
   return `<div class="device-form">
@@ -1744,6 +1770,26 @@ async function deleteSensor() {
   await refresh();
 }
 
+function thermostatFactsHTML(h, roomOptions) {  // a SONOFF thermostat over Zigbee: no address, token or clock
+  const signal = zigbeeSignal(h.signal);
+  const battery = h.battery == null ? "" : ` · Batterie ${h.battery} %${h.battery_low ? ' <span class="error-text">– bald wechseln</span>' : ""}`;
+  const others = (h.faults || []).filter(f => !f.startsWith("Batterie") || !h.battery_low);
+  return `<dl>
+    <dt>Raum</dt><dd><select data-action="heater-room" aria-label="Raum">${roomOptions(h.room)}</select></dd>
+    <dt>Verbindung</dt><dd>Zigbee${battery}${signal ? " · " + esc(signal) : ""}</dd>
+    <dt>Status</dt><dd>${h.online ? "online" : "offline"}${h.error ? ` <span class="error-text">${esc(h.error)}</span>` : ""}</dd>
+    ${others.length ? `<dt>Störung</dt><dd class="error-text">${esc(others.join(", "))}</dd>` : ""}
+    <dt>Kalibrierung</dt><dd>${h.temp_corr == null ? "–" : `Korrektur ${fmtDelta(h.temp_corr)}`}
+      ${h.online ? '<button class="small" data-action="calib-open">Kalibrieren</button>' : ""}</dd>
+    <dt>Heizpläne</dt><dd>${h.plan_slot ? `Plan ${h.plan_slot} ausgewählt${h.mode === "auto" ? ", Automatik läuft" : ""}` : "–"}
+      <span class="muted">· den Heizplan bekommt es über seinen Raum („Räume“ › Senden)</span></dd>
+    <dt>Gemeldet</dt><dd>${h.last_seen ? esc(fmtTime(h.last_seen)) + " Uhr" : "–"}</dd>
+    <dt>Zigbee-Adresse</dt><dd>${esc(h.serial ?? "–")}</dd>
+    <dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}${h.update
+      ? ' · Update verfügbar <span class="muted">(einspielen kann die App es noch nicht)</span>' : ""}</dd>
+  </dl>`;
+}
+
 function deviceFilterBar() {
   const counts = { all: state.heaters.length, none: state.heaters.filter(h => !h.room).length };
   for (const r of state.rooms) counts[r.id] = r.heaters.length;
@@ -1771,7 +1817,8 @@ function renderDevices(el) {
         <strong class="dname">${esc(h.name)}</strong>
         ${h.custom_name && h.hostname ? `<span class="muted">${esc(h.hostname)}</span>` : ""}
         ${editingThis || calibThis ? "" : '<button class="small" data-action="dev-edit">Bearbeiten</button>'}</div>
-      ${editingThis ? deviceFormHTML(deviceForm) : calibThis ? calibFormHTML(h) : `<dl>
+      ${editingThis ? deviceFormHTML(deviceForm) : calibThis ? calibFormHTML(h)
+        : h.kind === "zigbee" ? thermostatFactsHTML(h, roomOptions) : `<dl>
         <dt>Raum</dt><dd><select data-action="heater-room" aria-label="Raum">${roomOptions(h.room)}</select></dd>
         <dt>Adresse</dt><dd>${esc(h.host)}${h.hostname ? " · " + esc(h.hostname) : ""}</dd>
         <dt>Status</dt><dd>${h.online ? "online" : "offline"}${h.error ? ` <span class="error-text">${esc(h.error)}</span>` : ""}</dd>
@@ -1810,7 +1857,8 @@ function renderDevices(el) {
       <button class="small primary" data-action="dev-new" ${deviceForm && deviceForm.mode === "new" ? "disabled" : ""}>+ Heizung</button></div>
       <p class="hint">Die App stellt die Uhren selbst: beim Start, bei mehr als 1 Minute Abweichung und täglich um 3 Uhr
       (deckt auch Sommer-/Winterzeit ab). Ist eine Heizung länger nicht erreichbar, sucht sie sie im Netz und übernimmt
-      eine neue Adresse selbst. Räume legst du im Tab „Räume“ über „+ Raum“ an.</p>
+      eine neue Adresse selbst. Räume legst du im Tab „Räume“ über „+ Raum“ an.${state.app && state.app.zigbee
+      ? " SONOFF-Thermostate erscheinen hier von selbst, sobald sie unter „Zigbee“ angelernt sind." : ""}</p>
       ${scan ? scanPanelHTML() : ""}
       ${state.heaters.length ? deviceFilterBar() : ""}
       ${deviceForm && deviceForm.mode === "new" ? `<div class="device">${deviceFormHTML(deviceForm)}</div>` : ""}
@@ -1826,20 +1874,23 @@ function openDeviceForm(heaterId, found = null) {  // found: a heater from the n
   } else {
     const h = state.heaters.find(x => x.id === heaterId);
     if (!h) return;
-    deviceForm = { mode: "edit", id: h.id, name: h.custom_name, placeholderName: h.hostname || h.host, host: h.host,
-                   token: "", hasToken: h.writable, removeToken: false };
+    const zigbee = h.kind === "zigbee";   // its name without a name of its own: „Thermostat“ + the end of its address
+    deviceForm = { mode: "edit", id: h.id, name: h.custom_name, host: h.host, token: "", hasToken: h.writable,
+                   removeToken: false, zigbee, placeholderName: zigbee ? "Thermostat " + h.id.slice(-4).toUpperCase()
+                                                                       : h.hostname || h.host };
   }
   render();
-  const first = document.querySelector('.device-form input[data-field="' + (heaterId ? "host" : found ? "token" : "name") + '"]');
+  const field = !heaterId ? (found ? "token" : "name") : deviceForm.zigbee ? "name" : "host";
+  const first = document.querySelector('.device-form input[data-field="' + field + '"]');
   if (first) { first.focus(); first.scrollIntoView({ block: "center", behavior: "smooth" }); }
 }
 
 async function saveDevice() {
   const f = deviceForm;
   if (!f || busy.has("devform")) return;
-  const body = { name: f.name, host: f.host };
-  if (String(f.token || "").trim()) body.token = String(f.token).trim();
-  if (f.removeToken) body.remove_token = true;
+  const body = f.zigbee ? { name: f.name } : { name: f.name, host: f.host };
+  if (!f.zigbee && String(f.token || "").trim()) body.token = String(f.token).trim();
+  if (!f.zigbee && f.removeToken) body.remove_token = true;
   busy.add("devform");
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   render();
@@ -1864,15 +1915,23 @@ function calibBasis(h) {  // what the app compares the measurement with: 30-min 
                                  : { temp: h.room_temp, text: "aktueller Wert" };
 }
 
+function roundHalfEven(x) { const r = Math.round(x); return Math.abs(x % 1) === 0.5 && r % 2 !== 0 ? r - 1 : r; }   // as Python
+
 function calibPreview(h, measuredText) {
   const measured = parseFloat(String(measuredText || "").replace(",", "."));
   if (!(measured >= 0 && measured <= 40) || h.room_temp == null || h.temp_corr == null) {
     return "Gemessenen Wert eingeben – die neue Korrektur erscheint hier.";
   }
   const basis = calibBasis(h);
-  const next = Math.round((h.temp_corr + measured - basis.temp) * 10) / 10;
-  if (Math.abs(next) > 9.9) return `Nötig wären ${fmtDelta(next)} – mehr als die möglichen ±9,9 °C. Bitte Messung prüfen.`;
-  return `Neue Korrektur: <b>${fmtDelta(next)}</b> (bisher ${fmtDelta(h.temp_corr)}) – die Heizung zeigt danach etwa ${deg(measured)}.`;
+  const thermostat = h.kind === "zigbee";   // it takes 0.2 °C steps up to ±10 °C, the AeroFlow 0.1 °C up to ±9.9 °C
+  let tenths = Math.round((h.temp_corr + measured - basis.temp) * 10);
+  if (thermostat) tenths = roundHalfEven(tenths / 2) * 2;
+  const next = tenths / 10, limit = thermostat ? 10 : 9.9;
+  if (Math.abs(next) > limit) {
+    return `Nötig wären ${fmtDelta(next)} – mehr als die möglichen ±${String(limit).replace(".", ",")} °C. Bitte Messung prüfen.`;
+  }
+  return `Neue Korrektur: <b>${fmtDelta(next)}</b> (bisher ${fmtDelta(h.temp_corr)}) – ${thermostat ? "das Thermostat"
+    : "die Heizung"} zeigt danach etwa ${deg(measured)}.`;
 }
 
 function calibFormHTML(h) {
@@ -1880,13 +1939,14 @@ function calibFormHTML(h) {
   const saving = busy.has("calib");
   return `<div class="device-form calib-form">
     <h3>Kalibrieren</h3>
-    <p>Die Heizung misst gerade <b>${deg(h.room_temp)}</b>${h.room_temp_avg != null
+    <p>${h.kind === "zigbee" ? "Das Thermostat" : "Die Heizung"} misst gerade <b>${deg(h.room_temp)}</b>${h.room_temp_avg != null
       ? `, im Mittel der letzten ${h.room_temp_avg_minutes} min <b>${deg(h.room_temp_avg)}</b>` : ""}.
       Aktuelle Korrektur: ${fmtDelta(h.temp_corr ?? 0)}.</p>
     <label>Gemessene Raumtemperatur in °C<input data-field="measured" type="number" step="0.1" min="0" max="40"
       inputmode="decimal" value="${esc(calibForm.measured)}" placeholder="z. B. 21,0"></label>
     <p class="calib-preview">${calibPreview(h, calibForm.measured)}</p>
-    <p class="hint">Verglichen wird mit dem ${esc(basis.text)} der Heizung. So misst du richtig: Thermometer in der
+    <p class="hint">Verglichen wird mit dem ${esc(basis.text)} ${h.kind === "zigbee"
+      ? "des Thermostats (es nimmt die Korrektur in Schritten von 0,2 °C)" : "der Heizung"}. So misst du richtig: Thermometer in der
       Raummitte auf 1–1,3 m Höhe, nicht am Fenster oder in der Sonne; der Raum hat seit 1–2 Stunden seine
       Solltemperatur, Türen und Fenster sind zu. Über 30–60 Minuten mehrmals ablesen und den Durchschnitt eintragen.</p>
     <div class="row">
@@ -1931,6 +1991,7 @@ async function saveCalib(body) {
 async function deleteDevice() {
   const f = deviceForm;
   const h = f && state.heaters.find(x => x.id === f.id);
+  if (h && h.kind === "zigbee") return removeThermostat(h);
   if (!h || !confirm(`Heizung „${h.name}“ aus der App entfernen?\n\nSie wird aus heizungen.conf gelöscht, Name und ` +
                      "Raumzuordnung gehen verloren. An der Heizung selbst ändert sich nichts.")) return;
   try {
@@ -1940,6 +2001,41 @@ async function deleteDevice() {
     toast(e.message, true);
   }
   await refresh();
+}
+
+async function removeThermostat(h) {  // paired: the Pi unpairs it (and the app forgets it with that) – else only the app forgets it
+  const yes = await ask({ title: `„${h.name}“ entfernen?`,
+    text: h.paired ? "Der Pi meldet das Thermostat im Zigbee-Netz ab, und die App vergisst Name und Raum. Willst du es " +
+                     "später wieder nutzen, lernst du es unter „Zigbee“ neu an."
+                   : "Die App vergisst Name und Raum des Thermostats. Im Zigbee-Netz ist es schon nicht mehr angelernt.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  if (h.paired) {
+    if (await zigbeeUnpair(h.id, "das Thermostat")) deviceForm = null;
+  } else {
+    try {
+      toast((await api("DELETE", `api/heaters/${encodeURIComponent(h.id)}`)).message);
+      deviceForm = null;
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+  await refresh();
+}
+
+async function newDevice() {  // with Zigbee on the Pi: an AeroFlow (WLAN) or a thermostat (Zigbee)?
+  if (!(state.app && state.app.zigbee)) return openDeviceForm(null);
+  const kind = await ask({ title: "Was kommt dazu?",
+    text: "Eine AeroFlow-Heizung hängt im WLAN – für sie trägst du Adresse und Token ein. Ein SONOFF-Thermostat funkt " +
+      "über Zigbee: Du lernst es unter „Zigbee“ an, danach erscheint es hier von selbst.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Thermostat (Zigbee)", value: "zigbee" },
+              { label: "AeroFlow (WLAN)", value: "aeroflow", cls: "primary" }] });
+  if (kind === "aeroflow") return openDeviceForm(null);
+  if (kind !== "zigbee") return;
+  tab = "zigbee";
+  localStorage.setItem("heizung.tab", tab);
+  openZigbeeTab();
+  render();
 }
 
 async function patch(url, body, message) {
@@ -2644,17 +2740,21 @@ async function zigbeeForget(ieee) {
   const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : "Gerät entfernen?",
     text: `Der Pi meldet ${it} im Zigbee-Netz ab. Willst du es später wieder nutzen, lernst du es einfach neu an.`,
     buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
-  if (!yes) return;
+  if (yes) await zigbeeUnpair(ieee, it);
+}
+
+async function zigbeeUnpair(ieee, it) {   // true when it is gone; it: "das Thermostat" or "das Gerät"
   const error = await zigbeeRemoveDevice(ieee, false);
-  if (!error) return;
-  if (![502, 504].includes(error.status)) { toast(error.message, true); return; }   // forcing only helps if the device did not answer
+  if (!error) return true;
+  if (![502, 504].includes(error.status)) { toast(error.message, true); return false; }   // forcing only helps if the device did not answer
   const force = await ask({ title: "Trotzdem entfernen?",
     text: `${error.message} Du kannst ${it} trotzdem entfernen: Dann vergisst der Pi es, ohne auf seine Antwort zu warten. ` +
       "Meldet es sich später noch einmal, erscheint es wieder in der Liste.",
     buttons: [{ label: "Abbrechen", value: null }, { label: "Trotzdem entfernen", value: "yes", cls: "danger-solid" }] });
-  if (!force) return;
+  if (!force) return false;
   const again = await zigbeeRemoveDevice(ieee, true);
   if (again) toast(again.message, true);
+  return !again;
 }
 
 function zigbeeSize(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " GB" : mb + " MB"; }
@@ -2800,10 +2900,12 @@ function zigbeeDeviceState(d) {   // [dot, words]
 function zigbeeDeviceHTML(d) {
   const [dot, words] = zigbeeDeviceState(d);
   const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : "Unbekanntes Gerät");
+  const named = ((state && state.heaters) || []).find(h => h.id === d.ieee && h.custom_name);   // its name in the app
   const keep = s => s.replace(/ /g, " ");   // "20,5 °C" and the like stay on one line
   const facts = [words, d.battery != null ? keep(`Batterie ${Math.round(d.battery)} %`) : "", keep(zigbeeSignal(d.signal)),
     d.temperature != null ? keep(deg(d.temperature)) : ""].filter(Boolean).join(" · ");
-  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(model)}</b>
+  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(named ? named.custom_name
+      : model)}</b>${named ? ` <span class="muted">${esc(model)}</span>` : ""}
       ${d.new ? `<span class="tag ok">neu</span>` : ""}
       <span class="muted zigbee-facts">${esc(facts)}</span>
       <span class="muted zigbee-ieee">${esc(d.ieee)}</span></span>
@@ -2843,7 +2945,8 @@ function zigbeeDevicesHTML(z) {
     ${online ? zigbeeSearchHTML(net) : `<p class="muted">Thermostate suchen geht, sobald Zigbee2MQTT läuft.</p>`}
     ${devices.length ? `<ul class="net-list zigbee-list">${devices.map(zigbeeDeviceHTML).join("")}</ul>`
       : online ? `<p class="muted">Noch kein Thermostat angelernt.</p>` : ""}
-    ${devices.length ? `<p class="hint">Räume und Heizpläne für die Thermostate kommen mit einem der nächsten Updates.</p>` : ""}
+    ${devices.length ? `<p class="hint">Namen und Räume gibst du den Thermostaten unter „Geräte“; den Heizplan bekommen sie
+      über ihren Raum.</p>` : ""}
   </div>`;
 }
 
@@ -2936,7 +3039,7 @@ document.addEventListener("click", e => {
       deviceFilter = t.dataset.filter;
       localStorage.setItem("heizung.deviceFilter", deviceFilter);
       return render();
-    case "dev-new": return openDeviceForm(null);
+    case "dev-new": return newDevice();
     case "scan-run": return runScan(null);
     case "scan-other": return runScan(scanNet.trim() || null);
     case "scan-close": scan = null; return render();

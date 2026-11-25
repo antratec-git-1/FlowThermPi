@@ -4,10 +4,16 @@ FakeBroker speaks MQTT over TCP on 127.0.0.1: logins (or none), wildcards (+ and
 FakeZ2M sits inside the broker and answers like Zigbee2MQTT 2.x: bridge/state, bridge/info and bridge/devices
 (retained), the answers to permit_join and device/remove, and – while the network is open – a SONOFF thermostat
 that joins after a few seconds and is interviewed.
+
+Its thermostats behave like the SONOFF TRV-ZBT in Zigbee2MQTT (zigbee-herdsman-converters, sonoff.ts, read on
+25.11.2026): zigbee2mqtt/<IEEE>/set takes the same values with the same checks – a wrong one is refused without a
+message, as Zigbee2MQTT only logs it – and after `delay` seconds the thermostat's whole state comes back, retained,
+with a fresh last_seen; …/get brings the state, too. A thermostat in `asleep` answers nothing.
 """
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
 import threading
@@ -234,6 +240,41 @@ def later(seconds: float, action) -> None:
     timer.start()
 
 
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+TRANSITION = re.compile(r"^(0[0-9]|1[0-9]|2[0-3]):([0-5][0-9])/(\d+(?:\.\d{1,2})?)$")
+
+
+def schedule_error(text) -> str | None:
+    """What Zigbee2MQTT says about a weekly_schedule_<day> value of the TRV-ZBT – None if it takes it."""
+    if not isinstance(text, str):
+        return "not a string"
+    parts = sorted(text.strip().split())
+    if len(parts) > 12:
+        return "days must have no more than 12 transitions"
+    for part in parts:
+        found = TRANSITION.match(part)
+        if not found:
+            return f"transitions must be in format HH:mm/temperature, found: {part}"
+        if not 5 <= float(found[3]) <= 30:
+            return f"temperature value must be between 5-30 (inclusive), found: {found[3]}"
+    if not parts or not parts[0].startswith("00:00/"):
+        return "the first transition of each day should start at 00:00"
+    return None
+
+
+def trv_state(temperature: float = 20.5, setpoint: float = 21, battery: int = 87) -> dict:
+    """A TRV-ZBT's state as Zigbee2MQTT publishes it (the factory plan is made up)."""
+    return {"local_temperature": temperature, "occupied_heating_setpoint": setpoint, "system_mode": "heat",
+            "running_state": "heat" if temperature < setpoint else "idle", "local_temperature_calibration": 0,
+            "frost_protection_temperature": 7, "open_window": "ON", "open_window_detected": False,
+            "child_lock": "UNLOCK", "battery": battery, "linkquality": 132, "fault_status": "none",
+            "temporary_mode_mode": "disabled", "temporary_mode_duration": 30, "temporary_mode_target_temperature": 30,
+            "schedule_active_group": "1", "schedule_group_to_edit": "1", "weekly_schedule_status": "success",
+            **{f"weekly_schedule_{day}": "00:00/16 06:00/21 22:00/16" for day in DAYS},
+            "smart_temperature_control": "OFF", "temperature_sensor_select": "local_temperature",
+            "update": {"state": "idle", "installed_version": 4353, "latest_version": 4353}}
+
+
 def thermostat(ieee: str, interview: str = "SUCCESSFUL") -> dict:
     """A SONOFF TRV Gen2 as bridge/devices lists it – the definition only once the interview is done."""
     done = interview == "SUCCESSFUL"
@@ -266,8 +307,15 @@ class FakeZ2M:
         self.silent = False             # True: requests are not answered
         self.remove_error: str | None = None   # error for a removal without force (device asleep)
         self.next_ieee = 0x8c65a3fffe1d0001
+        self.states: dict[str, dict] = {}   # ieee -> the thermostat's state
+        self.plans: dict[str, dict] = {}    # ieee -> {group: {day: schedule}} – all three plans of the thermostat
+        self.delay = 0.05                   # seconds until a command has reached the thermostat (real: about 2)
+        self.asleep: set[str] = set()       # thermostats that answer nothing
+        self.commands: list[tuple[str, str, dict]] = []   # (ieee, "set" | "get", payload) as they came
+        self.refused: list[str] = []        # why a command was refused (Zigbee2MQTT only logs it)
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
+        broker.hooks.append(self._command)
 
     # what Zigbee2MQTT publishes by itself
     def start(self, devices: list[dict] | None = None) -> None:
@@ -306,10 +354,114 @@ class FakeZ2M:
     def _event(self, kind: str, data: dict) -> None:
         self.broker.publish(f"{self.BASE}/bridge/event", {"type": kind, "data": data})
 
-    def _values(self, ieee: str, battery: int = 87) -> None:
-        self.broker.publish(f"{self.BASE}/{ieee}", {
-            "battery": battery, "linkquality": 132, "local_temperature": 20.5, "occupied_heating_setpoint": 21,
-            "system_mode": "heat", "last_seen": datetime.now().astimezone().isoformat(timespec="seconds")}, retain=True)
+    def _values(self, ieee: str) -> None:
+        """The thermostat's whole state, retained – as after every message from it."""
+        with self.lock:
+            state = self.states.setdefault(ieee, trv_state())
+            state["last_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            payload = dict(state)
+        self.broker.publish(f"{self.BASE}/{ieee}", payload, retain=True)
+
+    def report(self, ieee: str, **values) -> None:
+        """The thermostat reports by itself (someone turned the wheel, the room cooled down, …)."""
+        with self.lock:
+            self.states.setdefault(ieee, trv_state()).update(values)
+        self._values(ieee)
+
+    # commands to a thermostat
+    def _command(self, topic: str, payload: bytes) -> None:
+        parts = topic.split("/")
+        if len(parts) != 3 or parts[0] != self.BASE or parts[2] not in ("set", "get") or not self.online:
+            return
+        ieee, kind = parts[1], parts[2]
+        try:
+            body = json.loads(payload)
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self.refused.append("Invalid message")
+            return
+        with self.lock:
+            self.commands.append((ieee, kind, body))
+            known = any(d["ieee_address"] == ieee and d["interview_state"] == "SUCCESSFUL" for d in self.devices)
+        if not known:
+            self.refused.append(f"Entity '{ieee}' is unknown")
+            return
+        if ieee in self.asleep:
+            return
+        later(self.delay, lambda: self._apply(ieee, body) if kind == "set" else self._values(ieee))
+
+    def _apply(self, ieee: str, body: dict) -> None:
+        """What the TRV-ZBT's converters do with a set: check each value, write it, then publish the state."""
+        with self.lock:
+            state = self.states.setdefault(ieee, trv_state())
+            plans = self.plans.setdefault(ieee, {g: {d: state[f"weekly_schedule_{d}"] for d in DAYS} for g in "123"})
+            new = dict(state)
+            for key, value in body.items():
+                error = None
+                if key == "occupied_heating_setpoint":
+                    if isinstance(value, (int, float)) and 5 <= value <= 30:
+                        new[key] = round(value * 2) / 2
+                    else:
+                        error = f"{key} {value} out of range"
+                elif key == "system_mode":
+                    error = None if value in ("off", "auto", "heat") else f"system_mode {value} unknown"
+                    new[key] = value if error is None else new[key]
+                elif key == "local_temperature_calibration":
+                    if isinstance(value, (int, float)) and -10 <= value <= 10:
+                        new[key] = round(value, 1)
+                    else:
+                        error = f"{key} {value} out of range"
+                elif key == "frost_protection_temperature":
+                    if isinstance(value, (int, float)) and 5 <= value <= 15:
+                        new[key] = value
+                    else:
+                        error = f"{key} {value} out of range"
+                elif key in ("schedule_active_group", "schedule_group_to_edit"):
+                    if value in ("1", "2", "3"):
+                        new[key] = value
+                    else:
+                        error = f"Invalid {key}: expected one of 1, 2, 3, got {value}"
+                elif key.startswith("weekly_schedule_") and key[16:] in DAYS:
+                    error = schedule_error(value)
+                    if error is None:
+                        plans[new["schedule_group_to_edit"]][key[16:]] = value
+                        new[key] = value
+                elif key in ("temporary_mode_mode", "temporary_mode_duration", "temporary_mode_target_temperature"):
+                    mode = body.get("temporary_mode_mode", new["temporary_mode_mode"])
+                    duration = body.get("temporary_mode_duration", new["temporary_mode_duration"])
+                    if mode not in ("disabled", "timer", "boost") or not isinstance(duration, int) \
+                            or not 1 <= duration <= 1440:
+                        error = f"Invalid temporary mode {mode} / {duration}"
+                    else:
+                        new["temporary_mode_mode"] = mode
+                        new["temporary_mode_duration"] = min(180, duration) if mode == "boost" else duration
+                else:
+                    error = f"No converter available for '{key}'"
+                if error:
+                    self.refused.append(error)
+                    return                       # Zigbee2MQTT logs the error, publishes nothing
+            if new["system_mode"] == "auto" and ("system_mode" in body or "schedule_active_group" in body):
+                new["occupied_heating_setpoint"] = self.plan_now(plans[new["schedule_active_group"]])
+            if "schedule_group_to_edit" in body and not any(k.startswith("weekly_schedule_") for k in body):
+                new.update({f"weekly_schedule_{d}": plans[new["schedule_group_to_edit"]][d] for d in DAYS})
+            heats = new["temporary_mode_mode"] == "boost" or (
+                new["system_mode"] != "off" and new["local_temperature"] < new["occupied_heating_setpoint"])
+            new["running_state"] = "heat" if heats else "idle"
+            state.clear()
+            state.update(new)
+        self._values(ieee)
+
+    @staticmethod
+    def plan_now(days: dict) -> float:
+        """The temperature a plan wants right now."""
+        now = datetime.now()
+        minute, current = now.hour * 60 + now.minute, 5.0
+        for part in sorted(days[DAYS[now.weekday()]].split()):
+            at, temp = part.split("/")
+            if int(at[:2]) * 60 + int(at[3:]) <= minute:
+                current = float(temp)
+        return current
 
     # requests from the app
     def _request(self, topic: str, payload: bytes) -> None:

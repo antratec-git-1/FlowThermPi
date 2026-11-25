@@ -5,6 +5,10 @@ die App lesbar). Damit verbindet sich die App mit Mosquitto (nur auf diesem Pi) 
 es läuft (bridge/state), Version und Funkkanal (bridge/info), die angelernten Geräte (bridge/devices), was gerade
 passiert (bridge/event) und die Werte jedes Geräts (zigbee2mqtt/<IEEE-Adresse>). „Thermostate suchen“ öffnet das Netz
 für 3 Minuten (bridge/request/permit_join), „Entfernen“ meldet ein Gerät ab (bridge/request/device/remove).
+
+Von jedem Thermostat hält die App alle Werte, die sie braucht (THERMOSTAT_KEYS), und wann es sich zuletzt gemeldet hat.
+Befehle an ein Thermostat gehen als zigbee2mqtt/<IEEE-Adresse>/set hinaus, Nachfragen als …/get; was ein Thermostat
+daraus macht, steht in heizapp.trv.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import secrets
 import socket
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import logs
@@ -35,6 +40,16 @@ IEEE = re.compile(r"0x[0-9a-f]{16}")
 TOPICS = [f"{BASE}/bridge/state", f"{BASE}/bridge/info", f"{BASE}/bridge/devices", f"{BASE}/bridge/event",
           f"{BASE}/bridge/response/#", f"{BASE}/+"]
 INTERVIEW = {"PENDING": "pending", "IN_PROGRESS": "running", "SUCCESSFUL": "done", "FAILED": "failed"}
+# what the app keeps of a thermostat's state (the names of the TRV-ZBT in Zigbee2MQTT, see heizapp.trv)
+THERMOSTAT_KEYS = frozenset({
+    "local_temperature", "occupied_heating_setpoint", "system_mode", "running_state", "local_temperature_calibration",
+    "frost_protection_temperature", "open_window", "open_window_detected", "child_lock", "battery", "linkquality",
+    "fault_status", "temporary_mode_mode", "temporary_mode_duration", "temporary_mode_target_temperature",
+    "schedule_active_group", "schedule_group_to_edit", "weekly_schedule_status", "temperature_sensor_select",
+    "external_temperature_input", "smart_temperature_control", "update", "last_seen",
+    *(f"weekly_schedule_{day}" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+                                           "sunday"))})
+UPDATE_KEYS = ("state", "installed_version", "latest_version")
 
 
 def _json(payload: bytes):
@@ -52,6 +67,30 @@ def _number(value, low: float, high: float):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return value if low <= value <= high else None
+
+
+def _plain(value):
+    """A value of a device as the app keeps it – only simple values, short texts and the firmware update's state."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:300]
+    if isinstance(value, dict):
+        return {k: value[k] for k in UPDATE_KEYS if isinstance(value.get(k), (str, int, float))}
+    return None
+
+
+def _seen(value) -> float | None:
+    """last_seen as Zigbee2MQTT writes it – ISO 8601 or milliseconds since 1970 – as time.time()."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value / 1000 if value > 1e11 else float(value)
+    if isinstance(value, str):
+        try:
+            at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (at if at.tzinfo else at.astimezone()).timestamp()
+    return None
 
 
 def _reason(exc: BaseException) -> str:
@@ -103,7 +142,9 @@ class ZigbeeNet:
         self._bridge: str | None = None    # Zigbee2MQTT: "online" | "offline" | None (not heard of)
         self._info: dict = {}
         self._devices: dict[str, dict] = {}   # ieee -> device, in Zigbee2MQTT's order (the order of pairing)
-        self._values: dict[str, dict] = {}    # ieee -> the device's latest values
+        self._values: dict[str, dict] = {}    # ieee -> the device's latest values, as the Zigbee page shows them
+        self._states: dict[str, dict] = {}    # ieee -> {values, heard, seq, boost_since}: what a thermostat said last
+        self._seq = 0                         # number of the latest message from any device
         self._joined: dict[str, float] = {}   # ieee -> when it joined
         self._permit_end: float | None = None   # time.time() at which the network closes again
         self._waiting: dict[str, dict | None] = {}   # transaction -> Zigbee2MQTT's answer, None until it comes
@@ -260,6 +301,7 @@ class ZigbeeNet:
         with self._lock:
             for ieee in set(self._devices) - set(devices):
                 self._values.pop(ieee, None)
+                self._states.pop(ieee, None)
             self._devices = devices
 
     def _take_event(self, data) -> None:
@@ -292,6 +334,7 @@ class ZigbeeNet:
             elif kind == "device_leave":
                 self._devices.pop(ieee, None)
                 self._values.pop(ieee, None)
+                self._states.pop(ieee, None)
                 said = f"Gerät {ieee} hat das Netz verlassen"
         if said:
             log.info("Zigbee: %s", said)
@@ -311,12 +354,22 @@ class ZigbeeNet:
         values = {"battery": _number(data.get("battery"), 0, 100), "signal": _number(data.get("linkquality"), 0, 255),
                   "temperature": _number(data.get("local_temperature"), -40, 99),
                   "last_seen": _text(data.get("last_seen"), 40)}
-        with self._lock:
+        now = time.time()
+        heard = min(_seen(data.get("last_seen")) or now, now)   # a retained message may be old: its last_seen says
+        kept = {k: _plain(v) for k, v in data.items() if k in THERMOSTAT_KEYS}
+        with self._news:
             ieee = name if IEEE.fullmatch(name) else next(
                 (key for key, device in self._devices.items() if device["name"] == name), None)
             if ieee is None or (ieee not in self._devices and len(self._values) >= MAX_DEVICES):
                 return
             self._values.setdefault(ieee, {}).update({k: v for k, v in values.items() if v is not None})
+            state = self._states.setdefault(ieee, {"values": {}, "heard": 0.0, "seq": 0, "boost_since": None})
+            if kept.get("temporary_mode_mode") == "boost" and state["values"].get("temporary_mode_mode") != "boost":
+                state["boost_since"] = heard
+            state["values"] = {**state["values"], **kept}
+            self._seq += 1
+            state["heard"], state["seq"] = max(state["heard"], heard), self._seq
+            self._news.notify_all()
 
     # ------------------------------------------------------------------ the actions
     def search(self, on: bool) -> None:
@@ -337,8 +390,67 @@ class ZigbeeNet:
             self._devices.pop(ieee, None)
             self._values.pop(ieee, None)
             self._joined.pop(ieee, None)
+            self._states.pop(ieee, None)
         log.info("Zigbee: Gerät %s entfernt%s", ieee, " (ohne seine Antwort)" if force else "")
         return device
+
+    # ------------------------------------------------------------------ the thermostats (heizapp.trv)
+    def problem(self) -> str | None:
+        """Why no device can be reached at the moment, in words – None while Zigbee2MQTT runs."""
+        with self._lock:
+            broker, problem, bridge = self._broker, self._problem, self._bridge
+        if broker == "off":
+            return "Zigbee ist auf diesem Pi noch nicht eingerichtet."
+        if broker == "connecting":
+            return "Die App verbindet sich gerade mit Zigbee2MQTT."
+        if broker != "connected":
+            return f"Keine Verbindung zu Mosquitto ({problem})."
+        if bridge != "online":
+            return "Zigbee2MQTT läuft gerade nicht."
+        return None
+
+    def paired(self, model: str) -> list[str]:
+        """The devices of this model that are paired (interview done), in the order of pairing."""
+        with self._lock:
+            return [ieee for ieee, d in self._devices.items() if d["model"] == model and d["interview"] == "done"]
+
+    def thermostat(self, ieee: str) -> dict | None:
+        """What the app knows of a device: {device (None if not paired), values, heard, seq, boost_since}."""
+        with self._lock:
+            state, device = self._states.get(ieee), self._devices.get(ieee)
+            if state is None and device is None:
+                return None
+            state = state or {"values": {}, "heard": 0.0, "seq": 0, "boost_since": None}
+            return {"device": dict(device) if device else None, "values": dict(state["values"]),
+                    "heard": state["heard"], "seq": state["seq"], "boost_since": state["boost_since"]}
+
+    def send(self, ieee: str, payload: dict, what: str = "set") -> int | None:
+        """A command (set) or a question (get) to a device. Returns the number of the latest message so far – wait()
+        waits for a newer one – or None if it cannot go out (no connection, Zigbee2MQTT not running)."""
+        with self._lock:
+            client, seq = (self._client, self._seq) if self._bridge == "online" else (None, None)
+        if client is None:
+            return None
+        try:
+            client.publish(f"{BASE}/{ieee}/{what}", json.dumps(payload))
+        except (MqttError, OSError, ValueError) as exc:
+            log.warning("Zigbee: Nachricht an %s ging nicht hinaus – %s", ieee, _reason(exc))
+            return None
+        return seq
+
+    def wait(self, ieee: str, after: int, check, timeout: float) -> dict | None:
+        """Wait until the device reports values newer than message number after for which check(values) is true;
+        returns them – or None after timeout seconds or when the connection ends."""
+        deadline = time.monotonic() + timeout
+        with self._news:
+            while True:
+                state = self._states.get(ieee)
+                if state and state["seq"] > after and check(state["values"]):
+                    return dict(state["values"])
+                left = deadline - time.monotonic()
+                if left <= 0 or self._client is None:
+                    return None
+                self._news.wait(min(left, 1.0))
 
     def _request(self, what: str, body: dict, wait: float) -> dict:
         """Ask Zigbee2MQTT (bridge/request/<what>) and wait for its answer to exactly this request."""

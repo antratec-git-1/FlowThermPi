@@ -223,6 +223,8 @@ dd { margin: 0; word-break: break-word; }
 .say.warn { background: var(--hint); color: var(--on-hint); }
 .say.bad { background: var(--bad); color: var(--on-bad); }
 .say .more { display: block; margin-top: 4px; font-weight: 400; }
+.tile-note { margin: 0; justify-self: start; padding: 8px 14px; border-radius: 14px; font-size: 18px;
+             background: var(--hint); color: var(--on-hint); }
 .boost-bar { height: 8px; margin-top: -6px; border-radius: 99px; background: var(--badge); overflow: hidden; }
 .boost-bar span { display: block; height: 100%; border-radius: 99px; background: var(--accent); }
 .tile-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }

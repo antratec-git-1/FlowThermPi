@@ -76,8 +76,9 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Haushalt zu helfen, ohne hinzufahren – von sich aus nur, solange die Bewohner es erlauben. Siehe
   [Fernwartung](#fernwartung-tailscale).
 - **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
-  aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen –
-  siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
+  aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen.
+  Angelernte Thermostate sind Heizungen der App wie die AeroFlow: Raum, Temperatur, Ein/Aus, Boost, Heizplan,
+  Kalibrierung – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
@@ -359,10 +360,12 @@ empfohlen 1 Tag) und **Kalibrierlauf starten**.
 
 ## Zigbee-Thermostate (in Arbeit)
 
-Geplant: SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
+SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
 Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Ab Version 0.4.4 installiert
 *Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
-Thermostate an. Räume und Heizpläne für die Thermostate kommen in den nächsten Schritten.
+Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten). Noch nicht
+dabei: Firmware-Updates der Thermostate, Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für
+ein Thermostat.
 
 - **Was der Pi lädt:**
   - **Mosquitto** aus dem Paketarchiv von Raspberry Pi OS. Es reicht die Nachrichten zwischen Zigbee2MQTT und der App
@@ -428,6 +431,29 @@ Thermostate an. Räume und Heizpläne für die Thermostate kommen in den nächst
 - **Wie die App mit Zigbee2MQTT spricht:** über Mosquitto (MQTT), nur auf dem Pi selbst und mit Passwort – mit einem
   kleinen eigenen MQTT-Baustein (`heizapp/mqtt.py`, nur Python-Standardbibliothek).
 - Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
+
+**Thermostate steuern** (ab 0.4.8):
+
+- Jedes angelernte Thermostat steht unter *Einrichtung › Geräte* bei den Heizungen – mit Batterie, Funkqualität,
+  Störungen und wann es sich zuletzt gemeldet hat. Dort bekommt es einen Namen und einen Raum. In `heizungen.conf`
+  steht es nie; Name und Raum merkt sich die App in `data.json`, auch wenn es kurz aus dem Zigbee-Netz verschwindet.
+  „+ Heizung“ fragt, ob eine AeroFlow (WLAN) oder ein Thermostat (Zigbee) dazukommt.
+- Auf der Startseite und unter *Räume* geht alles wie bei der AeroFlow: kälter/wärmer, Ausschalten/Einschalten,
+  Wieder nach Plan, volle Kraft (Boost, 30 Minuten), Heizplan senden. Ein Raum darf AeroFlow-Heizungen und
+  Thermostate mischen.
+- Ein Befehl braucht ein paar Sekunden, weil das Thermostat nur alle paar Sekunden beim Stick nachfragt. Er gilt erst
+  als angekommen, wenn Zigbee2MQTT den neuen Wert vom Thermostat meldet; sonst sagt die App, dass es nicht
+  geantwortet hat.
+- **Heizpläne:** Die App schreibt den Plan des Raums in Plan 1 des Thermostats. Zwischen den Zeitfenstern hält das
+  Thermostat seinen Frostschutz – wie die AeroFlow. Es kann höchstens 12 Wechsel am Tag; passt ein Plan nicht, sagt
+  die App das vorher und sendet nichts.
+- **Kalibrieren** geht von Hand, in Schritten von 0,2 °C bis ±10 °C. Den Kalibrierlauf mit der Shelly Pill gibt es
+  nur für AeroFlow-Heizungen: Das Thermostat meldet seine Temperatur nur, wenn sie sich um 0,5 °C ändert.
+- **Batterie:** Bei 20 % oder weniger – oder wenn das Thermostat selbst warnt – steht auf der Startseite „Batterie im
+  Thermostat bald wechseln“.
+- **Erreichbar** ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat. Nach 30 Minuten Stille
+  fragt die App einmal nach seiner Temperatur. Schweigt es länger, hilft meist ein Druck auf die mittlere Taste.
+- Die Uhr der Thermostate stellt Zigbee2MQTT.
 
 ## Protokoll: wenn etwas schiefgeht
 
@@ -533,8 +559,9 @@ Fernwartung gegen ein nachgebautes Tailscale (`FakeTS`, ebenda) – ohne Downloa
 Raumfühler und der Kalibrierlauf laufen gegen nachgebaute Shelly Pills (`tests/fake_shelly.py`). Die Zigbee-Programme
 werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.py`: apt, Mosquitto, Node.js, pnpm,
 systemd) – ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen. Für das
-Anlernen gibt es ein nachgebautes Mosquitto und Zigbee2MQTT mit Thermostaten (`tests/fake_mqtt.py`) – ohne Stick und
-ohne echtes Thermostat. Das Einsammeln der
+Anlernen und Steuern gibt es ein nachgebautes Mosquitto und Zigbee2MQTT mit Thermostaten (`tests/fake_mqtt.py`) – ohne
+Stick und ohne echtes Thermostat; es prüft und beantwortet Befehle so, wie es die Gerätedefinition des TRV-ZBT in
+Zigbee2MQTT vorgibt. Wie sich das echte Thermostat verhält, prüfen die Tests nicht. Das Einsammeln der
 Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
 Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet.
 

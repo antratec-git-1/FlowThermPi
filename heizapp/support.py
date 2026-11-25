@@ -54,7 +54,8 @@ KEEP = 15 * 60         # seconds a prepared file can be downloaded
 MAX_FILES = 3          # prepared files kept at the same time
 DETAIL_HOURS = 24
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,8}")
-MODE_WORDS = {"manual": "Manuell", "auto": "Automatik", "boost": "Boost", "holiday": "Urlaub", "standby": "Standby"}
+MODE_WORDS = {"manual": "Manuell", "auto": "Automatik", "boost": "Boost", "holiday": "Urlaub", "standby": "Standby",
+              "off": "Aus"}
 STATE_WORDS = {"done": "fertig", "failed": "fehlgeschlagen", "running": "läuft", "waiting": "wartet",
                "connecting": "verbindet"}
 
@@ -426,11 +427,17 @@ class Support:
             else:
                 what = "NICHT ERREICHBAR" + (f" seit {_when(h.get('offline_since'))}" if h.get("offline_since") else "")
             add(f"- {where} · {what}")
-            extra = [f"Token: {'ja' if h['writable'] else 'nein (nur Anzeige)'}"]
+            if h["kind"] == "zigbee":
+                extra = ["Zigbee-Thermostat" + ("" if h["paired"] else " (NICHT MEHR ANGELERNT)"),
+                         f"Batterie {h['battery']} %" if h["battery"] is not None else "Batterie ?",
+                         f"Funk {h['signal']}" if h["signal"] is not None else "Funk ?"]
+                extra += [f"Störung: {', '.join(h['faults'])}"] if h["faults"] else []
+            else:
+                extra = [f"Token: {'ja' if h['writable'] else 'nein (nur Anzeige)'}"]
             if h["firmware"]:
-                extra.append(f"Firmware {h['firmware']}")
+                extra.append(f"Firmware {h['firmware']}" + (" (Update verfügbar)" if h.get("update") else ""))
             if h["serial"]:
-                extra.append(f"Seriennummer {h['serial']}")
+                extra.append(f"{'Zigbee-Adresse' if h['kind'] == 'zigbee' else 'Seriennummer'} {h['serial']}")
             if h["clock_drift"] is not None:
                 extra.append(f"Uhr {h['clock_drift']:+d} s")
             if h["temp_corr"] is not None:

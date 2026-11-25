@@ -87,6 +87,7 @@ def main() -> int:
 
     updater, wifi = Updater(args.update_dir), Wifi(args.wifi_dir)
     remote, zigbee = Remote(args.remote_dir), Zigbee(args.zigbee_dir)
+    service.attach_zigbee(zigbee.net)   # the thermostats paired in Zigbee2MQTT are heaters too
     support = Support(service, updater, wifi, remote, zigbee, args.syslog_dir, password=bool(password))
     describe(service, updater, wifi, remote, zigbee, support, password)
     service.start()
@@ -119,14 +120,17 @@ def describe(service: Service, updater: Updater, wifi: Wifi, remote: Remote, zig
     """What the protocol should say right at the start: the setup, without any secret."""
     log = logging.getLogger("heizapp")
     data, entries = service.store.data, service.entries
-    log.info("Eingerichtet: %d Heizung(en), davon %d mit Token · %d Raum/Räume · %d Heizplan/-pläne · %d Fühler · "
-             "PIN %s · Passwort für die App %s · Zeitzone %s",
-             len(entries), sum(1 for e in entries if e.device.writable), len(data["rooms"]), len(data["plans"]),
+    aeroflows = [e for e in entries if not e.zigbee]
+    log.info("Eingerichtet: %d Heizung(en), davon %d mit Token · %d Thermostat(e) · %d Raum/Räume · %d Heizplan/-pläne · "
+             "%d Fühler · PIN %s · Passwort für die App %s · Zeitzone %s",
+             len(aeroflows), sum(1 for e in aeroflows if e.device.writable), len(entries) - len(aeroflows),
+             len(data["rooms"]), len(data["plans"]),
              len(data["sensors"]), "gesetzt" if (data.get("settings") or {}).get("pin") else "keine",
              "gesetzt" if password else "keins", getattr(service.tz, "key", None) or "Systemzeit")
     for e in entries:
         meta = data["heaters"].get(e.id, {})
-        log.info("Heizung %s: %s%s%s", e.label, meta.get("name") or "(ohne Namen)",
+        log.info("%s %s: %s%s%s", "Thermostat" if e.zigbee else "Heizung", e.key if e.zigbee else e.label,
+                 meta.get("name") or "(ohne Namen)",
                  f", Raum {data['rooms'][meta['room']]['name']}" if meta.get("room") in data["rooms"] else "",
                  "" if e.device.writable else ", ohne Token (nur Anzeige)")
     yes = {True: "ja", False: "nein"}

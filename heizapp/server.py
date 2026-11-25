@@ -95,7 +95,8 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", r"/api/zigbee/setup", lambda m, b, r: z.setup(b.get("channel"), b.get("port")), SETUP),
         ("POST", r"/api/zigbee/service", lambda m, b, r: z.service(b.get("on")), SETUP),
         ("POST", r"/api/zigbee/search", lambda m, b, r: z.search(b.get("on")), SETUP),
-        ("POST", r"/api/zigbee/devices/(0x[0-9a-f]{16})/remove", lambda m, b, r: z.remove_device(m[1], b.get("force")),
+        ("POST", r"/api/zigbee/devices/(0x[0-9a-f]{16})/remove",   # a thermostat leaves the app with it
+         lambda m, b, r: s.forget_thermostat(m[1], z.remove_device(m[1], b.get("force"))),
          SETUP),
         ("PUT", r"/api/logs/settings", lambda m, b, r: p.change(b), SETUP),
         # Fernhilfe in the residents' view, without PIN: allowing works only in the home network, ending everywhere

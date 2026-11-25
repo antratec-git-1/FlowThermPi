@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Callable
 
-from . import coap, discovery, plans, shelly
+from . import coap, discovery, plans, shelly, trv
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
@@ -32,7 +32,9 @@ HEAL_EVERY = 900       # at most one automatic network search per 15 minutes
 STEADY_GAP = 300       # seconds offline after which a heater counts as changed (the room may have cooled meanwhile)
 MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Boost",
                "boost_off": "Boost beendet", "off": "Aus (Frostschutz)", "on": "Eingeschaltet"}
-MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby"}   # operating_mode, for the log
+MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby",
+              trv.OFF: "Aus"}   # operating_mode, for the log
+VIEW_MODES = {**MODES, trv.OFF: "off"}   # operating_mode -> mode on the page; „off“ only from a thermostat
 SUMMARY_EVERY = 15 * 60   # seconds between two lines „Stand: …“ in the log
 
 
@@ -101,9 +103,11 @@ def _local_tz():
 class HeaterState:
     """Runtime state of one configured heater."""
 
-    def __init__(self, cfg: HeaterConfig):
+    zigbee = False   # a SONOFF thermostat over Zigbee (ThermostatState) instead of an AeroFlow
+
+    def __init__(self, cfg: HeaterConfig, device=None):
         self.cfg = cfg
-        self.device = Heater(cfg.host, cfg.token, cfg.port)
+        self.device = device or Heater(cfg.host, cfg.token, cfg.port)
         self.key: str | None = None          # serial number (idu) once known
         self.values: dict = {}
         self.online = False
@@ -145,11 +149,26 @@ class HeaterState:
         return self.key or f"host:{self.label}"
 
 
+class ThermostatState(HeaterState):
+    """A SONOFF thermostat over Zigbee (heizapp.trv): known by its IEEE address, never in heizungen.conf."""
+
+    zigbee = True
+
+    def __init__(self, ieee: str, net):
+        super().__init__(HeaterConfig("zigbee", 0, None, 0), trv.Thermostat(ieee, net))
+        self.key = ieee
+
+    @property
+    def label(self) -> str:
+        return "Zigbee"
+
+
 class Service:
     def __init__(self, config_path: str, data_path: str, poll_interval: float = 10.0):
         self.config_path = config_path
         self.entries = [HeaterState(c) for c in load_config(config_path)]
         self.store = DataStore(data_path)
+        self.zigbee = None   # heizapp.zigbee_net.ZigbeeNet, from attach_zigbee(): brings the thermostats
         self.poll_interval = poll_interval
         self.tz = _local_tz()
         self._stop = threading.Event()
@@ -171,7 +190,8 @@ class Service:
         self._calib_runs: dict[str, dict] = json.loads(json.dumps({
             sid: m["calibration"] for sid, m in self.store.data["sensors"].items()
             if isinstance(m.get("calibration"), dict) and m["calibration"].get("until")}))
-        known = {m.get("last_host"): k for k, m in self.store.data["heaters"].items() if not k.startswith("host:")}
+        known = {m.get("last_host"): k for k, m in self.store.data["heaters"].items()
+                 if not k.startswith("host:") and not m.get("zigbee")}
         for e in self.entries:
             e.key = known.get(e.label)
 
@@ -244,7 +264,45 @@ class Service:
             log.info("Stand: %s", " · ".join(parts))
 
     def poll_all(self, full: bool = False) -> None:
+        self._sync_thermostats()
         list(self._pool.map(lambda e: self.refresh(e, full), self.entries))
+
+    # ------------------------------------------------------------------ thermostats (Zigbee)
+    def attach_zigbee(self, net) -> None:
+        """The connection to Zigbee2MQTT (heizapp.zigbee_net.ZigbeeNet): from now on its thermostats are heaters."""
+        self.zigbee = net
+        self._sync_thermostats()
+
+    def _sync_thermostats(self) -> None:
+        """Every thermostat paired in Zigbee2MQTT is a heater of the app, after the AeroFlow heaters. One the app
+        knows (it has a name or a room) stays when it is missing – as not reachable, until it is paired again or
+        removed in the app."""
+        if self.zigbee is None:
+            return
+        wanted = self.zigbee.paired(trv.MODEL)
+        wanted += [k for k, m in self.store.snapshot()["heaters"].items() if m.get("zigbee") and k not in wanted]
+        with self._entries_lock:
+            have = {e.id: e for e in self.entries if e.zigbee}
+            if list(have) == wanted:
+                return
+            self.entries = [e for e in self.entries if not e.zigbee] + [have.get(i) or ThermostatState(i, self.zigbee)
+                                                                        for i in wanted]
+        for ieee in wanted:
+            if ieee not in have:
+                log.info("Thermostat %s ist jetzt in der App", ieee)
+
+    def _aeroflows(self) -> list[HeaterState]:
+        """The heaters from heizungen.conf (with an address) – without the thermostats."""
+        return [e for e in self.entries if not e.zigbee]
+
+    def forget_thermostat(self, ieee: str, result: dict | None = None) -> dict:
+        """After „Entfernen“ in the Zigbee network: the app forgets the thermostat's name and room too."""
+        if self.store.data["heaters"].get(ieee, {}).get("zigbee"):
+            with self.store.edit() as d:
+                d["heaters"].pop(ieee, None)
+            log.info("Thermostat %s aus der App entfernt", ieee)
+        self._sync_thermostats()
+        return result if result is not None else {}
 
     def refresh(self, e: HeaterState, full: bool = False) -> None:
         with e.refresh_lock:
@@ -298,6 +356,8 @@ class Service:
     def _who(self, e: HeaterState) -> str:
         """A heater in the log: its name and address."""
         name = self._name(e)
+        if e.zigbee:
+            return f"{name} ({e.key})"
         return name if name == e.label else f"{name} ({e.label})"
 
     def _log_reading(self, e: HeaterState, before: dict, vals: dict, offline_since: float | None,
@@ -306,7 +366,10 @@ class Service:
         at the heater since the last reading (also through a button on the device or the plan) – and in the detailed
         log every reading."""
         v = e.values
-        if e.reported is None:
+        if e.reported is None and e.zigbee:
+            log.info("Thermostat %s erreichbar: %s, Soll %s, %s · Firmware %s", self._who(e), _deg10(v.get("room_temp")),
+                     _deg10(v.get("setpoint")), MODE_WORDS.get(v.get("operating_mode"), "?"), v.get("active_fw_ver") or "?")
+        elif e.reported is None:
             log.info("Heizung %s erreichbar: %s, Soll %s, %s · Firmware %s · Seriennummer %s%s", self._who(e),
                      _deg10(v.get("room_temp")), _deg10(v.get("setpoint")), MODE_WORDS.get(v.get("operating_mode"), "?"),
                      v.get("active_fw_ver") or "?", v.get("idu") or "?", "" if e.device.writable else " · ohne Token")
@@ -349,7 +412,10 @@ class Service:
     @staticmethod
     def _device_name(e: HeaterState) -> str:
         """The name the heater announces in the network (e.g. FRITZ!Box): "Heat4U-" + first and
-        last three digits of the serial number. Derived locally, because reverse DNS can hang."""
+        last three digits of the serial number. Derived locally, because reverse DNS can hang.
+        A thermostat: "Thermostat" + the end of its IEEE address."""
+        if e.zigbee:
+            return f"Thermostat {e.key[-4:].upper()}"
         idu = str(e.values.get("idu") or "")
         return f"Heat4U-{idu[:3]}{idu[-3:]}" if len(idu) >= 6 else e.label
 
@@ -372,6 +438,11 @@ class Service:
 
     def _name(self, e: HeaterState) -> str:
         return self.store.data["heaters"].get(e.id, {}).get("name") or self._device_name(e)
+
+    @staticmethod
+    def _new_meta(e: HeaterState) -> dict:
+        """The app's data for a heater it has none for yet."""
+        return {"zigbee": True} if e.zigbee else {"last_host": e.label}
 
     def _entry(self, heater_id: str) -> HeaterState:
         for e in self.entries:
@@ -444,7 +515,8 @@ class Service:
     def _mode_before_off(self, e: HeaterState) -> dict | None:
         """What "on" should restore later; None if the heater is already off (manual at frost level)."""
         mode, manual_sp, frost = (e.device.get(n) for n in ("operating_mode", "manual_sp", "antifrost_sp"))
-        if mode in (0, 4) and isinstance(manual_sp, int) and isinstance(frost, int) and manual_sp <= frost:
+        if mode == trv.OFF or (mode in (0, 4) and isinstance(manual_sp, int) and isinstance(frost, int)
+                               and manual_sp <= frost):
             return None
         return {"mode": "auto" if mode == 1 else "manual", "setpoint": manual_sp}
 
@@ -480,7 +552,7 @@ class Service:
         if value is None and key not in self.store.data["heaters"].get(e.id, {}):
             return
         with self.store.edit() as d:
-            meta = d["heaters"].setdefault(e.id, {"last_host": e.label})
+            meta = d["heaters"].setdefault(e.id, self._new_meta(e))
             if value is None:
                 meta.pop(key, None)
             else:
@@ -497,6 +569,11 @@ class Service:
             changed = e.device.write_plan(DEVICE_PLAN_SLOT, windows)
             return f"übertragen ({len(changed)} Tag(e) geändert)" if changed else "war bereits aktuell"
         targets = self._targets("room", room_id)
+        for e in targets:
+            problems = trv.plan_problems(windows, e.values.get("antifrost_sp")) if e.zigbee else []
+            if problems:
+                raise ActionError(f"Der Heizplan „{plan['name']}“ passt nicht auf „{self._name(e)}“: "
+                                  + "; ".join(problems) + ". Bitte Zeitfenster zusammenlegen – nichts wurde gesendet.")
         log.info("Heizplan „%s“ an %s senden: %s", plan["name"], room["name"], ", ".join(self._name(e) for e in targets))
         results = self._run_parallel(targets, write, f"Heizplan „{plan['name']}“ übertragen")
         if any(r["ok"] for r in results):
@@ -511,6 +588,8 @@ class Service:
     def import_plans(self, heater_id: str) -> dict:
         """Read all three plan slots of a heater; store every non-empty, not yet known plan in the app."""
         e = self._entry(heater_id)
+        if e.zigbee:
+            raise ActionError("Beim Thermostat kann die App den Heizplan noch nicht auslesen.", 409)
         if not e.online:
             raise ActionError("Die Heizung ist offline.", 409)
         try:
@@ -563,6 +642,7 @@ class Service:
         ("correction", K). The heater reports room_temp WITH its correction, so:
         new correction = old correction + (measured − shown), shown = 30-min average if available."""
         e = self._entry(heater_id)
+        step, limit = (trv.CORR_STEP, trv.CORR_MAX) if e.zigbee else (1, MAX_CORRECTION)
         if not e.device.writable:
             raise ActionError("Die Heizung ist nur lesbar – für die Kalibrierung wird ihr Token gebraucht.")
         if not e.online:
@@ -591,9 +671,10 @@ class Service:
                 basis_text = f" ({basis_text}, gemessen {_num(measured)} °C)"
         except (DeviceError, coap.CoapError) as exc:
             raise ActionError(f"Heizung nicht erreichbar: {exc}", 502) from None
-        if abs(new) > MAX_CORRECTION:
-            raise ActionError(f"Die nötige Korrektur ({_num(new / 10, '+.1f')} °C) liegt außerhalb von ±9,9 °C – "
-                              "bitte die Messung prüfen.")
+        new = int(round(new / step)) * step
+        if abs(new) > limit:
+            raise ActionError(f"Die nötige Korrektur ({_num(new / 10, '+.1f')} °C) liegt außerhalb von "
+                              f"±{_num(limit / 10, 'g')} °C – bitte die Messung prüfen.")
         try:
             e.device.set("temp_corr", new)
         except (DeviceError, coap.CoapError) as exc:
@@ -610,7 +691,9 @@ class Service:
                 raise ActionError("Die Uhrzeit dieses Geräts ist noch nicht übers Internet abgeglichen – "
                                   "bitte gleich noch einmal versuchen.", 409)
             return {"results": []}
-        entries = [self._entry(heater_id)] if heater_id else self.entries
+        entries = [self._entry(heater_id)] if heater_id else self._aeroflows()
+        if heater_id and entries[0].zigbee:
+            raise ActionError("Das Thermostat bekommt die Uhrzeit über Zigbee.", 409)
         targets = [e for e in entries if e.online and e.device.writable and
                    (not only_drifted or (e.clock_drift is not None and abs(e.clock_drift) > DRIFT_LIMIT))]
         if heater_id and not targets:
@@ -634,7 +717,7 @@ class Service:
         cannot reach any more are moved to the address where they answer now."""
         try:
             nets = [discovery.parse_network(network)] if str(network or "").strip() else \
-                discovery.local_networks([e.cfg.host for e in self.entries])
+                discovery.local_networks([e.cfg.host for e in self._aeroflows()])
         except discovery.DiscoveryError as exc:
             raise ActionError(str(exc)) from None
         if not nets:
@@ -673,7 +756,7 @@ class Service:
         """„Fühler suchen“: one sweep of the home network for Shelly Pills (read only)."""
         try:
             nets = [discovery.parse_network(network)] if str(network or "").strip() else \
-                discovery.local_networks([e.cfg.host for e in self.entries])
+                discovery.local_networks([e.cfg.host for e in self._aeroflows()])
         except discovery.DiscoveryError as exc:
             raise ActionError(str(exc)) from None
         if not nets:
@@ -792,7 +875,7 @@ class Service:
 
     def _locate(self, ids: set, addresses: list) -> dict:
         """Pills that did not answer at their last address: one sweep of the home network for them."""
-        nets = discovery.local_networks([e.cfg.host for e in self.entries]
+        nets = discovery.local_networks([e.cfg.host for e in self._aeroflows()]
                                         + [str(a).partition(":")[0] for a in addresses if a])
         return {p["id"]: p for p in self._sweep(nets) if p["id"] in ids} if nets else {}
 
@@ -1049,7 +1132,7 @@ class Service:
                 if reading is None or reading.get("temp") is None:
                     run["missing"] = run.get("missing", 0) + 1
                     continue
-                for e in self.entries:
+                for e in self._aeroflows():
                     if rooms.get(e.id) != run["room"]:
                         continue
                     tally = run["heaters"].setdefault(e.id, {"bins": {}, "skipped": {}})
@@ -1086,7 +1169,8 @@ class Service:
         """A calibration run for the setup page: progress while it runs, then one proposal per heater."""
         finished = run.get("finished") or (run["until"] if now_iso >= run["until"] else None)
         by_id = {h["id"]: h for h in heaters}
-        ids = list(run["heaters"]) + [h["id"] for h in heaters if h["room"] == run["room"] and h["id"] not in run["heaters"]]
+        ids = list(run["heaters"]) + [h["id"] for h in heaters if h["room"] == run["room"] and h["id"] not in run["heaters"]
+                                      and h["kind"] != "zigbee"]
         rows = []
         for hid in ids:
             tally, h = run["heaters"].get(hid) or {"bins": {}, "skipped": {}}, by_id.get(hid)
@@ -1144,9 +1228,10 @@ class Service:
         room = meta.get("room") if meta.get("room") in data["rooms"] else None
         if not room:
             raise ActionError("Bitte den Fühler zuerst einem Raum zuordnen.", 409)
-        members = [e.id for e in self.entries if data["heaters"].get(e.id, {}).get("room") == room]
+        members = [e.id for e in self._aeroflows() if data["heaters"].get(e.id, {}).get("room") == room]
         if not members:
-            raise ActionError("In diesem Raum ist keine Heizung.", 409)
+            raise ActionError("In diesem Raum ist keine AeroFlow-Heizung. Thermostate melden ihre Temperatur nur in "
+                              "Schritten von 0,5 °C – sie kalibrierst du von Hand.", 409)
         hours = body.get("hours", self.CALIB_DEFAULT_HOURS)
         if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= self.CALIB_MAX_HOURS:
             raise ActionError(f"Die Dauer muss zwischen 1 und {self.CALIB_MAX_HOURS} Stunden liegen.")
@@ -1225,7 +1310,7 @@ class Service:
         """Known heaters (by serial number) that are offline but answered at another address: take that address."""
         moved = []
         for (ip, port), serial in found.items():
-            e = next((x for x in self.entries if x.key == serial), None)
+            e = next((x for x in self._aeroflows() if x.key == serial), None)
             if e is None or e.online or (e.cfg.host, e.cfg.port) == (ip, port):
                 continue
             old = e.label
@@ -1235,7 +1320,7 @@ class Service:
 
     def _move(self, e: HeaterState, host: str, port: int) -> bool:
         with self._entries_lock:
-            if any(x is not e and (x.cfg.host, x.cfg.port) == (host, port) for x in self.entries):
+            if any(x is not e and (x.cfg.host, x.cfg.port) == (host, port) for x in self._aeroflows()):
                 return False   # address already belongs to another entry
             old = e.label
             e.cfg = HeaterConfig(host, port, e.cfg.token, e.cfg.line)
@@ -1249,13 +1334,13 @@ class Service:
     def _heal(self) -> None:
         """Called by the poller: look for heaters that have been unreachable for a while (at most every 15 min)."""
         now = time.time()
-        lost = [e for e in self.entries if e.key and not e.online and e.offline_since
+        lost = [e for e in self._aeroflows() if e.key and not e.online and e.offline_since
                 and now - e.offline_since >= LOST_AFTER]
         if not lost or now - self._last_heal < HEAL_EVERY:
             return
         self._last_heal = now
         try:
-            nets = discovery.local_networks([e.cfg.host for e in self.entries])
+            nets = discovery.local_networks([e.cfg.host for e in self._aeroflows()])
             log.info("Suche im Heimnetz (%s) nach Heizungen, die nicht antworten: %s", ", ".join(map(str, nets)) or "?",
                      ", ".join(self._who(e) for e in lost))
             with self._scan_lock:
@@ -1314,7 +1399,7 @@ class Service:
         """Make exactly these heaters the members of the room (they leave their previous room)."""
         wanted = {e.id for e in members}
         for e in members:
-            data["heaters"].setdefault(e.id, {"last_host": e.label})["room"] = room_id
+            data["heaters"].setdefault(e.id, Service._new_meta(e))["room"] = room_id
         for heater_id, meta in data["heaters"].items():
             if meta.get("room") == room_id and heater_id not in wanted:
                 meta["room"] = None
@@ -1343,9 +1428,11 @@ class Service:
         name = self._clean_name(body.get("name"), allow_empty=True)
         warning = ""
         if "host" in body or str(body.get("token") or "").strip() or body.get("remove_token"):
+            if e.zigbee:
+                raise ActionError("Ein Thermostat hat keine Adresse und keinen Token – es funkt über Zigbee.")
             warning = self._reconfigure(e, body)
         with self.store.edit() as d:  # after _reconfigure: the heater may now be known by its serial number
-            meta = d["heaters"].setdefault(e.id, {"last_host": e.label})
+            meta = d["heaters"].setdefault(e.id, self._new_meta(e))
             if "name" in body:
                 meta["name"] = name
             if "room" in body:
@@ -1365,19 +1452,22 @@ class Service:
         e = HeaterState(HeaterConfig(host, port, token, 0))
         with self._entries_lock:
             self._ensure_unique(host, port)
-            self.entries = self.entries + [e]
+            self.entries = self._aeroflows() + [e] + [x for x in self.entries if x.zigbee]   # thermostats stay last
             self._save_config()
         if online:
             self.refresh(e, full=True)
         if name:
             with self.store.edit() as d:
-                d["heaters"].setdefault(e.id, {"last_host": e.label})["name"] = name
+                d["heaters"].setdefault(e.id, self._new_meta(e))["name"] = name
         log.info("Heizung hinzugefügt: %s", e.label)
         return {"id": e.id, "warning": bool(warning),
                 "message": ("Heizung hinzugefügt." if token else "Heizung hinzugefügt (ohne Token: nur Anzeige).") + warning}
 
     def delete_heater(self, heater_id: str) -> dict:
         e = self._entry(heater_id)
+        if e.zigbee:   # in the Zigbee network it stays paired (that is „Entfernen“ there) – and in the list, unnamed
+            self.forget_thermostat(e.id)
+            return {"message": "Thermostat aus der App entfernt."}
         with self._entries_lock:
             self.entries = [x for x in self.entries if x is not e]
             self._save_config()
@@ -1477,7 +1567,7 @@ class Service:
         return raw, qr_idu
 
     def _ensure_unique(self, host: str, port: int, exclude: HeaterState | None = None) -> None:
-        for x in self.entries:
+        for x in self._aeroflows():
             if x is not exclude and (x.cfg.host, x.cfg.port) == (host, port):
                 raise ActionError("Diese Adresse ist schon eingetragen.", 409)
 
@@ -1495,7 +1585,7 @@ class Service:
         if not header:
             header = ["# Heizungen – eine pro Zeile: IP-Adresse und Token (siehe heizungen.conf.example)",
                       "# IP-Adresse        Token"]
-        lines = header + [f"{x.label:<19} {x.cfg.token or ''}".rstrip() for x in self.entries]
+        lines = header + [f"{x.label:<19} {x.cfg.token or ''}".rstrip() for x in self._aeroflows()]
         tmp = f"{self.config_path}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1538,6 +1628,7 @@ class Service:
 
     # ------------------------------------------------------------------ snapshot for the UI
     def state(self) -> dict:
+        self._sync_thermostats()
         data = self.store.snapshot()
         heaters = [self._heater_view(e, data) for e in self.entries]
         rooms = []
@@ -1576,8 +1667,9 @@ class Service:
             x = v.get(name)
             return x / 10 if isinstance(x, (int, float)) else None
         room = meta.get("room")
-        return {
+        view = {
             "id": e.id,
+            "kind": "zigbee" if e.zigbee else "aeroflow",
             "name": meta.get("name") or self._device_name(e),
             "custom_name": meta.get("name") or "",
             "host": e.label,
@@ -1592,7 +1684,7 @@ class Service:
             "setpoint": deg("setpoint"),
             "antifrost": deg("antifrost_sp"),
             "heating": v.get("heater_state") == 1,
-            "mode": MODES.get(v.get("operating_mode")),
+            "mode": VIEW_MODES.get(v.get("operating_mode")),
             "window_open": v.get("open_window") == 1,
             "boost_remaining": v.get("boost_remaining") if v.get("operating_mode") == 2 else None,
             "plan_slot": v["heating_plan"] + 1 if isinstance(v.get("heating_plan"), int) else None,
@@ -1606,3 +1698,8 @@ class Service:
             "room_temp_avg": round(avg[0] / 10, 2) if (avg := e.room_temp_average()) else None,
             "room_temp_avg_minutes": avg[2] if avg else None,
         }
+        if e.zigbee:   # battery, radio, faults; the last sign of life is the thermostat's own, not the last look
+            info = e.device.info()
+            view.update(host="Zigbee", hostname=info.pop("model"), mac=None,
+                        last_seen=self._iso(info.pop("heard")) or view["last_seen"], **info)
+        return view
