@@ -604,17 +604,46 @@ function sensorName(s, list) {  // „Fühler“, „Fühler „Fensterbank“�
     : /Fühler/.test(s.name) ? esc(s.name) : `Fühler ${esc(s.name)}`;   // "pill-1 · Fühler 2" names itself
 }
 
+const ICONS = {   // drawn for this app: a radiator (heaters and thermostats) and a thermometer (sensors)
+  heater: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3.4" y="4.5" width="3.2" height="14" rx="1.6"/>' +
+    '<rect x="8.1" y="4.5" width="3.2" height="14" rx="1.6"/><rect x="12.8" y="4.5" width="3.2" height="14" rx="1.6"/>' +
+    '<rect x="17.5" y="4.5" width="3.2" height="14" rx="1.6"/><path d="M2 7.5h20M2 15.5h20M5 18.5v2M19.1 18.5v2" ' +
+    'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  sensor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">' +
+    '<path d="M10.5 14.1V5.5a1.5 1.5 0 0 1 3 0v8.6a3.6 3.6 0 1 1-3 0z"/><path d="M12 15.5V8.5"/>' +
+    '<circle cx="12" cy="17.4" r="1.7" fill="currentColor" stroke="none"/></svg>',
+};
+
+function deviceIcon(h, label = false) {
+  // a radiator for heaters and thermostats – warm while it heats, red without connection – or a thermometer for sensors
+  const cls = !h ? "sensor" : !h.online ? "offline" : h.heating ? "on" : "";
+  const name = !h ? "Fühler" : h.kind === "zigbee" ? "Thermostat" : "Heizung";
+  return `<span class="dico ${cls}" ${label ? `role="img" aria-label="${name}"` : 'aria-hidden="true"'}>${
+    ICONS[h ? "heater" : "sensor"]}</span>`;
+}
+
+function deviationHTML(h, sensors) {
+  // how far a heater shows from the room's sensor: heater minus sensor, read at the same moment – the „Abweichung“ of
+  // the „Kalibrierung“ box (several sensors: their mean); yellow beyond the tolerance (±0,5 °C)
+  const found = !h.online ? [] : sensors.flatMap(s => (s.compare || [])
+    .filter(c => c.heater === h.id && c.deviation != null).map(c => ({ d: c.deviation, tol: s.tolerance ?? 0.5 })));
+  if (!found.length) return "";
+  const d = Math.round(avg(found.map(f => f.d)) * 10) / 10;
+  const ok = Math.abs(d) <= Math.min(...found.map(f => f.tol)) + 1e-9;
+  return `<span class="ddev${ok ? "" : " warn"}">${fmtDelta(d)} ${found.length > 1 ? "zu den Fühlern" : "zum Fühler"}</span>`;
+}
+
 function tileDevicesHTML(g, sensors) {
-  // „Ist“ and „Soll“ of every device of the room, when it has more than one: heaters and thermostats, then the sensors
-  // with a fresh reading (and their humidity)
-  const rows = g.heaters.map(h => [esc(h.name), h.online ? degBig(h.room_temp) : null,
-                                    !h.online ? null : heaterOff(h) ? "aus" : degBig(h.setpoint)])
-    .concat(sensors.map(s => [sensorName(s, sensors) + (s.humidity == null ? ""
-      : `<small>${Math.round(s.humidity)} % Luftfeuchte</small>`), degBig(s.temp), "–"]));
+  // „Ist“ and „Soll“ of every device of the room, when it has more than one: heaters and thermostats (with how far they
+  // show from the room's sensor), then the sensors with a fresh reading (and their humidity)
+  const rows = g.heaters.map(h => ({ icon: deviceIcon(h, true), name: esc(h.name), dev: deviationHTML(h, sensors),
+      ist: h.online ? degBig(h.room_temp) : null, soll: !h.online ? null : heaterOff(h) ? "aus" : degBig(h.setpoint) }))
+    .concat(sensors.map(s => ({ icon: deviceIcon(null, true), name: sensorName(s, sensors) + (s.humidity == null ? ""
+      : `<small>${Math.round(s.humidity)} % Luftfeuchte</small>`), dev: "", ist: degBig(s.temp), soll: "–" })));
   if (rows.length < 2) return "";
-  return `<div class="tile-devices"><span></span><span class="th">Ist</span><span class="th">Soll</span>${rows.map(([name, ist, soll]) =>
-    `<span class="dname">${name}</span>${ist == null ? '<span class="dnone">keine Verbindung</span>'
-      : `<span class="dval">${esc(ist)}</span><span class="dval">${esc(soll)}</span>`}`).join("")}</div>`;
+  return `<div class="tile-devices"><span></span><span></span><span class="th">Ist</span><span class="th">Soll</span>${
+    rows.map(r => `${r.icon}<span class="dname">${r.name}</span>${r.ist == null ? '<span class="dnone">keine Verbindung</span>'
+      : `<span class="dval">${esc(r.ist)}</span><span class="dval">${esc(r.soll)}</span>`}${r.dev}`).join("")}</div>`;
 }
 
 function homeTile(g) {
@@ -996,15 +1025,16 @@ function roomCard(g) {
 }
 
 function roomDevicesHTML(g) {
-  // at the bottom of a room in the setup: every device with „Ist“ and „Soll“ – heaters and thermostats with their mode
-  // and what is wrong, then the room's sensors with the time of their last reading
+  // at the bottom of a room in the setup: every device with „Ist“ and „Soll“ – heaters and thermostats with their mode,
+  // what is wrong and how far they show from the room's sensor, then the room's sensors with the time of their last reading
   const sensors = g.kind === "room" ? (state.sensors || []).filter(s => s.room === g.id) : [];
-  const row = (dot, name, kind, ist, soll) => `<li><span class="dot ${dot}"></span><span class="dname">${name}<span
-    class="dkind">${kind}</span></span><span class="dval">${ist}</span><span class="dval">${soll}</span></li>`;
-  const rows = g.heaters.map(h => row(!h.online ? "offline" : h.heating ? "on" : "", esc(h.name),
+  const fresh = homeSensors(g);   // the deviation only from a current reading, like the room temperature
+  const row = (icon, name, kind, ist, soll, extra = "") => `<li>${icon}<span class="dname">${name}<span
+    class="dkind">${kind}</span>${extra}</span><span class="dval">${ist}</span><span class="dval">${soll}</span></li>`;
+  const rows = g.heaters.map(h => row(deviceIcon(h), esc(h.name),
       (h.kind === "zigbee" ? "Thermostat" : "Heizung") + heaterTags(h), h.online ? deg(h.room_temp) : "–",
-      !h.online ? "offline" : heaterOff(h) ? "aus" : deg(h.setpoint)))
-    .concat(sensors.map(s => row("", esc(s.name), "Fühler" + (s.measured_at ? ` · gemessen ${esc(fmtTime(s.measured_at))}` : ""),
+      !h.online ? "offline" : heaterOff(h) ? "aus" : deg(h.setpoint), deviationHTML(h, fresh)))
+    .concat(sensors.map(s => row(deviceIcon(null), esc(s.name), "Fühler" + (s.measured_at ? ` · gemessen ${esc(fmtTime(s.measured_at))}` : ""),
       deg(s.temp), "–")));
   return `<ul class="room-devices"><li class="head"><span></span><span>Gerät</span><span>Ist</span><span>Soll</span></li>${
     rows.join("")}</ul>`;

@@ -31,7 +31,9 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   des Raums, wenn er in den letzten 15 Minuten gemessen hat (bei mehreren Fühlern ihr Mittel); sonst ist sie das
   Mittel der erreichbaren Heizungen. Hat der Raum mehr als ein Gerät, steht unten auf der Kachel eine kleine Liste mit
   **Ist** und **Soll** jedes Geräts: Heizungen, Thermostate und Fühler (beim DHT22 mit Luftfeuchte). Ausgeschaltete
-  Geräte haben „aus“, Fühler kein Soll. Ein Fühler ohne frischen Messwert fehlt in der Liste.
+  Geräte haben „aus“, Fühler kein Soll. Ein Fühler ohne frischen Messwert fehlt in der Liste. Ab 0.4.12 steht vor
+  jedem Gerät ein Symbol (Heizkörper oder Thermometer) und unter jeder Heizung, wie weit sie vom Fühler abweicht, etwa
+  „+1,2 °C zum Fühler“ – gelb, wenn es mehr als ±0,5 °C sind.
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 - **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
@@ -53,7 +55,9 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   neu in einen Raum, zeigt die Kachel an, dass der Heizplan noch gesendet werden muss. Unten auf jeder Raum-Kachel
   steht ab 0.4.11 eine Liste aller Geräte des Raums mit **Ist** und **Soll**: Heizungen und Thermostate (mit Hinweisen
   wie Automatik, Boost, „Fenster offen“ oder „Batterie schwach“) und Fühler (mit der Uhrzeit ihrer letzten Messung).
-  Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat.
+  Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat. Ab 0.4.12 mit
+  Symbol vor jedem Gerät (der Heizkörper ist warm gefärbt, solange er heizt, und rot ohne Verbindung) und unter jeder
+  Heizung der Abweichung zum Fühler.
 - **Heizpläne:** in der App verwalten (bis zu 10 Zeitfenster pro Tag, Viertelstunden-Raster)
   und an die Heizungen eines Raums **senden**. Die Heizung führt den Plan im Modus
   „Automatik“ selbst aus – auch wenn die App aus ist.
@@ -337,7 +341,9 @@ einrichten.
 Isttemperatur neben der Isttemperatur jeder Heizung des Raums und die Abweichung (Heizung − Fühler).
 Beide Werte stammen vom selben Zeitpunkt: Bei jedem Auslesen des Fühlers (jede Minute, Suche, „Aktualisieren“)
 merkt sich die App die Raumtemperatur der Heizungen dieses Moments. Bis ±0,5 °C gilt als „passt“,
-sonst „zeigt zu viel“ oder „zeigt zu wenig“. Die Heizung meldet ihren Wert schon mit ihrer Korrektur.
+sonst „zeigt zu viel“ oder „zeigt zu wenig“. Die Heizung meldet ihren Wert schon mit ihrer Korrektur. Ab 0.4.12
+steht dieselbe Abweichung auch in den Gerätelisten der Räume (Startseite und *Einrichtung › Räume*), dort nur, solange
+der Messwert des Fühlers höchstens 15 Minuten alt ist; mit mehreren Fühlern im Raum ihr Mittel.
 
 **Kalibrierlauf:** Genauer als ein einzelner Vergleich. Den Fühler in die Raummitte auf 1–1,5 m Höhe legen, nicht in
 die Sonne und nicht neben Fenster oder Heizung. Dann unter „Kalibrierung“ die Dauer wählen (6 Stunden bis 3 Tage,
