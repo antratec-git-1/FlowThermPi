@@ -9,6 +9,10 @@ für 3 Minuten (bridge/request/permit_join), „Entfernen“ meldet ein Gerät a
 Von jedem Thermostat hält die App alle Werte, die sie braucht (THERMOSTAT_KEYS), und wann es sich zuletzt gemeldet hat.
 Befehle an ein Thermostat gehen als zigbee2mqtt/<IEEE-Adresse>/set hinaus, Nachfragen als …/get; was ein Thermostat
 daraus macht, steht in heizapp.trv.
+
+„Firmware einspielen“ bittet Zigbee2MQTT darum (bridge/request/device/ota_update/update). Zigbee2MQTT antwortet erst,
+wenn das Update vorbei ist – nach 10 bis 100 Minuten. Bis dahin meldet das Gerät alle 30 Sekunden, wie weit es ist
+(update.progress, update.remaining). Es gibt immer nur ein Update zur Zeit, wie Zigbee2MQTT es empfiehlt.
 """
 from __future__ import annotations
 
@@ -49,7 +53,11 @@ THERMOSTAT_KEYS = frozenset({
     "external_temperature_input", "smart_temperature_control", "update", "last_seen",
     *(f"weekly_schedule_{day}" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
                                            "sunday"))})
-UPDATE_KEYS = ("state", "installed_version", "latest_version")
+UPDATE_KEYS = ("state", "installed_version", "latest_version", "progress", "remaining")
+OTA = "device/ota_update/update"   # Zigbee2MQTT answers this request only when the firmware update is over
+OTA_START = 10 * 60        # seconds Zigbee2MQTT may take to begin a firmware update before the app gives up on it …
+OTA_GRACE = 2 * 60         # … and to answer after the device stopped reporting its progress
+OTA_KEEP = 24 * 3600       # seconds the result of a firmware update stays on the page
 
 
 def _json(payload: bytes):
@@ -111,6 +119,23 @@ def _failure(text: str) -> str:
     return f"Zigbee2MQTT meldet: {text}"
 
 
+def _ota_failure(text: str) -> str:
+    """Why a firmware update failed, in plain words for the page – Zigbee2MQTT's own words go to the log."""
+    if re.search(r"did(n't| not) respond|no response|time(d)? ?out|delivery failed|mac_no_ack|nwk_no_route", text, re.I):
+        return "Das Thermostat hat nicht geantwortet – bitte später noch einmal versuchen."
+    if re.search(r"battery", text, re.I):
+        return "Die Batterie ist zu schwach für ein Update – bitte zuerst neue Batterien einsetzen."
+    if re.search(r"abort", text, re.I):
+        return "Das Thermostat hat das Update abgebrochen – bitte später noch einmal versuchen."
+    return f"Zigbee2MQTT meldet: {text}"
+
+
+def _version(side) -> str:
+    """The firmware before or after an update, as Zigbee2MQTT's answer gives it (software_build_id is optional)."""
+    side = side if isinstance(side, dict) else {}
+    return str(side.get("software_build_id") or side.get("file_version") or "?")
+
+
 def _definition(item: dict, device: dict) -> None:
     """Model, maker and what the device can do – from bridge/devices or the event of a finished interview."""
     definition = item.get("definition") if isinstance(item.get("definition"), dict) else None
@@ -148,6 +173,9 @@ class ZigbeeNet:
         self._joined: dict[str, float] = {}   # ieee -> when it joined
         self._permit_end: float | None = None   # time.time() at which the network closes again
         self._waiting: dict[str, dict | None] = {}   # transaction -> Zigbee2MQTT's answer, None until it comes
+        # ieee -> firmware update: {transaction, started, firmware (before), seen (last progress report), progress,
+        # result: None until it is over, then {ok, message, at}}
+        self._ota: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ the thread
     def start(self) -> None:
@@ -302,6 +330,7 @@ class ZigbeeNet:
             for ieee in set(self._devices) - set(devices):
                 self._values.pop(ieee, None)
                 self._states.pop(ieee, None)
+                self._ota.pop(ieee, None)
             self._devices = devices
 
     def _take_event(self, data) -> None:
@@ -335,6 +364,7 @@ class ZigbeeNet:
                 self._devices.pop(ieee, None)
                 self._values.pop(ieee, None)
                 self._states.pop(ieee, None)
+                self._ota.pop(ieee, None)
                 said = f"Gerät {ieee} hat das Netz verlassen"
         if said:
             log.info("Zigbee: %s", said)
@@ -343,10 +373,26 @@ class ZigbeeNet:
         if not isinstance(data, dict):
             return
         transaction = data.get("transaction")
+        if not isinstance(transaction, str):
+            return
         with self._news:
-            if isinstance(transaction, str) and transaction in self._waiting and self._waiting[transaction] is None:
+            if transaction in self._waiting and self._waiting[transaction] is None:
                 self._waiting[transaction] = data
                 self._news.notify_all()
+                return
+            ieee = next((i for i, job in self._ota.items() if job["transaction"] == transaction and job["result"] is None),
+                        None)
+            if ieee is None:
+                return
+            if data.get("status") == "ok":
+                body = data.get("data") if isinstance(data.get("data"), dict) else {}
+                said = self._ota_over(ieee, True, f"Firmware von {ieee} eingespielt ({_version(body.get('from'))} → "
+                                                  f"{_version(body.get('to'))})")
+            else:
+                detail = _text(data.get("error"), 300) or "ohne Meldung"
+                said = self._ota_over(ieee, False, f"Firmware-Update von {ieee} hat nicht geklappt – Zigbee2MQTT "
+                                                   f"meldet: {detail}", _ota_failure(detail))
+        self._ota_log(*said)
 
     def _take_values(self, name: str, data) -> None:
         if not isinstance(data, dict):
@@ -367,6 +413,9 @@ class ZigbeeNet:
             if kept.get("temporary_mode_mode") == "boost" and state["values"].get("temporary_mode_mode") != "boost":
                 state["boost_since"] = heard
             state["values"] = {**state["values"], **kept}
+            update, job = kept.get("update"), self._ota.get(ieee)
+            if isinstance(update, dict) and update.get("state") == "updating" and job and job["result"] is None:
+                job["seen"], job["progress"] = now, _number(update.get("progress"), 0, 100)
             self._seq += 1
             state["heard"], state["seq"] = max(state["heard"], heard), self._seq
             self._news.notify_all()
@@ -391,8 +440,98 @@ class ZigbeeNet:
             self._values.pop(ieee, None)
             self._joined.pop(ieee, None)
             self._states.pop(ieee, None)
+            self._ota.pop(ieee, None)
         log.info("Zigbee: Gerät %s entfernt%s", ieee, " (ohne seine Antwort)" if force else "")
         return device
+
+    # ------------------------------------------------------------------ firmware updates
+    def firmware(self, ieee: str) -> None:
+        """Start the firmware update of a device. It does not wait: Zigbee2MQTT answers only when the update is over;
+        firmware_job() says how far it is."""
+        transaction = secrets.token_hex(6)
+        with self._lock:
+            client, device = self._client, self._devices.get(ieee)
+            if client is None:
+                raise ActionError("Keine Verbindung zu Zigbee2MQTT – bitte gleich noch einmal versuchen.", 503)
+            if self._bridge != "online":
+                raise ActionError("Zigbee2MQTT läuft gerade nicht.", 409)
+            if device is None:
+                raise ActionError("Dieses Gerät ist nicht (mehr) angelernt.", 404)
+            if self._updating(time.time()):
+                raise ActionError("Gerade wird schon eine Firmware eingespielt – bitte warten, bis sie fertig ist.", 409)
+            self._ota[ieee] = {"transaction": transaction, "started": time.time(), "firmware": device["firmware"],
+                               "seen": None, "progress": None, "result": None}
+        try:
+            client.publish(f"{BASE}/bridge/request/{OTA}", json.dumps({"id": ieee, "transaction": transaction}))
+        except (MqttError, OSError) as exc:
+            with self._lock:
+                self._ota.pop(ieee, None)
+            raise ActionError(f"Die Nachricht an Zigbee2MQTT ging nicht hinaus ({_reason(exc)}).", 503) from exc
+        log.debug("Zigbee: Firmware-Update für %s angefordert (Firmware bisher %s)", ieee, device["firmware"] or "?")
+
+    def updating(self) -> str | None:
+        """The device whose firmware is being updated right now – None if none."""
+        with self._lock:
+            return self._updating(time.time())
+
+    def _updating(self, now: float) -> str | None:   # with self._lock held
+        for ieee, state in self._states.items():
+            update = state["values"].get("update")
+            if isinstance(update, dict) and update.get("state") == "updating":
+                return ieee
+        for ieee, job in self._ota.items():
+            if job["result"] is None and (now - job["started"] < OTA_START if job["seen"] is None
+                                          else now - job["seen"] < OTA_GRACE):
+                return ieee
+        return None
+
+    def firmware_job(self, ieee: str) -> dict | None:
+        """The device's firmware update as the page shows it – {state: running | done | failed, progress (%),
+        remaining (s), message} – or None. Without Zigbee2MQTT's answer (the app was not connected when it came) the
+        firmware the device reports after it decides."""
+        said = None
+        with self._lock:
+            now, job = time.time(), self._ota.get(ieee)
+            update = ((self._states.get(ieee) or {}).get("values") or {}).get("update")
+            if isinstance(update, dict) and update.get("state") == "updating":
+                return {"state": "running", "progress": _number(update.get("progress"), 0, 100),
+                        "remaining": _number(update.get("remaining"), 0, 10 ** 6), "message": None}
+            if job is None:
+                return None
+            if job["result"] is None:
+                firmware = (self._devices.get(ieee) or {}).get("firmware")
+                if job["firmware"] and firmware and firmware != job["firmware"]:
+                    said = self._ota_over(ieee, True, f"Firmware von {ieee} eingespielt ({job['firmware']} → {firmware})")
+                elif job["seen"] is not None and now - job["seen"] < OTA_GRACE:   # the answer is about to come
+                    return {"state": "running", "progress": job["progress"], "remaining": None, "message": None}
+                elif job["seen"] is None and now - job["started"] < OTA_START:     # it has not begun yet
+                    return {"state": "running", "progress": None, "remaining": None, "message": None}
+                elif job["seen"] is not None:
+                    said = self._ota_over(ieee, False, f"Firmware-Update von {ieee} unterbrochen (keine Antwort von "
+                                                       "Zigbee2MQTT)", "Das Einspielen wurde unterbrochen – bitte noch "
+                                                                       "einmal versuchen.")
+                else:
+                    said = self._ota_over(ieee, False, f"Firmware-Update von {ieee} hat nicht begonnen (keine Antwort "
+                                                       "von Zigbee2MQTT)", "Zigbee2MQTT hat mit dem Einspielen nicht "
+                                                                           "begonnen – bitte noch einmal versuchen.")
+            result = job["result"]
+            if now - result["at"] > OTA_KEEP:
+                self._ota.pop(ieee, None)
+                return None
+            view = {"state": "done" if result["ok"] else "failed", "progress": None, "remaining": None,
+                    "message": result["message"]}
+        if said:
+            self._ota_log(*said)
+        return view
+
+    def _ota_over(self, ieee: str, ok: bool, logged: str, message: str = "Neue Firmware eingespielt.") -> tuple:
+        """Note the end of a firmware update (with self._lock held); returns what the log is to say."""
+        self._ota[ieee]["result"] = {"ok": ok, "message": message, "at": time.time()}
+        return ok, logged
+
+    @staticmethod
+    def _ota_log(ok: bool, logged: str) -> None:
+        (log.info if ok else log.warning)("Zigbee: %s", logged)
 
     # ------------------------------------------------------------------ the thermostats (heizapp.trv)
     def problem(self) -> str | None:

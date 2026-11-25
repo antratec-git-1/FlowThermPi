@@ -60,6 +60,8 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", rf"/api/heaters/{h}/clock", lambda m, b, r: s.sync_clocks(heater_id=m[1]), SETUP),
         ("POST", rf"/api/heaters/{h}/import-plans", lambda m, b, r: s.import_plans(m[1]), SETUP),
         ("POST", rf"/api/heaters/{h}/calibrate", lambda m, b, r: s.calibrate(m[1], b), SETUP),
+        ("POST", rf"/api/heaters/{h}/smart", lambda m, b, r: s.set_smart(m[1], b.get("on")), SETUP),   # thermostat
+        ("POST", rf"/api/heaters/{h}/firmware", lambda m, b, r: s.update_firmware(m[1]), SETUP),       # thermostat
         ("POST", r"/api/clock-sync", lambda m, b, r: s.sync_clocks(), SETUP),
         ("POST", r"/api/discover", lambda m, b, r: s.discover(b.get("network")), SETUP),
         ("POST", r"/api/sensors/discover", lambda m, b, r: s.find_sensors(b.get("network")), SETUP),

@@ -78,7 +78,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
   aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen.
   Angelernte Thermostate sind Heizungen der App wie die AeroFlow: Raum, Temperatur, Ein/Aus, Boost, Heizplan,
-  Kalibrierung – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
+  Kalibrierung, dazu „Sanft regeln“ und neue Firmware per Knopf – siehe
+  [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
@@ -363,9 +364,9 @@ empfohlen 1 Tag) und **Kalibrierlauf starten**.
 SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
 Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Ab Version 0.4.4 installiert
 *Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
-Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten). Noch nicht
-dabei: Firmware-Updates der Thermostate, Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für
-ein Thermostat.
+Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten); ab 0.4.9
+regeln sie auf Wunsch sanft und bekommen neue Firmware per Knopf. Noch nicht dabei: Heizpläne aus einem Thermostat
+auslesen und die Shelly Pill als Fühler für ein Thermostat.
 
 - **Was der Pi lädt:**
   - **Mosquitto** aus dem Paketarchiv von Raspberry Pi OS. Es reicht die Nachrichten zwischen Zigbee2MQTT und der App
@@ -454,6 +455,14 @@ ein Thermostat.
 - **Erreichbar** ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat. Nach 30 Minuten Stille
   fragt die App einmal nach seiner Temperatur. Schweigt es länger, hilft meist ein Druck auf die mittlere Taste.
 - Die Uhr der Thermostate stellt Zigbee2MQTT.
+- **Sanft regeln** (ab 0.4.9, *Einrichtung › Geräte*, Zeile „Regelung“): Ab Werk öffnet das Thermostat das Ventil ganz,
+  bis die Temperatur erreicht ist, und schließt es dann ganz. „Sanft regeln“ schaltet seine eigene „smarte
+  Regelung“ ein: Es öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf. „Wie ab Werk“ schaltet
+  sie wieder aus. Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach.
+- **Firmware einspielen** (ab 0.4.9, Zeile „Firmware“): Liegt bei Zigbee2MQTT eine neue Firmware bereit, spielt der
+  Knopf sie über Funk ein. Das dauert 10 bis 100 Minuten; das Thermostat heizt dabei weiter und startet am Ende kurz
+  neu. Die Seite zeigt, wie weit es ist. Es geht immer nur ein Thermostat zur Zeit und nur mit mindestens 70 %
+  Batterie, wie Zigbee2MQTT es rät.
 
 ## Protokoll: wenn etwas schiefgeht
 
@@ -561,7 +570,8 @@ werden gegen einen nachgebauten Pi installiert (`FakePi` in `tests/test_zigbee.p
 systemd) – ohne Download; die „Downloads“ sind kleine Archive, die der Test selbst baut, mit echten Prüfsummen. Für das
 Anlernen und Steuern gibt es ein nachgebautes Mosquitto und Zigbee2MQTT mit Thermostaten (`tests/fake_mqtt.py`) – ohne
 Stick und ohne echtes Thermostat; es prüft und beantwortet Befehle so, wie es die Gerätedefinition des TRV-ZBT in
-Zigbee2MQTT vorgibt. Wie sich das echte Thermostat verhält, prüfen die Tests nicht. Das Einsammeln der
+Zigbee2MQTT vorgibt, und spielt ein Firmware-Update so, wie die Anleitung von Zigbee2MQTT es beschreibt. Wie sich das
+echte Thermostat verhält, prüfen die Tests nicht. Das Einsammeln der
 Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
 Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet.
 

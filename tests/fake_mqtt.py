@@ -9,6 +9,10 @@ Its thermostats behave like the SONOFF TRV-ZBT in Zigbee2MQTT (zigbee-herdsman-c
 25.11.2026): zigbee2mqtt/<IEEE>/set takes the same values with the same checks – a wrong one is refused without a
 message, as Zigbee2MQTT only logs it – and after `delay` seconds the thermostat's whole state comes back, retained,
 with a fresh last_seen; …/get brings the state, too. A thermostat in `asleep` answers nothing.
+
+A firmware update (bridge/request/device/ota_update/update) goes as the Zigbee2MQTT guide describes it (read on
+25.11.2026): the device reports its progress `ota_steps` times, `ota_every` seconds apart; only at the end comes the
+answer, with the firmware before and after – or with `ota_error`.
 """
 from __future__ import annotations
 
@@ -313,6 +317,11 @@ class FakeZ2M:
         self.asleep: set[str] = set()       # thermostats that answer nothing
         self.commands: list[tuple[str, str, dict]] = []   # (ieee, "set" | "get", payload) as they came
         self.refused: list[str] = []        # why a command was refused (Zigbee2MQTT only logs it)
+        self.requests: list[tuple[str, dict]] = []   # (what, body) of every bridge/request/<what> from the app
+        self.ota_steps = 4                  # progress reports during a firmware update …
+        self.ota_every = 0.05               # … this many seconds apart (real: every 30 s, 10 to 100 minutes in all)
+        self.ota_error: str | None = None   # why a firmware update fails (e.g. the device does not take part)
+        self.ota_firmware = "1.1.4"         # the firmware (software_build_id) after an update
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
         broker.hooks.append(self._command)
@@ -436,6 +445,11 @@ class FakeZ2M:
                     else:
                         new["temporary_mode_mode"] = mode
                         new["temporary_mode_duration"] = min(180, duration) if mode == "boost" else duration
+                elif key == "smart_temperature_control":
+                    if value in ("ON", "OFF"):
+                        new[key] = value
+                    else:
+                        error = f"Invalid value {value} for {key}, expected ON or OFF"
                 else:
                     error = f"No converter available for '{key}'"
                 if error:
@@ -473,6 +487,10 @@ class FakeZ2M:
             body = json.loads(payload)
         except ValueError:
             body = {}
+        with self.lock:
+            self.requests.append((what, body))
+        if what == "device/ota_update/update":
+            return self._ota(body)
         answer: dict = {"data": {}, "status": "ok"}
         if what == "permit_join":
             seconds = body.get("time")
@@ -504,6 +522,41 @@ class FakeZ2M:
         if "transaction" in body:
             answer["transaction"] = body["transaction"]
         self.broker.publish(f"{self.BASE}/bridge/response/{what}", answer)
+
+    def _ota(self, body: dict) -> None:
+        """A firmware update: the device reports its progress (update.progress, update.remaining); Zigbee2MQTT answers
+        only at the end – with the firmware before and after, or with its error."""
+        ieee = body.get("id")
+        topic = f"{self.BASE}/bridge/response/device/ota_update/update"
+        answer = {"data": {"id": ieee}, "status": "error", **({"transaction": body["transaction"]}
+                                                              if "transaction" in body else {})}
+        with self.lock:
+            found = next((d for d in self.devices if d["ieee_address"] == ieee), None)
+            update = dict((self.states.get(ieee) or {}).get("update") or {})
+        if found is None:
+            return self.broker.publish(topic, {**answer, "error": f"Device '{ieee}' does not exist"})
+        if update.get("state") != "available":
+            return self.broker.publish(topic, {**answer, "error": f"Update of '{ieee}' failed (No image available)"})
+        if self.ota_error or ieee in self.asleep:
+            failed = {**answer, "error": f"Update of '{ieee}' failed ({self.ota_error or 'Device did not respond'})"}
+            return later(self.ota_every, lambda: self.broker.publish(topic, failed))
+        old, before, latest = found.get("software_build_id"), update.get("installed_version"), update.get("latest_version")
+
+        def step(n: int) -> None:
+            if n < self.ota_steps:
+                self.report(ieee, update={"state": "updating", "progress": round(100 * n / self.ota_steps, 2),
+                                          "remaining": round((self.ota_steps - n) * self.ota_every),
+                                          "installed_version": before, "latest_version": latest})
+                return later(self.ota_every, lambda: step(n + 1))
+            with self.lock:
+                found["software_build_id"] = self.ota_firmware
+            self.report(ieee, update={"state": "idle", "installed_version": latest, "latest_version": latest})
+            self._devices()
+            self.broker.publish(topic, {**answer, "status": "ok", "data": {
+                "id": ieee, "from": {"software_build_id": old, "file_version": before},
+                "to": {"software_build_id": self.ota_firmware, "file_version": latest}}})
+
+        later(self.ota_every, lambda: step(0))
 
     def _join(self) -> None:
         """A thermostat whose middle button was held for 2 s: it joins, is interviewed, reports its values."""

@@ -20,6 +20,13 @@ gelesen am 25.11.2026):
   heating_plan              schedule_active_group "1" … "3"
   Heizplan                  schedule_group_to_edit + weekly_schedule_monday … _sunday: "HH:mm/Temperatur …",
                             erster Punkt 00:00, höchstens 12 Punkte pro Tag, 5–30 °C in 0,5-°C-Schritten
+  „Sanft regeln“            smart_temperature_control "ON" / "OFF". Ab Werk OFF: ganz auf, bis die Temperatur
+                            erreicht ist, dann ganz zu. ON: die eigene „smarte Regelung“ (PID) öffnet das Ventil nur so
+                            weit wie nötig – wie ein normaler Thermostatkopf.
+
+Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach (…/get, höchstens alle 30 Minuten).
+Eine neue Firmware spielt heizapp.zigbee_net ein; die App verlangt dafür mindestens 70 % Batterie (Rat von
+Zigbee2MQTT: ein Update braucht viel Strom).
 
 Erreichbar ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat (Zigbee2MQTT schreibt die Zeit
 als last_seen dazu). Ist es 30 Minuten still, fragt die App einmal nach seiner Temperatur (…/get) – höchstens alle
@@ -48,6 +55,8 @@ ANSWER = 20.0              # seconds a command may take until Zigbee2MQTT report
 PLAN_ANSWER = 60.0         # … a heating plan (one radio message per different day)
 BOOST_MAX = 180            # minutes
 BATTERY_LOW = 20           # per cent: „Batterie bald wechseln“
+OTA_BATTERY = 70           # per cent the battery needs at least for a firmware update
+SMART = "smart_temperature_control"   # "ON": „sanft regeln“ – the thermostat's own smart control (PID)
 CORR_STEP, CORR_MAX = 2, 100   # 0.1 °C: the correction goes in 0.2 °C steps up to ±10 °C
 FAULTS = {"temperature_sensor_issue_detected": "Temperaturfühler gestört",
           "valve_adjustment_issue_detected": "Ventil lässt sich nicht richtig stellen",
@@ -136,6 +145,7 @@ class Thermostat:
         self.ieee, self.net = ieee, net
         self._lock = threading.Lock()      # one command at a time per thermostat
         self._asked = 0.0                  # time.time() of the last question „are you there?“
+        self._smart_asked = 0.0            # … and of the last one how it regulates
         self._boost_started: float | None = None   # when the app started the boost that runs now
         self._boost_asked = False          # the boost should be over: asked once whether it is
 
@@ -151,6 +161,9 @@ class Thermostat:
                            "oder hier entfernen.")
         if not st["values"]:
             raise NoAnswer("Das Thermostat hat noch keine Werte gemeldet.")
+        if SMART not in st["values"] and time.time() - self._smart_asked >= QUERY_EVERY:
+            self._smart_asked = time.time()
+            self.net.send(self.ieee, {SMART: ""}, "get")   # not said yet how it regulates: its answer brings it
         silent = time.time() - st["heard"]
         if silent >= QUERY_EVERY and time.time() - self._asked >= QUERY_EVERY:
             self._asked = time.time()
@@ -204,7 +217,9 @@ class Thermostat:
         return self.read((name,))[name]
 
     def info(self) -> dict:
-        """What the setup shows beyond the AeroFlow's values: battery, radio, faults, firmware update."""
+        """What the setup shows beyond the AeroFlow's values: battery, radio, faults, how it regulates (smart: True =
+        sanft, False = as from the factory, None = not said yet), firmware update (update: a new one is there; ota:
+        the one that runs or ran, see ZigbeeNet.firmware_job)."""
         st = self.net.thermostat(self.ieee) or {}
         v, device = st.get("values") or {}, st.get("device")
         battery = _number(v.get("battery"))
@@ -213,7 +228,9 @@ class Thermostat:
         return {"battery": round(battery) if battery is not None else None,
                 "battery_low": (battery is not None and battery <= BATTERY_LOW) or any(c in BATTERY_FAULTS for c in codes),
                 "signal": _number(v.get("linkquality")), "faults": [FAULTS.get(c, FAULTS["unknown"]) for c in codes],
-                "update": update.get("state") == "available", "paired": device is not None,
+                "update": update.get("state") == "available", "ota": self.net.firmware_job(self.ieee),
+                "smart": {"ON": True, "OFF": False}.get(v.get(SMART)), "paired": device is not None,
+                "firmware": (device or {}).get("firmware"),   # at once after an update, not only with the next reading
                 "model": " ".join(filter(None, ((device or {}).get("vendor"), (device or {}).get("model")))) or MODEL,
                 "heard": st.get("heard") or None}
 
@@ -245,6 +262,10 @@ class Thermostat:
 
     def ensure(self, name: str, value) -> None:
         self.set(name, value)   # set() sends nothing if the thermostat has the value already
+
+    def set_smart(self, on: bool) -> None:
+        """„Sanft regeln“ on – or off: fully open until the temperature is reached, then closed (as from the factory)."""
+        self._send({SMART: "ON" if on else "OFF"})
 
     def set_mode(self, mode: str, *, plan: int = 1, boost_minutes: int = 30) -> None:
         """manual, auto (with plan 1 … 3 of the thermostat), boost, boost_off, off – as Heater.set_mode. Every mode but

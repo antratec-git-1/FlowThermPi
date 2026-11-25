@@ -1783,11 +1783,77 @@ function thermostatFactsHTML(h, roomOptions) {  // a SONOFF thermostat over Zigb
       ${h.online ? '<button class="small" data-action="calib-open">Kalibrieren</button>' : ""}</dd>
     <dt>Heizpläne</dt><dd>${h.plan_slot ? `Plan ${h.plan_slot} ausgewählt${h.mode === "auto" ? ", Automatik läuft" : ""}` : "–"}
       <span class="muted">· den Heizplan bekommt es über seinen Raum („Räume“ › Senden)</span></dd>
+    ${smartHTML(h)}
     <dt>Gemeldet</dt><dd>${h.last_seen ? esc(fmtTime(h.last_seen)) + " Uhr" : "–"}</dd>
     <dt>Zigbee-Adresse</dt><dd>${esc(h.serial ?? "–")}</dd>
-    <dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}${h.update
-      ? ' · Update verfügbar <span class="muted">(einspielen kann die App es noch nicht)</span>' : ""}</dd>
+    ${firmwareHTML(h)}
   </dl>`;
+}
+
+function smartHTML(h) {  // „Sanft regeln“: the thermostat's own smart control – or fully open, then closed (factory)
+  const sending = busy.has("smart:" + h.id);
+  const text = h.smart === true ? "sanft – öffnet das Ventil nur so weit wie nötig"
+    : h.smart === false ? "ganz auf, bis es warm ist, dann ganz zu (wie ab Werk)" : "noch nicht bekannt";
+  const button = h.online ? `<button class="small" data-action="trv-smart" data-on="${h.smart ? "0" : "1"}"
+    ${sending ? "disabled" : ""}>${sending ? "wird gesendet …" : h.smart ? "Wie ab Werk" : "Sanft regeln"}</button>` : "";
+  return `<dt>Regelung</dt><dd>${esc(text)} ${button}
+    ${h.smart ? "" : '<span class="muted">· sanft heizt gleichmäßiger, wie ein normaler Thermostatkopf</span>'}</dd>`;
+}
+
+const OTA_BATTERY = 70;   // per cent the battery needs for a firmware update (heizapp.trv.OTA_BATTERY)
+
+function firmwareHTML(h) {  // the firmware and its update: start, progress (reported every 30 s), result
+  const o = h.ota, running = o && o.state === "running";
+  let more = "";
+  if (running) {
+    more = ` · <b>neue Firmware wird eingespielt</b>${o.progress != null ? ` – ${Math.floor(o.progress)} %` : " – startet …"}${
+      o.remaining ? `, noch etwa ${Math.max(1, Math.round(o.remaining / 60))} min` : ""}
+      <span class="muted">(das Thermostat heizt dabei weiter)</span>`;
+  } else if (o && o.state === "done") {
+    more = " · ✓ neue Firmware eingespielt";
+  } else if (o && o.state === "failed") {
+    more = ` · <span class="error-text">Einspielen hat nicht geklappt: ${esc(o.message)}</span>`;
+  }
+  if (h.update && !running) {
+    const other = state.heaters.find(x => x.id !== h.id && x.ota && x.ota.state === "running");
+    const why = !h.online ? "einspielen, sobald es erreichbar ist"
+      : h.battery == null || h.battery < OTA_BATTERY ? `zum Einspielen braucht die Batterie mindestens ${OTA_BATTERY} %`
+      : other ? `einspielen, wenn „${other.name}“ fertig ist` : "";
+    more += ` · Update verfügbar ${why ? `<span class="muted">(${esc(why)})</span>` : `<button class="small"
+      data-action="trv-firmware">${o && o.state === "failed" ? "Noch einmal versuchen" : "Firmware einspielen …"}</button>`}`;
+  }
+  return `<dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}${more}</dd>`;
+}
+
+async function setSmart(heaterId, on) {
+  const key = "smart:" + heaterId;
+  if (busy.has(key)) return;
+  busy.add(key);
+  render();
+  try {
+    toast((await api("POST", `api/heaters/${encodeURIComponent(heaterId)}/smart`, { on })).message || "Gespeichert.");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  await refresh();
+}
+
+async function startFirmware(heaterId) {
+  const h = state.heaters.find(x => x.id === heaterId);
+  if (!h) return;
+  const yes = await ask({ title: "Neue Firmware einspielen?",
+    text: `„${h.name}“ bekommt eine neue Firmware über Funk. Das dauert 10 bis 100 Minuten. Das Thermostat heizt dabei ` +
+          "weiter und startet am Ende kurz neu. Bitte in der Zeit die Batterien nicht wechseln.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Einspielen", value: "yes", cls: "primary" }] });
+  if (!yes) return;
+  try {
+    toast((await api("POST", `api/heaters/${encodeURIComponent(heaterId)}/firmware`)).message || "Gestartet.");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await refresh();
 }
 
 function deviceFilterBar() {
@@ -3065,6 +3131,8 @@ document.addEventListener("click", e => {
     case "dev-save": return saveDevice();
     case "dev-delete": return deleteDevice();
     case "calib-open": return openCalib(t.closest(".device").dataset.heater);
+    case "trv-smart": return setSmart(t.closest(".device").dataset.heater, t.dataset.on === "1");
+    case "trv-firmware": return startFirmware(t.closest(".device").dataset.heater);
     case "calib-cancel": calibForm = null; return render();
     case "calib-save": return saveCalib(null);
     case "calib-reset": return saveCalib({ correction: 0 });

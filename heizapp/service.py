@@ -35,6 +35,7 @@ MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Bo
 MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby",
               trv.OFF: "Aus"}   # operating_mode, for the log
 VIEW_MODES = {**MODES, trv.OFF: "off"}   # operating_mode -> mode on the page; „off“ only from a thermostat
+SMART_WORDS = {True: "regelt jetzt sanft", False: "regelt jetzt wie ab Werk (ganz auf, ganz zu)"}   # „Sanft regeln“
 SUMMARY_EVERY = 15 * 60   # seconds between two lines „Stand: …“ in the log
 
 
@@ -303,6 +304,55 @@ class Service:
             log.info("Thermostat %s aus der App entfernt", ieee)
         self._sync_thermostats()
         return result if result is not None else {}
+
+    def _thermostat(self, heater_id: str) -> HeaterState:
+        e = self._entry(heater_id)
+        if not e.zigbee:
+            raise ActionError("Das geht nur beim Thermostat.", 409)
+        return e
+
+    def set_smart(self, heater_id: str, on) -> dict:
+        """„Sanft regeln“: the thermostat's own smart control opens the valve only as far as needed, like a normal
+        thermostatic head. Off: fully open until the temperature is reached, then closed – as from the factory."""
+        e = self._thermostat(heater_id)
+        if not isinstance(on, bool):
+            raise ActionError("Ungültige Anfrage.")
+        if not e.online:
+            raise ActionError("Das Thermostat ist gerade nicht erreichbar.", 409)
+        try:
+            e.device.set_smart(on)
+        except (DeviceError, coap.CoapError) as exc:
+            raise ActionError(f"Nicht übernommen: {exc}", 502) from None
+        words = SMART_WORDS[on]
+        log.info("Thermostat %s %s", self._who(e), words)
+        self.refresh(e, full=True)
+        return {"message": f"{self._name(e)} {words}."}
+
+    def update_firmware(self, heater_id: str) -> dict:
+        """„Firmware einspielen“: start the update of a thermostat's firmware. It runs 10 to 100 minutes; the page shows
+        its progress (ota in the heater's view). One at a time, and only with a battery that can take it."""
+        e = self._thermostat(heater_id)
+        info = e.device.info()
+        if not e.online:
+            raise ActionError("Das Thermostat ist gerade nicht erreichbar.", 409)
+        if (info["ota"] or {}).get("state") == "running":
+            raise ActionError("Die neue Firmware wird schon eingespielt.", 409)
+        if not info["update"]:
+            raise ActionError("Für dieses Thermostat gibt es gerade keine neue Firmware.", 409)
+        if info["battery"] is None or info["battery"] < trv.OTA_BATTERY:
+            raise ActionError(f"Zum Einspielen braucht die Batterie mindestens {trv.OTA_BATTERY} % (jetzt "
+                              f"{info['battery'] if info['battery'] is not None else '?'} %) – bitte zuerst neue "
+                              "Batterien einsetzen.", 409)
+        other = next((x for x in self.entries if x.zigbee and x is not e
+                      and (x.device.info()["ota"] or {}).get("state") == "running"), None)
+        if other:
+            raise ActionError(f"Gerade wird die Firmware von „{self._name(other)}“ eingespielt – bitte warten, bis sie "
+                              "fertig ist.", 409)
+        self.zigbee.firmware(e.id)
+        log.info("Thermostat %s: neue Firmware wird eingespielt (Firmware bisher %s, Batterie %d %%)", self._who(e),
+                 e.values.get("active_fw_ver") or "?", info["battery"])
+        return {"message": "Das Einspielen hat begonnen. Es dauert 10 bis 100 Minuten – das Thermostat heizt dabei "
+                           "weiter und startet am Ende kurz neu."}
 
     def refresh(self, e: HeaterState, full: bool = False) -> None:
         with e.refresh_lock:

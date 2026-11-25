@@ -146,13 +146,13 @@ class ThermostatTest(Base):
         h = self.heater()
         self.assertEqual({k: h[k] for k in ("kind", "name", "online", "writable", "room_temp", "setpoint", "mode",
                                             "heating", "window_open", "antifrost", "temp_corr", "plan_slot", "battery",
-                                            "battery_low", "signal", "faults", "update", "paired", "host", "hostname",
-                                            "firmware", "serial", "error")},
+                                            "battery_low", "signal", "faults", "update", "ota", "smart", "paired", "host",
+                                            "hostname", "firmware", "serial", "error")},
                          {"kind": "zigbee", "name": "Thermostat 00AA", "online": True, "writable": True, "room_temp": 20.5,
                           "setpoint": 21.0, "mode": "manual", "heating": True, "window_open": False, "antifrost": 7.0,
                           "temp_corr": 0.0, "plan_slot": 1, "battery": 87, "battery_low": False, "signal": 132,
-                          "faults": [], "update": False, "paired": True, "host": "Zigbee", "hostname": "SONOFF TRV-ZBT",
-                          "firmware": "1.1.3", "serial": IEEE, "error": None})
+                          "faults": [], "update": False, "ota": None, "smart": False, "paired": True, "host": "Zigbee",
+                          "hostname": "SONOFF TRV-ZBT", "firmware": "1.1.3", "serial": IEEE, "error": None})
         self.assertIsNotNone(h["last_seen"])
         self.assertEqual(self.conf.read_text(), "")   # thermostats never go into heizungen.conf
         self.assertEqual(self.z2m.commands, [])        # looking costs the thermostat nothing
@@ -356,6 +356,117 @@ class ThermostatTest(Base):
         self.assertIn("keine AeroFlow-Heizung", str(ctx.exception))
         self.assertEqual(self.z2m.commands, [])
 
+    def test_smart_control_on_and_off(self):
+        self.assertIs(self.heater()["smart"], False)   # as from the factory: fully open, then closed
+        answer = self.service.set_smart(IEEE, True)
+        self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt sanft.")
+        self.assertEqual(self.sets(), [{"smart_temperature_control": "ON"}])
+        self.assertIs(self.heater()["smart"], True)
+        self.service.set_smart(IEEE, True)   # it does so already: nothing goes out
+        self.assertEqual(len(self.sets()), 1)
+        answer = self.service.set_smart(IEEE, False)
+        self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt wie ab Werk (ganz auf, ganz zu).")
+        self.assertEqual(self.sets()[-1], {"smart_temperature_control": "OFF"})
+        with self.assertRaises(ActionError):
+            self.service.set_smart(IEEE, "ja")
+        self.z2m.asleep.add(IEEE)
+        with mock.patch.object(trv.Thermostat, "answer", 0.3), self.assertRaises(ActionError) as ctx:
+            self.service.set_smart(IEEE, True)
+        self.assertEqual((ctx.exception.status, str(ctx.exception)), (502, "Nicht übernommen: " + trv.NOT_ANSWERED))
+        self.assertIs(self.heater()["smart"], False)
+        self.assertEqual(self.z2m.refused, [])
+
+    def test_smart_control_not_said_yet_is_asked_for(self):
+        with self.net._lock:   # the thermostat has not reported how it regulates
+            self.net._states[IEEE]["values"].pop("smart_temperature_control")
+        self.assertIsNone(self.heater()["smart"])
+        self.service.poll_all()
+        gets = lambda: [b for i, k, b in self.z2m.commands if k == "get"]   # noqa: E731
+        self.assertEqual(until(gets), [{"smart_temperature_control": ""}])
+        until(lambda: self.heater()["smart"] is False)
+        self.service.poll_all()
+        self.assertEqual(len(gets()), 1)
+
+    def available(self, ieee=IEEE, **values):
+        self.z2m.report(ieee, update={"state": "available", "installed_version": 4353, "latest_version": 4354}, **values)
+        until(lambda: self.net.thermostat(ieee)["values"]["update"]["state"] == "available")
+
+    def ota(self):
+        return self.heater()["ota"] or {}
+
+    def test_firmware_update(self):
+        self.available()
+        self.assertEqual((self.heater()["update"], self.heater()["ota"]), (True, None))
+        self.z2m.ota_every = 0.2
+        with self.assertLogs("heizapp", "INFO") as said:
+            answer = self.service.update_firmware(IEEE)
+            self.assertEqual(answer["message"], "Das Einspielen hat begonnen. Es dauert 10 bis 100 Minuten – das "
+                                                "Thermostat heizt dabei weiter und startet am Ende kurz neu.")
+            self.assertEqual(until(lambda: self.z2m.requests),
+                             [("device/ota_update/update", {"id": IEEE, "transaction": mock.ANY})])
+            self.assertEqual(self.ota(), {"state": "running", "progress": None, "remaining": None, "message": None})
+            until(lambda: self.ota().get("progress") == 25)   # what the thermostat reports, every 30 s for real
+            self.assertEqual(self.ota()["state"], "running")
+            with self.assertRaises(ActionError) as ctx:
+                self.service.update_firmware(IEEE)
+            self.assertEqual((ctx.exception.status, str(ctx.exception)), (409, "Die neue Firmware wird schon eingespielt."))
+            until(lambda: self.ota().get("state") == "done", seconds=10)
+        self.service.poll_all()
+        h = self.heater()
+        self.assertEqual((h["firmware"], h["update"], h["ota"]["message"]), ("1.1.4", False, "Neue Firmware eingespielt."))
+        logged = "\n".join(said.output)
+        self.assertIn("Thermostat Thermostat 00AA (0x8c65a3fffe1d00aa): neue Firmware wird eingespielt (Firmware bisher "
+                      "1.1.3, Batterie 87 %)", logged)
+        self.assertIn("Zigbee: Firmware von 0x8c65a3fffe1d00aa eingespielt (1.1.3 → 1.1.4)", logged)
+        self.assertEqual(self.sets(), [])   # nothing else went to the thermostat
+
+    def test_firmware_update_only_when_it_can_go_well(self):
+        with self.assertRaises(ActionError) as ctx:
+            self.service.update_firmware(IEEE)
+        self.assertEqual((ctx.exception.status, str(ctx.exception)),
+                         (409, "Für dieses Thermostat gibt es gerade keine neue Firmware."))
+        self.available(battery=55)
+        with self.assertRaises(ActionError) as ctx:
+            self.service.update_firmware(IEEE)
+        self.assertEqual(str(ctx.exception), "Zum Einspielen braucht die Batterie mindestens 70 % (jetzt 55 %) – bitte "
+                                             "zuerst neue Batterien einsetzen.")
+        self.z2m.stop()
+        until(lambda: self.net.problem())
+        self.service.poll_all()
+        with self.assertRaises(ActionError) as ctx:
+            self.service.update_firmware(IEEE)
+        self.assertEqual(str(ctx.exception), "Das Thermostat ist gerade nicht erreichbar.")
+        self.assertEqual([w for w, b in self.z2m.requests if w.startswith("device/ota")], [])
+
+    def test_firmware_update_that_fails_and_again(self):
+        self.available()
+        self.z2m.ota_error = "Device didn't respond to OTA request"
+        with self.assertLogs("heizapp.zigbee", "WARNING") as said:
+            self.service.update_firmware(IEEE)
+            until(lambda: self.ota().get("state") == "failed")
+        self.assertEqual(self.ota()["message"], "Das Thermostat hat nicht geantwortet – bitte später noch einmal versuchen.")
+        self.assertIn("Zigbee2MQTT meldet: Update of '0x8c65a3fffe1d00aa' failed (Device didn't respond to OTA request)",
+                      said.output[0])
+        self.assertTrue(self.heater()["update"])   # still there: it can be tried again
+        self.z2m.ota_error = None
+        self.service.update_firmware(IEEE)
+        until(lambda: self.ota().get("state") == "done")
+
+    def test_firmware_update_without_zigbee2mqtts_answer(self):
+        self.available()
+        self.z2m.silent = True   # it never begins: after 10 minutes (here 0.2 s) the page says so
+        with mock.patch("heizapp.zigbee_net.OTA_START", 0.2):
+            self.service.update_firmware(IEEE)
+            self.assertEqual(self.ota()["state"], "running")
+            until(lambda: self.ota().get("state") == "failed")
+        self.assertEqual(self.ota()["message"], "Zigbee2MQTT hat mit dem Einspielen nicht begonnen – bitte noch einmal "
+                                                "versuchen.")
+        self.z2m.silent = False   # it runs, but the app misses the answer: the new firmware says it is done
+        self.service.update_firmware(IEEE)
+        with self.net._lock:
+            self.net._ota[IEEE]["transaction"] = "eine-andere"
+        until(lambda: self.ota().get("state") == "done")
+
     def test_removed_in_the_app(self):
         room = self.room()
         self.service.update_heater(IEEE, {"name": "Bad"})
@@ -398,6 +509,26 @@ class MixedRoomTest(Base):
         self.service.add_heater({"host": f"127.0.0.1:{later.port}", "token": later.token})   # comes before them
         self.assertEqual([h["kind"] for h in self.service.state()["heaters"]], ["aeroflow", "aeroflow", "zigbee", "zigbee"])
         self.assertNotIn("zigbee", self.conf.read_text().lower())
+
+    def test_one_firmware_update_at_a_time_and_only_for_thermostats(self):
+        for ieee in (IEEE, OTHER):
+            self.z2m.report(ieee, update={"state": "available", "installed_version": 4353, "latest_version": 4354})
+        until(lambda: all(self.net.thermostat(i)["values"]["update"]["state"] == "available" for i in (IEEE, OTHER)))
+        self.z2m.ota_every = 0.2
+        self.service.update_firmware(IEEE)
+        with self.assertRaises(ActionError) as ctx:
+            self.service.update_firmware(OTHER)
+        self.assertEqual((ctx.exception.status, str(ctx.exception)),
+                         (409, "Gerade wird die Firmware von „Thermostat 00AA“ eingespielt – bitte warten, bis sie fertig "
+                               "ist."))
+        for call in (lambda: self.service.update_firmware("91110001"), lambda: self.service.set_smart("91110001", True)):
+            with self.assertRaises(ActionError) as ctx:
+                call()
+            self.assertEqual((ctx.exception.status, str(ctx.exception)), (409, "Das geht nur beim Thermostat."))
+        heater = lambda ident: next(h for h in self.service.state()["heaters"] if h["id"] == ident)   # noqa: E731
+        until(lambda: (heater(IEEE)["ota"] or {}).get("state") == "done", seconds=10)
+        self.service.update_firmware(OTHER)   # now it may
+        self.assertEqual(heater(OTHER)["ota"]["state"], "running")
 
 
 class ApiTest(Base):
@@ -443,6 +574,31 @@ class ApiTest(Base):
         self.assertEqual([h["id"] for h in state["heaters"]], [])
         self.assertEqual(next(r for r in state["rooms"] if r["id"] == room)["heaters"], [])
         self.assertNotIn(IEEE, json.loads((self.tmp / "data.json").read_text())["heaters"])
+
+    def test_smart_and_firmware(self):
+        answer = self.call("POST", f"/api/heaters/{IEEE}/smart", {"on": True})
+        self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt sanft.")
+        self.call("POST", f"/api/heaters/{IEEE}/smart", {"on": "ja"}, expect=400)
+        self.call("POST", f"/api/heaters/{IEEE}/firmware", expect=409)   # nothing new for it
+        self.z2m.report(IEEE, update={"state": "available", "installed_version": 4353, "latest_version": 4354})
+        until(lambda: self.net.thermostat(IEEE)["values"]["update"]["state"] == "available")
+        self.assertIn("10 bis 100 Minuten", self.call("POST", f"/api/heaters/{IEEE}/firmware")["message"])
+        h = until(lambda: next((h for h in self.call("GET", "/api/state")["heaters"]
+                                if h["id"] == IEEE and (h["ota"] or {}).get("state") == "done"), None))
+        self.assertIs(h["smart"], True)
+
+
+class OverviewTextTest(unittest.TestCase):
+    """How „Protokoll speichern“ writes a thermostat's firmware update."""
+
+    def test_ota_text(self):
+        from heizapp.support import _ota_text
+        self.assertEqual(_ota_text(None), "")
+        self.assertEqual(_ota_text({"state": "running", "progress": 37.5}), " (neue Firmware wird eingespielt, 38 %)")
+        self.assertEqual(_ota_text({"state": "running", "progress": None}), " (neue Firmware wird eingespielt)")
+        self.assertEqual(_ota_text({"state": "done"}), " (neue Firmware eingespielt)")
+        self.assertEqual(_ota_text({"state": "failed", "message": "Das Thermostat hat nicht geantwortet."}),
+                         " (Einspielen hat nicht geklappt: Das Thermostat hat nicht geantwortet.)")
 
 
 if __name__ == "__main__":

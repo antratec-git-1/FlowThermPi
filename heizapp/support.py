@@ -88,6 +88,18 @@ def _deg(value) -> str:
     return "–" if value is None else f"{value:.1f} °C".replace(".", ",")
 
 
+def _ota_text(ota) -> str:
+    """A thermostat's firmware update for the overview (see ZigbeeNet.firmware_job)."""
+    if not isinstance(ota, dict):
+        return ""
+    if ota.get("state") == "running":
+        share = ota.get("progress")
+        return " (neue Firmware wird eingespielt" + (f", {share:.0f} %" if isinstance(share, (int, float)) else "") + ")"
+    if ota.get("state") == "done":
+        return " (neue Firmware eingespielt)"
+    return f" (Einspielen hat nicht geklappt: {ota.get('message') or '?'})"
+
+
 def _when(text) -> str:
     """ISO time -> "22.11. 14:03" (or "–")."""
     try:
@@ -432,10 +444,13 @@ class Support:
                          f"Batterie {h['battery']} %" if h["battery"] is not None else "Batterie ?",
                          f"Funk {h['signal']}" if h["signal"] is not None else "Funk ?"]
                 extra += [f"Störung: {', '.join(h['faults'])}"] if h["faults"] else []
+                extra.append({True: "regelt sanft", False: "regelt ab Werk (ganz auf, ganz zu)"}.get(h.get("smart"),
+                                                                                                  "Regelung ?"))
             else:
                 extra = [f"Token: {'ja' if h['writable'] else 'nein (nur Anzeige)'}"]
             if h["firmware"]:
-                extra.append(f"Firmware {h['firmware']}" + (" (Update verfügbar)" if h.get("update") else ""))
+                extra.append(f"Firmware {h['firmware']}" + (" (Update verfügbar)" if h.get("update") else "")
+                             + _ota_text(h.get("ota")))
             if h["serial"]:
                 extra.append(f"{'Zigbee-Adresse' if h['kind'] == 'zigbee' else 'Seriennummer'} {h['serial']}")
             if h["clock_drift"] is not None:
