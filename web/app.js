@@ -587,19 +587,39 @@ function homeSensors(g) {  // the room's sensors with a fresh reading, for its h
   });
 }
 
-function homeSensorsHTML(list) {  // "Fühler: 21,3 °C · 48 % Luftfeuchte", one line per sensor
-  return list.map(s => {
-    const label = s.custom_name ? `Fühler „${esc(s.custom_name)}“` : list.length < 2 ? "Fühler"
-      : /Fühler/.test(s.name) ? esc(s.name) : `Fühler ${esc(s.name)}`;   // "pill-1 · Fühler 2" names itself
-    const humidity = s.humidity == null ? "" : ` · ${Math.round(s.humidity)} % Luftfeuchte`;
-    return `<p class="tile-sensor">${label}: <b>${esc(deg(s.temp))}</b>${humidity}</p>`;
-  }).join("");
+function roomTemp(g) {  // the room's temperature: its sensors' if one has a fresh reading, else at its heaters
+  const sensors = homeSensors(g);
+  const temps = (sensors.length ? sensors.map(s => s.temp) : g.heaters.filter(h => h.online).map(h => h.room_temp))
+    .filter(t => t != null);
+  return temps.length ? avg(temps) : null;
+}
+
+function heaterOff(h) {  // switched off – or held at its frost protection, which counts the same (see groupMode)
+  return h.mode === "off" || h.mode === "standby"
+    || (h.mode === "manual" && h.antifrost != null && h.setpoint != null && h.setpoint <= h.antifrost);
+}
+
+function sensorName(s, list) {  // „Fühler“, „Fühler „Fensterbank““ or „Fühler pill-1“ – as the residents read it
+  return s.custom_name ? `Fühler „${esc(s.custom_name)}“` : list.length < 2 ? "Fühler"
+    : /Fühler/.test(s.name) ? esc(s.name) : `Fühler ${esc(s.name)}`;   // "pill-1 · Fühler 2" names itself
+}
+
+function tileDevicesHTML(g, sensors) {
+  // „Ist“ and „Soll“ of every device of the room, when it has more than one: heaters and thermostats, then the sensors
+  // with a fresh reading (and their humidity)
+  const rows = g.heaters.map(h => [esc(h.name), h.online ? degBig(h.room_temp) : null,
+                                    !h.online ? null : heaterOff(h) ? "aus" : degBig(h.setpoint)])
+    .concat(sensors.map(s => [sensorName(s, sensors) + (s.humidity == null ? ""
+      : `<small>${Math.round(s.humidity)} % Luftfeuchte</small>`), degBig(s.temp), "–"]));
+  if (rows.length < 2) return "";
+  return `<div class="tile-devices"><span></span><span class="th">Ist</span><span class="th">Soll</span>${rows.map(([name, ist, soll]) =>
+    `<span class="dname">${name}</span>${ist == null ? '<span class="dnone">keine Verbindung</span>'
+      : `<span class="dval">${esc(ist)}</span><span class="dval">${esc(soll)}</span>`}`).join("")}</div>`;
 }
 
 function homeTile(g) {
   const key = keyOf(g);
   const online = g.heaters.filter(h => h.online);
-  const temps = online.map(h => h.room_temp).filter(t => t != null);
   const sensors = homeSensors(g);
   const writable = online.some(h => h.writable);
   const p = pending[key];
@@ -609,8 +629,7 @@ function homeTile(g) {
   const isOff = ["off", "standby", "holiday"].includes(mode);
   const say = homeStatus(g, online, mode, target, writable);
   const dis = writable ? "" : "disabled";
-  const now = temps.length ? avg(temps) : null;
-  const felt = sensors.length ? avg(sensors.map(s => s.temp)) : now;   // what the tint (and the colour at night) follows
+  const felt = roomTemp(g);   // the big number – the tint and the colour at night follow it too
   const actions = [];
   if (online.length) {
     if (isOff) {
@@ -647,16 +666,13 @@ function homeTile(g) {
                    busy.has(key) ? "busy" : ""].filter(Boolean).join(" ");
   return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
     <div class="tile-head"><h2>${esc(g.name)}</h2>${badge}</div>
-    <div class="tile-measure">
-      <div class="tile-now"><span class="now-temp">${degBig(now)}</span>${now == null ? ""
-        : `<span class="now-label">${sensors.length ? "an der Heizung" : "im Raum"}</span>`}</div>
-      ${homeSensorsHTML(sensors)}
-    </div>
+    <div class="tile-now"><span class="now-temp">${degBig(felt)}</span>${felt == null ? "" : '<span class="now-label">im Raum</span>'}</div>
     ${setter}
     <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ` <span class="more">${silent
       ? "Am Thermostat einmal die mittlere Taste drücken." : "Die App versucht es immer wieder."}</span>`}</p>
     ${battery}
     ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
+    ${tileDevicesHTML(g, sensors)}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
     ${heating && !isOff ? WAVE : ""}
   </article>`;
@@ -946,7 +962,6 @@ function roomCard(g) {
   }
   const key = keyOf(g);
   const online = g.heaters.filter(h => h.online);
-  const temps = online.map(h => h.room_temp).filter(t => t != null);
   const writable = online.some(h => h.writable);
   const p = pending[key];
   const target = p ? p.temp : currentTarget(g);
@@ -966,7 +981,7 @@ function roomCard(g) {
       ${g.kind === "room" ? '<button class="small" data-action="room-edit">Bearbeiten</button>' : ""}
     </div>
     <div class="temps">
-      <div><span class="big">${deg(temps.length ? avg(temps) : null)}</span><span class="label">Raumtemperatur</span></div>
+      <div><span class="big">${deg(roomTemp(g))}</span><span class="label">Raumtemperatur</span></div>
       <div class="target ${p ? "pending" : ""}">
         <button class="round" data-action="sp" data-delta="-0.5" ${dis} aria-label="kälter">−</button>
         <div><span class="big">${deg(target)}</span><span class="label">${mode === "auto" ? planLabel(g, target) : "Solltemperatur"}</span></div>
@@ -975,17 +990,24 @@ function roomCard(g) {
     </div>
     <div class="modes">${buttons}</div>
     ${g.kind === "room" ? planRow(g, writable) : '<p class="hint">Für Heizpläne diese Heizung unter „Geräte“ einem Raum zuordnen.</p>'}
-    <ul class="heater-list">${g.heaters.map(heaterLine).join("")}</ul>
-    ${g.kind === "room" ? roomSensorsHTML(g) : ""}
+    ${roomDevicesHTML(g)}
     ${!writable && online.length ? '<p class="hint">Nur Anzeige: In heizungen.conf fehlt der Token.</p>' : ""}
   </article>`;
 }
 
-function roomSensorsHTML(g) {  // the room's sensors with their last reading (setup view)
-  const list = (state.sensors || []).filter(s => s.room === g.id);
-  if (!list.length) return "";
-  return `<p class="hint">Fühler: ${list.map(s => esc(s.name) + (s.temp == null ? ""
-    : ` <span class="muted">(${esc(deg(s.temp))}${s.measured_at ? ", gemessen " + esc(fmtTime(s.measured_at)) : ""})</span>`)).join(" · ")}</p>`;
+function roomDevicesHTML(g) {
+  // at the bottom of a room in the setup: every device with „Ist“ and „Soll“ – heaters and thermostats with their mode
+  // and what is wrong, then the room's sensors with the time of their last reading
+  const sensors = g.kind === "room" ? (state.sensors || []).filter(s => s.room === g.id) : [];
+  const row = (dot, name, kind, ist, soll) => `<li><span class="dot ${dot}"></span><span class="dname">${name}<span
+    class="dkind">${kind}</span></span><span class="dval">${ist}</span><span class="dval">${soll}</span></li>`;
+  const rows = g.heaters.map(h => row(!h.online ? "offline" : h.heating ? "on" : "", esc(h.name),
+      (h.kind === "zigbee" ? "Thermostat" : "Heizung") + heaterTags(h), h.online ? deg(h.room_temp) : "–",
+      !h.online ? "offline" : heaterOff(h) ? "aus" : deg(h.setpoint)))
+    .concat(sensors.map(s => row("", esc(s.name), "Fühler" + (s.measured_at ? ` · gemessen ${esc(fmtTime(s.measured_at))}` : ""),
+      deg(s.temp), "–")));
+  return `<ul class="room-devices"><li class="head"><span></span><span>Gerät</span><span>Ist</span><span>Soll</span></li>${
+    rows.join("")}</ul>`;
 }
 
 function planRow(g, writable) {
@@ -1002,17 +1024,15 @@ function planRow(g, writable) {
     <p class="hint">${esc(hint)}</p>`;
 }
 
-function heaterLine(h) {
-  const dot = !h.online ? "offline" : h.heating ? "on" : "";
+function heaterTags(h) {  // what to know about a heater in its room's list: its mode (off says „Soll“) and what is wrong
   const tags = [];
   if (h.window_open) tags.push('<span class="tag warn">Fenster offen</span>');
-  if (h.mode && h.mode !== "manual") tags.push(`<span class="tag">${esc(MODE_TEXT[h.mode] || h.mode)}</span>`);
+  if (h.mode && !["manual", "off"].includes(h.mode)) tags.push(`<span class="tag">${esc(MODE_TEXT[h.mode] || h.mode)}</span>`);
   if (!h.writable) tags.push('<span class="tag">nur lesen</span>');
   if (h.battery_low) tags.push('<span class="tag warn">Batterie schwach</span>');
   if ((h.faults || []).some(f => !f.startsWith("Batterie"))) tags.push('<span class="tag bad">Störung</span>');
   if (h.online && h.clock_drift != null && Math.abs(h.clock_drift) > 60) tags.push('<span class="tag bad">Uhr falsch</span>');
-  return `<li><span class="dot ${dot}"></span><span class="hname">${esc(h.name)}</span>
-    <span class="hvals">${h.online ? `${deg(h.room_temp)} → ${deg(h.setpoint)}` : "offline"}</span>${tags.join("")}</li>`;
+  return tags.join("");
 }
 
 function changeSetpoint(card, delta) {
@@ -1807,25 +1827,43 @@ function thermostatFactsHTML(h, roomOptions) {  // a SONOFF thermostat over Zigb
       ${h.online ? '<button class="small" data-action="calib-open">Kalibrieren</button>' : ""}</dd>
     <dt>Heizpläne</dt><dd>${h.plan_slot ? `Plan ${h.plan_slot} ausgewählt${h.mode === "auto" ? ", Automatik läuft" : ""}` : "–"}
       <span class="muted">· den Heizplan bekommt es über seinen Raum („Räume“ › Senden)</span></dd>
-    ${smartHTML(h)}
+    ${regulationHTML(h)}
     <dt>Gemeldet</dt><dd>${h.last_seen ? esc(fmtTime(h.last_seen)) + " Uhr" : "–"}</dd>
     <dt>Zigbee-Adresse</dt><dd>${esc(h.serial ?? "–")}</dd>
     ${firmwareHTML(h)}
   </dl>`;
 }
 
-function smartHTML(h) {
-  // „Regelung“: two buttons like Aus/Automatik/Ein, the chosen one marked – „Sanft“ (the thermostat's own smart
-  // control) or „Ab Werk“ (fully open until warm, then closed); one short line says what the chosen one does
-  const sending = busy.has("smart:" + h.id);
-  const choice = (on, label) => `<button class="${h.smart === on ? "active" : ""}" data-action="trv-smart"
-    data-on="${on ? "1" : "0"}" aria-pressed="${h.smart === on}" ${h.online && !sending ? "" : "disabled"}>${label}</button>`;
+const STUFEN = [20, 40, 60, 80, 100];   // Stufe 1 … 5: per cent the valve opens at most while heating (heizapp.trv.STEPS)
+const GAPS = [0, 5, 10, 15];            // per cent it stays open in the pauses – always less than Stufe 1
+const SPANS = [1, 0.6, 0.4, 0.2];       // °C below the setpoint at which it heats again (1 = as from the factory)
+
+function regulationHTML(h) {
+  // „Regelung“: three buttons like Aus/Automatik/Ein, the chosen one marked – „Ab Werk“ (fully open until warm, then
+  // closed), „Sanft“ (the thermostat's own smart control) or „Stufen“ (open and closed, but only as far as the Stufe
+  // says, a gap open in the pauses, heating again sooner – three more rows of buttons); a short line says what it does
+  const r = h.regulation || {}, sending = busy.has("regulation:" + h.id);
+  const button = (active, data, label) => `<button class="${active ? "active" : ""}" data-action="trv-regulation" ${data}
+    aria-pressed="${active}" ${h.online && !sending ? "" : "disabled"}>${label}</button>`;
+  const row = (label, buttons, text) => `<dt>${label}</dt><dd><div class="segmented" role="group" aria-label="${label}">${
+    buttons}</div>${text ? `<div class="segmented-text muted">${esc(text)}</div>` : ""}</dd>`;
+  const comma = x => String(x).replace(".", ",");
   const text = sending ? "wird gesendet …"
-    : h.smart === true ? "Öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf."
-    : h.smart === false ? "Ganz auf, bis es warm ist, dann ganz zu. „Sanft“ heizt gleichmäßiger."
+    : r.mode === "werk" ? "Ganz auf, bis es warm ist, dann ganz zu."
+    : r.mode === "sanft" ? "Öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf."
+    : r.mode === "stufen" ? "Auf und zu wie ab Werk, aber sanfter. Die passenden Werte zeigt das Ausprobieren."
     : "Das Thermostat hat noch nicht gemeldet, wie es regelt.";
-  return `<dt>Regelung</dt><dd><div class="segmented" role="group" aria-label="Regelung">${choice(true, "Sanft")}${
-    choice(false, "Ab Werk")}</div><div class="segmented-text muted">${esc(text)}</div></dd>`;
+  let html = row("Regelung", [["werk", "Ab Werk"], ["sanft", "Sanft"], ["stufen", "Stufen"]]
+    .map(([mode, label]) => button(r.mode === mode, `data-mode="${mode}"`, label)).join(""), text);
+  if (r.mode === "stufen") {
+    html += row("Stufe", STUFEN.map((p, i) => button(r.heat === p, `data-heat="${p}"`, i + 1)).join(""),
+        r.heat == null ? "" : `Beim Heizen höchstens ${r.heat} % offen.`)
+      + row("In Pausen", GAPS.map(p => button(r.idle === p, `data-idle="${p}"`, p ? `${p} %` : "zu")).join(""),
+        r.idle == null ? "" : r.idle ? `Bleibt ${r.idle} % offen, der Heizkörper kühlt nicht ganz aus.` : "Ganz zu, wie ab Werk.")
+      + row("Spielraum", SPANS.map(s => button(r.spielraum === s, `data-spielraum="${s}"`, comma(s))).join(""),
+        r.spielraum == null ? "" : `Heizt wieder, sobald es ${comma(r.spielraum)} °C kälter ist als eingestellt.`);
+  }
+  return html;
 }
 
 const OTA_BATTERY = 70;   // per cent the battery needs for a firmware update (heizapp.trv.OTA_BATTERY)
@@ -1857,13 +1895,16 @@ function firmwareHTML(h) {  // the firmware and its update: start, progress (rep
   return `<dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}${more}</dd>`;
 }
 
-async function setSmart(heaterId, on) {
-  const key = "smart:" + heaterId;
+async function setRegulation(heaterId, data) {
+  // data: the button's data-mode („werk“, „sanft“, „stufen“) – or in Stufen one of data-heat, data-idle, data-spielraum
+  const key = "regulation:" + heaterId;
   if (busy.has(key)) return;
+  const body = { mode: data.mode || "stufen" };
+  for (const name of ["heat", "idle", "spielraum"]) if (data[name] != null) body[name] = Number(data[name]);
   busy.add(key);
   render();
   try {
-    toast((await api("POST", `api/heaters/${encodeURIComponent(heaterId)}/smart`, { on })).message || "Gespeichert.");
+    toast((await api("POST", `api/heaters/${encodeURIComponent(heaterId)}/regulation`, body)).message || "Gespeichert.");
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -3163,8 +3204,8 @@ document.addEventListener("click", e => {
     case "dev-save": return saveDevice();
     case "dev-delete": return deleteDevice();
     case "calib-open": return openCalib(t.closest(".device").dataset.heater);
-    case "trv-smart":   // the chosen one again: nothing to do
-      return t.classList.contains("active") ? undefined : setSmart(t.closest(".device").dataset.heater, t.dataset.on === "1");
+    case "trv-regulation":   // the chosen one again: nothing to do
+      return t.classList.contains("active") ? undefined : setRegulation(t.closest(".device").dataset.heater, t.dataset);
     case "trv-firmware": return startFirmware(t.closest(".device").dataset.heater);
     case "calib-cancel": calibForm = null; return render();
     case "calib-save": return saveCalib(null);

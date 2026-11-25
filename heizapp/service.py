@@ -35,7 +35,7 @@ MODE_LABELS = {"manual": "Manuell", "auto": "Automatik (Heizplan)", "boost": "Bo
 MODE_WORDS = {0: "Manuell", 1: "Automatik", 2: "Boost", 3: "Urlaub", 4: "Standby",
               trv.OFF: "Aus"}   # operating_mode, for the log
 VIEW_MODES = {**MODES, trv.OFF: "off"}   # operating_mode -> mode on the page; „off“ only from a thermostat
-SMART_WORDS = {True: "regelt jetzt sanft", False: "regelt jetzt wie ab Werk (ganz auf, ganz zu)"}   # „Sanft regeln“
+REGULATION_WORDS = {"werk": "regelt jetzt wie ab Werk (ganz auf, ganz zu)", "sanft": "regelt jetzt sanft"}   # „Regelung“
 SUMMARY_EVERY = 15 * 60   # seconds between two lines „Stand: …“ in the log
 RESTORE_SETTLE = 60       # seconds after a firmware update until the app writes the thermostat's settings back …
 RESTORE_RETRY = 5 * 60    # … and between attempts while it does not confirm them
@@ -322,19 +322,32 @@ class Service:
             raise ActionError("Das geht nur beim Thermostat.", 409)
         return e
 
-    def set_smart(self, heater_id: str, on) -> dict:
-        """„Sanft regeln“: the thermostat's own smart control opens the valve only as far as needed, like a normal
-        thermostatic head. Off: fully open until the temperature is reached, then closed – as from the factory."""
+    def set_regulation(self, heater_id: str, body) -> dict:
+        """„Regelung“ of a thermostat (see trv.regulation): mode „werk“ – fully open until the temperature is
+        reached, then closed, as from the factory; „sanft“ – its own smart control opens the valve only as far as
+        needed, like a normal thermostatic head; „stufen“ – open and closed, but only as far as the Stufe says (heat,
+        per cent), a gap open in the pauses (idle, per cent) and heating again sooner (spielraum, °C below the
+        setpoint). What is not given stays."""
         e = self._thermostat(heater_id)
-        if not isinstance(on, bool):
+        body = body if isinstance(body, dict) else {}
+        mode, heat, idle, span = (body.get(k) for k in ("mode", "heat", "idle", "spielraum"))
+        whole = lambda x, low, high: isinstance(x, int) and not isinstance(x, bool) and low <= x <= high   # noqa: E731
+        if mode not in trv.REGULATIONS or (mode != "stufen" and (heat, idle, span) != (None, None, None)) \
+                or not (heat is None or whole(heat, 1, 100)) or not (idle is None or whole(idle, 0, 99)) \
+                or not (span is None or (isinstance(span, (int, float)) and not isinstance(span, bool)
+                                         and any(abs(span - s) < 0.01 for s in trv.SPANS))):
             raise ActionError("Ungültige Anfrage.")
         if not e.online:
             raise ActionError("Das Thermostat ist gerade nicht erreichbar.", 409)
         try:
-            e.device.set_smart(on)
+            e.device.set_regulation(mode, heat=heat, idle=idle, spielraum=None if span is None else round(span, 1))
+        except ValueError as exc:
+            raise ActionError(str(exc)) from None
         except (DeviceError, coap.CoapError) as exc:
             raise ActionError(f"Nicht übernommen: {exc}", 502) from None
-        words = SMART_WORDS[on]
+        r = e.device.info()["regulation"]
+        words = (f"regelt jetzt in {trv.stufen_text(r['heat'], r['idle'], r['spielraum'])}" if r["mode"] == "stufen"
+                 else REGULATION_WORDS.get(r["mode"], "hat die neue Regelung bekommen"))
         log.info("Thermostat %s %s", self._who(e), words)
         self.refresh(e, full=True)
         return {"message": f"{self._name(e)} {words}."}

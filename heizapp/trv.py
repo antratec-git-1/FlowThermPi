@@ -23,8 +23,15 @@ gelesen am 25.11.2026):
   „Sanft regeln“            smart_temperature_control "ON" / "OFF". Ab Werk OFF: ganz auf, bis die Temperatur
                             erreicht ist, dann ganz zu. ON: die eigene „smarte Regelung“ (PID) öffnet das Ventil nur so
                             weit wie nötig – wie ein normaler Thermostatkopf.
+  „Stufen“ (ab 0.4.11)      heating_valve_position und idle_valve_position (0–100 %: so weit ist das Ventil beim
+                            Heizen höchstens und in den Pausen offen), temperature_accuracy (−1 … −0,2 °C in 0,2-°C-
+                            Schritten: so weit unter dem Sollwert heizt es wieder). Ab Werk 100 %, 0 %, −1 °C. Mit
+                            „sanft“ gelten sie nicht (Zigbee2MQTT: „unavailable“).
 
-Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach (…/get, höchstens alle 30 Minuten).
+Die Regelung hat drei Arten (regulation): „Ab Werk“, „Sanft“ und „Stufen“ – auf und zu wie ab Werk, aber nur so weit,
+wie die Stufe sagt, in den Pausen einen Spalt offen und schon kurz unter dem Sollwert wieder heizend. Welche Werte
+passen, zeigt erst das Ausprobieren am echten Heizkörper. Hat das Thermostat noch nicht gesagt, wie es regelt, fragt
+die App es einmal danach (…/get, höchstens alle 30 Minuten).
 Eine neue Firmware spielt heizapp.zigbee_net ein; die App verlangt dafür mindestens 70 % Batterie (Rat von
 Zigbee2MQTT: ein Update braucht viel Strom). Nach dem Update (1.1.0 → 1.1.3 am 25.11.2026) hatte das echte Thermostat
 „sanft“ vergessen und stand auf Aus. Deshalb merkt sich die App vorher, was eingestellt ist (keep_settings, KEEP), nimmt
@@ -59,9 +66,18 @@ BOOST_MAX = 180            # minutes
 BATTERY_LOW = 20           # per cent: „Batterie bald wechseln“
 OTA_BATTERY = 70           # per cent the battery needs at least for a firmware update
 SMART = "smart_temperature_control"   # "ON": „sanft regeln“ – the thermostat's own smart control (PID)
+HEAT, IDLE, ACCURACY = "heating_valve_position", "idle_valve_position", "temperature_accuracy"
+VALVE = (HEAT, IDLE, ACCURACY)   # „Stufen“: how far the valve opens while heating and in the pauses (per cent), and how
+                                 # far below the setpoint it heats again (°C, negative) – they count only without „sanft“
+FACTORY = {HEAT: 100, IDLE: 0, ACCURACY: -1}   # as from the factory: fully open, fully closed, again 1 °C below
+STEPS = (20, 40, 60, 80, 100)    # Stufe 1 … 5: per cent the valve opens at most while heating
+FIRST = {HEAT: 60, IDLE: 5, ACCURACY: -0.4}    # what „Stufen“ starts with: Stufe 3, a gap open, heating again sooner
+SPANS = (0.2, 0.4, 0.6, 0.8, 1)  # °C below the setpoint at which it may heat again (Zigbee2MQTT: −1 … −0.2, step 0.2)
+REGULATIONS = ("werk", "sanft", "stufen")
 # what the app sets and writes back after a firmware update – in this order: correction, frost protection and „sanft“,
-# then the plan the thermostat is to run, then its mode (with the setpoint only when it is fixed: "heat")
-KEEP = ("local_temperature_calibration", "frost_protection_temperature", SMART, "schedule_group_to_edit",
+# then the valve's positions (only without „sanft“), then the plan the thermostat is to run, then its mode (with the
+# setpoint only when it is fixed: "heat")
+KEEP = ("local_temperature_calibration", "frost_protection_temperature", SMART, *VALVE, "schedule_group_to_edit",
         *(f"weekly_schedule_{d}" for d in DAY_KEYS), "system_mode", "schedule_active_group", "occupied_heating_setpoint")
 CORR_STEP, CORR_MAX = 2, 100   # 0.1 °C: the correction goes in 0.2 °C steps up to ±10 °C
 FAULTS = {"temperature_sensor_issue_detected": "Temperaturfühler gestört",
@@ -134,12 +150,46 @@ def _deg(value: float) -> str:
     return f"{value:g} °C".replace(".", ",")
 
 
+def regulation(values: dict) -> dict:
+    """How the thermostat regulates, from its values: mode „werk“ (as from the factory: fully open until the
+    temperature is reached, then fully closed), „sanft“ (its smart control) or „stufen“ (open and closed as from the
+    factory, but only so far, see VALVE) – None while it has not said. heat and idle in per cent, spielraum in °C
+    below the setpoint, as it reports them (None: not said yet – then they count as from the factory)."""
+    smart, valve = values.get(SMART), {k: _number(values.get(k)) for k in VALVE}
+    factory = all(x is None or _same(x, FACTORY[k]) for k, x in valve.items())
+    mode = "sanft" if smart == "ON" else ("werk" if factory else "stufen") if smart == "OFF" else None
+    return {"mode": mode, "heat": None if valve[HEAT] is None else round(valve[HEAT]),
+            "idle": None if valve[IDLE] is None else round(valve[IDLE]),
+            "spielraum": None if valve[ACCURACY] is None else round(-valve[ACCURACY], 1)}
+
+
+def stufen_text(heat, idle, spielraum) -> str:
+    """„Stufe 3 (60 %, Pausen 5 %, Spielraum 0,4 °C)“ – the valve in „Stufen“, for the log and the page."""
+    inner = [x for x in (None if heat is None else f"{heat:g} %",
+                         None if idle is None else "Pausen zu" if idle == 0 else f"Pausen {idle:g} %",
+                         None if spielraum is None else f"Spielraum {_deg(spielraum)}") if x]
+    head = f"Stufe {STEPS.index(heat) + 1}" if heat in STEPS else "Stufen"
+    return f"{head} ({', '.join(inner)})" if inner else head
+
+
+def _regulation_words(values: dict) -> str | None:
+    """„sanft“, „ab Werk“ or the Stufen – also from only some of the values (what differed after an update)."""
+    smart = values.get(SMART)
+    if smart == "ON":
+        return "sanft"
+    if smart not in (None, "OFF"):
+        return f"Regelung {smart}"
+    known = {k: _number(values.get(k)) for k in VALVE if _number(values.get(k)) is not None}
+    if not known or (len(known) == len(VALVE) and all(_same(x, FACTORY[k]) for k, x in known.items())):
+        return "ab Werk" if known or smart == "OFF" else None
+    r = regulation({SMART: "OFF", **known})
+    return stufen_text(r["heat"], r["idle"], r["spielraum"])
+
+
 def describe(values: dict, plan: str = "Heizplan") -> str:
     """Settings of a thermostat (Zigbee2MQTT's names, see KEEP) in words for the log: „sanft, Automatik, Heizplan,
     Korrektur +0,4 °C, Frostschutz 7 °C“. plan: the word for weekly schedules among them."""
-    words = []
-    if values.get(SMART) is not None:
-        words.append({"ON": "sanft", "OFF": "ab Werk"}.get(values[SMART], f"Regelung {values[SMART]}"))
+    words = [w for w in (_regulation_words(values),) if w]
     mode, setpoint = values.get("system_mode"), _number(values.get("occupied_heating_setpoint"))
     if mode == "heat" and setpoint is not None:
         words.append(f"fest auf {_deg(setpoint)}")
@@ -177,7 +227,7 @@ class Thermostat:
         self.ieee, self.net = ieee, net
         self._lock = threading.Lock()      # one command at a time per thermostat
         self._asked = 0.0                  # time.time() of the last question „are you there?“
-        self._smart_asked = 0.0            # … and of the last one how it regulates
+        self._how_asked = 0.0              # … and of the last one how it regulates
         self._boost_started: float | None = None   # when the app started the boost that runs now
         self._boost_asked = False          # the boost should be over: asked once whether it is
         self._kept: dict | None = None     # a firmware update runs: the settings to write back afterwards (KEEP)
@@ -195,9 +245,10 @@ class Thermostat:
                            "oder hier entfernen.")
         if not st["values"]:
             raise NoAnswer("Das Thermostat hat noch keine Werte gemeldet.")
-        if SMART not in st["values"] and time.time() - self._smart_asked >= QUERY_EVERY:
-            self._smart_asked = time.time()
-            self.net.send(self.ieee, {SMART: ""}, "get")   # not said yet how it regulates: its answer brings it
+        missing = {k: "" for k in (SMART, *VALVE) if k not in st["values"]}
+        if missing and time.time() - self._how_asked >= QUERY_EVERY:
+            self._how_asked = time.time()
+            self.net.send(self.ieee, missing, "get")   # not said yet how it regulates: its answer brings it
         silent = time.time() - st["heard"]
         if silent >= QUERY_EVERY and time.time() - self._asked >= QUERY_EVERY:
             self._asked = time.time()
@@ -251,9 +302,9 @@ class Thermostat:
         return self.read((name,))[name]
 
     def info(self) -> dict:
-        """What the setup shows beyond the AeroFlow's values: battery, radio, faults, how it regulates (smart: True =
-        sanft, False = as from the factory, None = not said yet), firmware update (update: a new one is there; ota:
-        the one that runs or ran, see ZigbeeNet.firmware_job)."""
+        """What the setup shows beyond the AeroFlow's values: battery, radio, faults, how it regulates (see
+        regulation()), firmware update (update: a new one is there; ota: the one that runs or ran, see
+        ZigbeeNet.firmware_job)."""
         st = self.net.thermostat(self.ieee) or {}
         v, device = st.get("values") or {}, st.get("device")
         battery = _number(v.get("battery"))
@@ -263,7 +314,7 @@ class Thermostat:
                 "battery_low": (battery is not None and battery <= BATTERY_LOW) or any(c in BATTERY_FAULTS for c in codes),
                 "signal": _number(v.get("linkquality")), "faults": [FAULTS.get(c, FAULTS["unknown"]) for c in codes],
                 "update": update.get("state") == "available", "ota": self.net.firmware_job(self.ieee),
-                "smart": {"ON": True, "OFF": False}.get(v.get(SMART)), "paired": device is not None,
+                "regulation": regulation(v), "paired": device is not None,
                 "firmware": (device or {}).get("firmware"),   # at once after an update, not only with the next reading
                 "model": " ".join(filter(None, ((device or {}).get("vendor"), (device or {}).get("model")))) or MODEL,
                 "heard": st.get("heard") or None}
@@ -314,10 +365,14 @@ class Thermostat:
             kept = dict(self._kept or {})
         values = (self.net.thermostat(self.ieee) or {}).get("values") or {}
         mode = kept.get("system_mode")
+        valve = {k: kept[k] for k in VALVE if k in kept}
+        if kept.get(SMART) == "ON" or all(_same(x, FACTORY[k]) for k, x in valve.items()):
+            valve = {}   # with „sanft“ they do not count, and as from the factory there is nothing to write back
         plan = {"schedule_group_to_edit": kept["schedule_group_to_edit"],
                 **{k: kept[k] for k in KEEP if k.startswith("weekly_schedule_") and k in kept}} \
             if "schedule_group_to_edit" in kept else {}
         steps = [{k: kept[k] for k in ("local_temperature_calibration", "frost_protection_temperature", SMART) if k in kept},
+                 valve,   # after „sanft“ went off (the step before)
                  plan,
                  {k: kept[k] for k in ("system_mode", "schedule_active_group" if mode == "auto" else "",
                                        "occupied_heating_setpoint" if mode == "heat" else "") if k in kept}]
@@ -343,9 +398,32 @@ class Thermostat:
     def ensure(self, name: str, value) -> None:
         self.set(name, value)   # set() sends nothing if the thermostat has the value already
 
-    def set_smart(self, on: bool) -> None:
-        """„Sanft regeln“ on – or off: fully open until the temperature is reached, then closed (as from the factory)."""
-        self._send({SMART: "ON" if on else "OFF"})
+    def set_regulation(self, mode: str, heat: int | None = None, idle: int | None = None,
+                       spielraum: float | None = None) -> None:
+        """„werk“, „sanft“ or „stufen“ (see regulation). With „stufen“ also how far the valve opens while heating and
+        in the pauses (heat, idle: per cent) and how far below the setpoint it heats again (spielraum, °C); what is not
+        given stays – coming from the factory's values, Stufen start at FIRST. „Sanft“ goes off before the valve's
+        positions are written: with it on, they do not count. ValueError if the valve would be open as far in the
+        pauses as while heating (Zigbee2MQTT recommends less)."""
+        if mode == "sanft":
+            self._send({SMART: "ON"})
+            return
+        values = (self.net.thermostat(self.ieee) or {}).get("values") or {}
+        now = {k: _number(values.get(k)) for k in VALVE}
+        if mode == "werk":
+            want = dict(FACTORY)
+        elif mode == "stufen":
+            given = {HEAT: heat, IDLE: idle, ACCURACY: None if spielraum is None else -spielraum}
+            start = FIRST if all(x is None or _same(x, FACTORY[k]) for k, x in now.items()) else {}
+            want = {**start, **{k: x for k, x in given.items() if x is not None}}
+            after = {k: want.get(k, FACTORY[k] if now[k] is None else now[k]) for k in VALVE}
+            if after[IDLE] >= after[HEAT]:
+                raise ValueError("In den Pausen muss das Ventil weniger weit offen sein als beim Heizen.")
+        else:
+            raise ValueError(f"unbekannte Regelung {mode!r}")
+        self._send({SMART: "OFF"})
+        if want:
+            self._send(want)   # sends nothing if the thermostat has these already
 
     def set_mode(self, mode: str, *, plan: int = 1, boost_minutes: int = 30) -> None:
         """manual, auto (with plan 1 … 3 of the thermostat), boost, boost_off, off – as Heater.set_mode. Every mode but

@@ -74,9 +74,10 @@ input[type="number"] { width: 72px; }
 .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .modes button { padding: 8px 4px; font-size: 14px; }
 .modes button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
-/* two choices side by side, the chosen one marked like a mode button (thermostat: „Sanft“ / „Ab Werk“) */
+/* choices side by side, the chosen one marked like a mode button (thermostat: „Ab Werk“ / „Sanft“ / „Stufen“) */
 .segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-.segmented button { border: 0; border-radius: 0; padding: 5px 16px; font-size: 14px; }
+.segmented button { border: 0; border-radius: 0; padding: 5px 16px; font-size: 14px; white-space: nowrap; }
+@media (max-width: 480px) { .segmented button { padding: 5px 10px; } }
 .segmented button + button { border-left: 1px solid var(--line); }
 .segmented button:hover:not(:disabled):not(.active) { background: var(--bg); }
 .segmented button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
@@ -95,7 +96,15 @@ input[type="number"] { width: 72px; }
 .heater-list { list-style: none; padding: 0; margin: 12px 0 0; border-top: 1px solid var(--line); }
 .heater-list li { display: flex; align-items: center; gap: 8px; padding: 7px 0 0; flex-wrap: wrap; font-size: 14px; }
 .hname { flex: 1; }
-.hvals { font-variant-numeric: tabular-nums; color: var(--muted); }
+/* Einrichtung › Räume, unten: jedes Gerät des Raums mit Ist und Soll (Heizungen, Thermostate, Fühler) */
+.room-devices { list-style: none; padding: 0; margin: 12px 0 0; border-top: 1px solid var(--line); font-size: 14px; }
+.room-devices li { display: grid; grid-template-columns: 9px minmax(0, 1fr) 70px 70px; gap: 0 10px; align-items: baseline;
+                   padding: 7px 0 0; }
+.room-devices li.head { color: var(--muted); font-size: 12px; }
+.room-devices li.head span:nth-child(n+3) { text-align: right; }
+.room-devices .dot { align-self: start; margin-top: 5px; }
+.dkind { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; margin-top: 2px; font-size: 12px; color: var(--muted); }
+.dval { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); flex: none; }
 .dot.on { background: var(--accent); }
 .dot.ok { background: var(--ok); }
@@ -207,10 +216,13 @@ dd { margin: 0; word-break: break-word; }
 .now-temp { font-size: 60px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .now-label { font-size: 18px; color: var(--muted); }
 .tile.is-off .now-temp, .tile.offline .now-temp { color: var(--on-tile-off); }
-.tile-measure { display: grid; gap: 8px; }
-.tile-sensor { margin: 0; justify-self: start; padding: 8px 14px; border-radius: 14px; background: var(--pill);
-               font-size: 18px; color: var(--muted); }
-.tile-sensor b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* every device of the room with „Ist“ and „Soll“, when it has more than one (heaters, thermostats, fresh sensors) */
+.tile-devices { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 18px; align-items: baseline;
+                padding: 10px 14px; border-radius: 14px; background: var(--pill); font-size: 17px; }
+.tile-devices .th { font-size: 15px; color: var(--muted); text-align: right; }
+.tile-devices .dname { overflow-wrap: anywhere; }
+.tile-devices .dname small { display: block; font-size: 15px; color: var(--muted); }
+.tile-devices .dnone { grid-column: span 2; text-align: right; font-size: 15px; color: var(--muted); }
 .tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
 .step { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 6px; min-height: 64px;
         padding: 6px 10px; border-radius: 28px; border: 1.5px solid var(--pill-line); background: var(--pill);

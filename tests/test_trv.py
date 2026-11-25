@@ -95,6 +95,33 @@ class PlanPointsTest(unittest.TestCase):
         self.assertIsNone(_seen(None))
 
 
+class RegulationTest(unittest.TestCase):
+    """How a thermostat regulates, from what it reports – and in words for the log."""
+
+    FACTORY = {"smart_temperature_control": "OFF", "heating_valve_position": 100, "idle_valve_position": 0,
+               "temperature_accuracy": -1}
+
+    def test_three_ways(self):
+        self.assertEqual(trv.regulation(self.FACTORY), {"mode": "werk", "heat": 100, "idle": 0, "spielraum": 1})
+        self.assertEqual(trv.regulation({**self.FACTORY, "smart_temperature_control": "ON"})["mode"], "sanft")
+        stufen = {**self.FACTORY, "heating_valve_position": 60, "idle_valve_position": 5, "temperature_accuracy": -0.4}
+        self.assertEqual(trv.regulation(stufen), {"mode": "stufen", "heat": 60, "idle": 5, "spielraum": 0.4})
+        self.assertEqual(trv.regulation({"smart_temperature_control": "OFF"})["mode"], "werk")   # positions not said yet
+        self.assertIsNone(trv.regulation({})["mode"])
+
+    def test_in_words(self):
+        self.assertEqual(trv.stufen_text(60, 5, 0.4), "Stufe 3 (60 %, Pausen 5 %, Spielraum 0,4 °C)")
+        self.assertEqual(trv.stufen_text(50, 0, 1), "Stufen (50 %, Pausen zu, Spielraum 1 °C)")
+        stufen = {**self.FACTORY, "heating_valve_position": 80, "idle_valve_position": 10, "temperature_accuracy": -0.2,
+                  "system_mode": "auto"}
+        self.assertEqual(trv.describe(stufen), "Stufe 4 (80 %, Pausen 10 %, Spielraum 0,2 °C), Automatik")
+        self.assertEqual(trv.describe({**stufen, "smart_temperature_control": "ON"}), "sanft, Automatik")
+        self.assertEqual(trv.describe(self.FACTORY), "ab Werk")
+        self.assertEqual(trv.describe({k: x for k, x in self.FACTORY.items() if k != "smart_temperature_control"}),
+                         "ab Werk")   # what differed after an update: only the valve's positions
+        self.assertEqual(trv.describe({"idle_valve_position": 0}), "Stufen (Pausen zu)")
+
+
 class Base(unittest.TestCase):
     """Service, ZigbeeNet and a simulated Zigbee2MQTT with one paired thermostat."""
 
@@ -146,12 +173,13 @@ class ThermostatTest(Base):
         h = self.heater()
         self.assertEqual({k: h[k] for k in ("kind", "name", "online", "writable", "room_temp", "setpoint", "mode",
                                             "heating", "window_open", "antifrost", "temp_corr", "plan_slot", "battery",
-                                            "battery_low", "signal", "faults", "update", "ota", "smart", "paired", "host",
-                                            "hostname", "firmware", "serial", "error")},
+                                            "battery_low", "signal", "faults", "update", "ota", "regulation", "paired",
+                                            "host", "hostname", "firmware", "serial", "error")},
                          {"kind": "zigbee", "name": "Thermostat 00AA", "online": True, "writable": True, "room_temp": 20.5,
                           "setpoint": 21.0, "mode": "manual", "heating": True, "window_open": False, "antifrost": 7.0,
                           "temp_corr": 0.0, "plan_slot": 1, "battery": 87, "battery_low": False, "signal": 132,
-                          "faults": [], "update": False, "ota": None, "smart": False, "paired": True, "host": "Zigbee",
+                          "faults": [], "update": False, "ota": None, "paired": True, "host": "Zigbee",
+                          "regulation": {"mode": "werk", "heat": 100, "idle": 0, "spielraum": 1},
                           "hostname": "SONOFF TRV-ZBT", "firmware": "1.1.3", "serial": IEEE, "error": None})
         self.assertIsNotNone(h["last_seen"])
         self.assertEqual(self.conf.read_text(), "")   # thermostats never go into heizungen.conf
@@ -356,34 +384,60 @@ class ThermostatTest(Base):
         self.assertIn("keine AeroFlow-Heizung", str(ctx.exception))
         self.assertEqual(self.z2m.commands, [])
 
-    def test_smart_control_on_and_off(self):
-        self.assertIs(self.heater()["smart"], False)   # as from the factory: fully open, then closed
-        answer = self.service.set_smart(IEEE, True)
+    def test_three_ways_to_regulate(self):
+        regulation = lambda: self.heater()["regulation"]   # noqa: E731
+        self.assertEqual(regulation(), {"mode": "werk", "heat": 100, "idle": 0, "spielraum": 1})   # fully open, then closed
+        answer = self.service.set_regulation(IEEE, {"mode": "sanft"})
         self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt sanft.")
         self.assertEqual(self.sets(), [{"smart_temperature_control": "ON"}])
-        self.assertIs(self.heater()["smart"], True)
-        self.service.set_smart(IEEE, True)   # it does so already: nothing goes out
+        self.service.set_regulation(IEEE, {"mode": "sanft"})   # it does so already: nothing goes out
         self.assertEqual(len(self.sets()), 1)
-        answer = self.service.set_smart(IEEE, False)
+        answer = self.service.set_regulation(IEEE, {"mode": "stufen"})   # the first time: Stufe 3, a gap, 0.4 °C
+        self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt in Stufe 3 (60 %, Pausen 5 %, Spielraum 0,4 °C).")
+        self.assertEqual(self.sets()[1:], [{"smart_temperature_control": "OFF"},   # „sanft“ goes off first, then the valve
+                                           {"heating_valve_position": 60, "idle_valve_position": 5,
+                                            "temperature_accuracy": -0.4}])
+        self.assertEqual(regulation(), {"mode": "stufen", "heat": 60, "idle": 5, "spielraum": 0.4})
+        for change in ({"heat": 80}, {"idle": 10}, {"spielraum": 0.2}):
+            self.service.set_regulation(IEEE, {"mode": "stufen", **change})
+        self.assertEqual(self.sets()[3:], [{"heating_valve_position": 80}, {"idle_valve_position": 10},
+                                           {"temperature_accuracy": -0.2}])
+        self.service.set_regulation(IEEE, {"mode": "sanft"})
+        answer = self.service.set_regulation(IEEE, {"mode": "stufen"})   # back to its Stufen: only „sanft“ goes off
+        self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt in Stufe 4 (80 %, Pausen 10 %, Spielraum 0,2 °C).")
+        self.assertEqual(self.sets()[6:], [{"smart_temperature_control": "ON"}, {"smart_temperature_control": "OFF"}])
+        answer = self.service.set_regulation(IEEE, {"mode": "werk"})
         self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt wie ab Werk (ganz auf, ganz zu).")
-        self.assertEqual(self.sets()[-1], {"smart_temperature_control": "OFF"})
-        with self.assertRaises(ActionError):
-            self.service.set_smart(IEEE, "ja")
+        self.assertEqual(self.sets()[8:], [{"heating_valve_position": 100, "idle_valve_position": 0,
+                                            "temperature_accuracy": -1}])
+        self.assertEqual(regulation(), {"mode": "werk", "heat": 100, "idle": 0, "spielraum": 1})
+        for wrong in ({}, {"mode": "aus"}, {"mode": "sanft", "heat": 60}, {"mode": "stufen", "heat": 120},
+                      {"mode": "stufen", "heat": True}, {"mode": "stufen", "idle": "5"}, {"mode": "stufen", "spielraum": 0.3}):
+            with self.assertRaises(ActionError) as ctx:
+                self.service.set_regulation(IEEE, wrong)
+            self.assertEqual((ctx.exception.status, str(ctx.exception)), (400, "Ungültige Anfrage."), wrong)
+        with self.assertRaises(ActionError) as ctx:   # in the pauses less open than while heating, as Zigbee2MQTT advises
+            self.service.set_regulation(IEEE, {"mode": "stufen", "heat": 20, "idle": 20})
+        self.assertEqual((ctx.exception.status, str(ctx.exception)),
+                         (400, "In den Pausen muss das Ventil weniger weit offen sein als beim Heizen."))
+        self.assertEqual(len(self.sets()), 9)   # none of these went out
         self.z2m.asleep.add(IEEE)
         with mock.patch.object(trv.Thermostat, "answer", 0.3), self.assertRaises(ActionError) as ctx:
-            self.service.set_smart(IEEE, True)
+            self.service.set_regulation(IEEE, {"mode": "sanft"})
         self.assertEqual((ctx.exception.status, str(ctx.exception)), (502, "Nicht übernommen: " + trv.NOT_ANSWERED))
-        self.assertIs(self.heater()["smart"], False)
+        self.assertEqual(regulation()["mode"], "werk")
         self.assertEqual(self.z2m.refused, [])
 
-    def test_smart_control_not_said_yet_is_asked_for(self):
+    def test_how_it_regulates_not_said_yet_is_asked_for(self):
         with self.net._lock:   # the thermostat has not reported how it regulates
-            self.net._states[IEEE]["values"].pop("smart_temperature_control")
-        self.assertIsNone(self.heater()["smart"])
+            for key in (trv.SMART, *trv.VALVE):
+                self.net._states[IEEE]["values"].pop(key)
+        self.assertIsNone(self.heater()["regulation"]["mode"])
         self.service.poll_all()
         gets = lambda: [b for i, k, b in self.z2m.commands if k == "get"]   # noqa: E731
-        self.assertEqual(until(gets), [{"smart_temperature_control": ""}])
-        until(lambda: self.heater()["smart"] is False)
+        self.assertEqual(until(gets), [{"smart_temperature_control": "", "heating_valve_position": "",
+                                        "idle_valve_position": "", "temperature_accuracy": ""}])
+        until(lambda: self.heater()["regulation"]["mode"] == "werk")
         self.service.poll_all()
         self.assertEqual(len(gets()), 1)
 
@@ -484,7 +538,7 @@ class ThermostatTest(Base):
         self.service.update_room(room, {"plan": plan})
         self.service.send_plan(room)
         self.service.set_mode("room", room, "auto")
-        self.service.set_smart(IEEE, True)
+        self.service.set_regulation(IEEE, {"mode": "sanft"})
         self.service.calibrate(IEEE, {"correction": 0.4})
         self.available()
         factory = "00:00/16 06:00/21 22:00/16"   # as the real one (1.1.0 → 1.1.3): „ab Werk“ and off – here its plan too
@@ -494,12 +548,12 @@ class ThermostatTest(Base):
         with mock.patch("heizapp.service.RESTORE_SETTLE", 0.5), self.assertLogs("heizapp", "INFO") as said:
             self.service.update_firmware(IEEE)
             until(lambda: self.ota().get("state") == "done", seconds=10)
-            until(lambda: self.heater()["smart"] is False)   # forgotten
+            until(lambda: self.heater()["regulation"]["mode"] == "werk")   # forgotten
             self.service.poll_all()   # it waits a minute (here 0.5 s) for the thermostat to settle
             self.assertEqual((self.heater()["restore"], len(self.sets())), ({"state": "waiting", "text": None}, before))
             time.sleep(0.5)
             h = self.restored()
-        self.assertEqual((h["smart"], h["mode"], h["temp_corr"], h["setpoint"]), (True, "auto", 0.4, 22.0))
+        self.assertEqual((h["regulation"]["mode"], h["mode"], h["temp_corr"], h["setpoint"]), ("sanft", "auto", 0.4, 22.0))
         text = "sanft, Automatik, Heizplan, Korrektur +0,4 °C, Frostschutz 7 °C"
         self.assertEqual(h["restore"], {"state": "done", "text": text})
         self.assertEqual(self.sets()[before:], [
@@ -513,6 +567,25 @@ class ThermostatTest(Base):
                       "vorher: ab Werk, aus, einen anderen Heizplan", logged)
         self.assertEqual(self.z2m.refused, [])
 
+    def test_stufen_come_back_after_a_firmware_update(self):
+        self.service.set_regulation(IEEE, {"mode": "stufen", "heat": 80})
+        self.available()
+        self.z2m.ota_forgets = {"heating_valve_position": 100, "idle_valve_position": 0, "temperature_accuracy": -1}
+        before = len(self.sets())
+        with mock.patch("heizapp.service.RESTORE_SETTLE", 0), self.assertLogs("heizapp", "INFO") as said:
+            self.service.update_firmware(IEEE)
+            until(lambda: self.ota().get("state") == "done", seconds=10)
+            h = self.restored()
+        self.assertEqual(h["regulation"], {"mode": "stufen", "heat": 80, "idle": 5, "spielraum": 0.4})
+        self.assertEqual(self.sets()[before:], [   # „sanft“ off (it is), then the valve's positions, plan and mode
+            {"local_temperature_calibration": 0, "frost_protection_temperature": 7, "smart_temperature_control": "OFF"},
+            {"heating_valve_position": 80, "idle_valve_position": 5, "temperature_accuracy": -0.4},
+            {"schedule_group_to_edit": "1", **{f"weekly_schedule_{d}": "00:00/16 06:00/21 22:00/16" for d in DAYS}},
+            {"system_mode": "heat", "occupied_heating_setpoint": 21}])
+        self.assertIn("zurückgestellt: Stufe 4 (80 %, Pausen 5 %, Spielraum 0,4 °C), fest auf 21 °C, Heizplan, Korrektur "
+                      "±0,0 °C, Frostschutz 7 °C – es meldete vorher: ab Werk", "\n".join(said.output))
+        self.assertEqual(self.z2m.refused, [])
+
     def test_what_is_set_during_the_update_comes_back(self):
         self.available()
         self.z2m.ota_every = 0.3
@@ -522,7 +595,7 @@ class ThermostatTest(Base):
             self.assertEqual(self.ota()["state"], "running")
             until(lambda: self.ota().get("state") == "done", seconds=10)
             h = self.restored()
-        self.assertEqual((h["mode"], h["setpoint"], h["smart"]), ("manual", 19.5, False))
+        self.assertEqual((h["mode"], h["setpoint"], h["regulation"]["mode"]), ("manual", 19.5, "werk"))
         self.assertEqual(self.sets()[-1], {"system_mode": "heat", "occupied_heating_setpoint": 19.5})
         self.assertIn("zurückgestellt: ab Werk, fest auf 19,5 °C, Heizplan, Korrektur ±0,0 °C, Frostschutz 7 °C – es "
                       "meldete vorher: aus", "\n".join(said.output))
@@ -609,7 +682,8 @@ class MixedRoomTest(Base):
         self.assertEqual((ctx.exception.status, str(ctx.exception)),
                          (409, "Gerade wird die Firmware von „Thermostat 00AA“ eingespielt – bitte warten, bis sie fertig "
                                "ist."))
-        for call in (lambda: self.service.update_firmware("91110001"), lambda: self.service.set_smart("91110001", True)):
+        for call in (lambda: self.service.update_firmware("91110001"),
+                     lambda: self.service.set_regulation("91110001", {"mode": "sanft"})):
             with self.assertRaises(ActionError) as ctx:
                 call()
             self.assertEqual((ctx.exception.status, str(ctx.exception)), (409, "Das geht nur beim Thermostat."))
@@ -663,21 +737,21 @@ class ApiTest(Base):
         self.assertEqual(next(r for r in state["rooms"] if r["id"] == room)["heaters"], [])
         self.assertNotIn(IEEE, json.loads((self.tmp / "data.json").read_text())["heaters"])
 
-    def test_smart_and_firmware(self):
-        answer = self.call("POST", f"/api/heaters/{IEEE}/smart", {"on": True})
+    def test_regulation_and_firmware(self):
+        answer = self.call("POST", f"/api/heaters/{IEEE}/regulation", {"mode": "sanft"})
         self.assertEqual(answer["message"], "Thermostat 00AA regelt jetzt sanft.")
-        self.call("POST", f"/api/heaters/{IEEE}/smart", {"on": "ja"}, expect=400)
+        self.call("POST", f"/api/heaters/{IEEE}/regulation", {"mode": "stufen", "heat": 120}, expect=400)
         self.call("POST", f"/api/heaters/{IEEE}/firmware", expect=409)   # nothing new for it
         self.z2m.report(IEEE, update={"state": "available", "installed_version": 4353, "latest_version": 4354})
         until(lambda: self.net.thermostat(IEEE)["values"]["update"]["state"] == "available")
         self.assertIn("10 bis 100 Minuten", self.call("POST", f"/api/heaters/{IEEE}/firmware")["message"])
         heater = lambda: next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == IEEE)   # noqa: E731
         until(lambda: (heater()["ota"] or {}).get("state") == "done", seconds=10)
-        self.assertIs(until(lambda: heater()["smart"] is False), True)   # the thermostat forgot „sanft“ …
+        self.assertIs(until(lambda: heater()["regulation"]["mode"] == "werk"), True)   # it forgot „sanft“ …
         with mock.patch("heizapp.service.RESTORE_SETTLE", 0):
             self.service.poll_all()   # … the app's poller writes it back
             h = until(lambda: (h := heater())["restore"]["state"] == "done" and h)
-        self.assertIs(h["smart"], True)
+        self.assertEqual(h["regulation"]["mode"], "sanft")
         self.assertEqual(h["restore"]["text"], "sanft, fest auf 21 °C, Heizplan, Korrektur ±0,0 °C, Frostschutz 7 °C")
 
 

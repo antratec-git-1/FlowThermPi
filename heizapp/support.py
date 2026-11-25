@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import APP_NAME, __version__, logs
+from . import APP_NAME, __version__, logs, trv
 from .service import ActionError, Service
 
 log = logging.getLogger(__name__)
@@ -98,6 +98,14 @@ def _ota_text(ota) -> str:
     if ota.get("state") == "done":
         return " (neue Firmware eingespielt)"
     return f" (Einspielen hat nicht geklappt: {ota.get('message') or '?'})"
+
+
+def _regulation_text(r) -> str:
+    """How a thermostat regulates, for the overview (see trv.regulation): „regelt sanft“, „regelt in Stufe 3 (…)“."""
+    r = r if isinstance(r, dict) else {}
+    if r.get("mode") == "stufen":
+        return "regelt in " + trv.stufen_text(r.get("heat"), r.get("idle"), r.get("spielraum"))
+    return {"sanft": "regelt sanft", "werk": "regelt ab Werk (ganz auf, ganz zu)"}.get(r.get("mode"), "Regelung ?")
 
 
 def _when(text) -> str:
@@ -444,8 +452,7 @@ class Support:
                          f"Batterie {h['battery']} %" if h["battery"] is not None else "Batterie ?",
                          f"Funk {h['signal']}" if h["signal"] is not None else "Funk ?"]
                 extra += [f"Störung: {', '.join(h['faults'])}"] if h["faults"] else []
-                extra.append({True: "regelt sanft", False: "regelt ab Werk (ganz auf, ganz zu)"}.get(h.get("smart"),
-                                                                                                  "Regelung ?"))
+                extra.append(_regulation_text(h.get("regulation")))
             else:
                 extra = [f"Token: {'ja' if h['writable'] else 'nein (nur Anzeige)'}"]
             if h["firmware"]:

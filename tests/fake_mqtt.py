@@ -276,7 +276,8 @@ def trv_state(temperature: float = 20.5, setpoint: float = 21, battery: int = 87
             "temporary_mode_mode": "disabled", "temporary_mode_duration": 30, "temporary_mode_target_temperature": 30,
             "schedule_active_group": "1", "schedule_group_to_edit": "1", "weekly_schedule_status": "success",
             **{f"weekly_schedule_{day}": "00:00/16 06:00/21 22:00/16" for day in DAYS},
-            "smart_temperature_control": "OFF", "temperature_sensor_select": "local_temperature",
+            "smart_temperature_control": "OFF", "heating_valve_position": 100, "idle_valve_position": 0,
+            "temperature_accuracy": -1, "temperature_sensor_select": "local_temperature",
             "update": {"state": "idle", "installed_version": 4353, "latest_version": 4353}}
 
 
@@ -452,6 +453,16 @@ class FakeZ2M:
                         new[key] = value
                     else:
                         error = f"Invalid value {value} for {key}, expected ON or OFF"
+                elif key in ("heating_valve_position", "idle_valve_position"):
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100:
+                        new[key] = value
+                    else:
+                        error = f"{key} {value} out of range"
+                elif key == "temperature_accuracy":
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and -1 <= value <= -0.2:
+                        new[key] = round(value, 1)
+                    else:
+                        error = f"{key} {value} out of range"
                 else:
                     error = f"No converter available for '{key}'"
                 if error:

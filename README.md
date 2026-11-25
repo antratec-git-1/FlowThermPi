@@ -27,9 +27,11 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   kurz „✓ gesendet“. Steht das Gerät auf dunkel, wird auch die Seite dunkel, mit warm leuchtenden Zahlen. Die Schrift
   ist [Atkinson Hyperlegible Next](https://github.com/googlefonts/atkinson-hyperlegible-next), gemacht für schwache
   Augen; sie liegt in der App, nichts wird aus dem Internet geladen.
-- **Raumfühler:** Hat der Raum einen [Fühler](#raumfühler-shelly-pill), steht unter der großen Zahl zusätzlich
-  „Fühler: 21,3 °C“ (beim DHT22 mit Luftfeuchte); die große Zahl heißt dann „an der Heizung“. Ein Messwert, der älter
-  als 15 Minuten ist, erscheint dort nicht.
+- **Raumtemperatur und Geräte** (ab 0.4.11): Die große Zahl („im Raum“) kommt vom [Fühler](#raumfühler-shelly-pill)
+  des Raums, wenn er in den letzten 15 Minuten gemessen hat (bei mehreren Fühlern ihr Mittel); sonst ist sie das
+  Mittel der erreichbaren Heizungen. Hat der Raum mehr als ein Gerät, steht unten auf der Kachel eine kleine Liste mit
+  **Ist** und **Soll** jedes Geräts: Heizungen, Thermostate und Fühler (beim DHT22 mit Luftfeuchte). Ausgeschaltete
+  Geräte haben „aus“, Fühler kein Soll. Ein Fühler ohne frischen Messwert fehlt in der Liste.
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 - **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
@@ -48,7 +50,10 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   (Solltemperatur, Manuell / Automatik / Boost / Aus). Im Tab „Räume“ oben **+ Raum**, auf jeder
   Raum-Kachel **Bearbeiten**: Name und die Heizungen des Raums ankreuzen (eine Heizung, die schon in
   einem anderen Raum ist, wechselt dabei den Raum); dort auch „Raum löschen“. Kommt eine Heizung
-  neu in einen Raum, zeigt die Kachel an, dass der Heizplan noch gesendet werden muss.
+  neu in einen Raum, zeigt die Kachel an, dass der Heizplan noch gesendet werden muss. Unten auf jeder Raum-Kachel
+  steht ab 0.4.11 eine Liste aller Geräte des Raums mit **Ist** und **Soll**: Heizungen und Thermostate (mit Hinweisen
+  wie Automatik, Boost, „Fenster offen“ oder „Batterie schwach“) und Fühler (mit der Uhrzeit ihrer letzten Messung).
+  Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat.
 - **Heizpläne:** in der App verwalten (bis zu 10 Zeitfenster pro Tag, Viertelstunden-Raster)
   und an die Heizungen eines Raums **senden**. Die Heizung führt den Plan im Modus
   „Automatik“ selbst aus – auch wenn die App aus ist.
@@ -78,7 +83,7 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
   aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen.
   Angelernte Thermostate sind Heizungen der App wie die AeroFlow: Raum, Temperatur, Ein/Aus, Boost, Heizplan,
-  Kalibrierung, dazu „Sanft regeln“ und neue Firmware per Knopf – siehe
+  Kalibrierung, dazu drei Arten zu regeln (Ab Werk, Sanft, Stufen) und neue Firmware per Knopf – siehe
   [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
@@ -366,7 +371,7 @@ Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Hei
 *Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
 Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten); ab 0.4.9
 regeln sie auf Wunsch sanft und bekommen neue Firmware per Knopf; ab 0.4.10 stellt die App danach ihre Einstellungen
-wieder ein. Noch nicht dabei: Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für ein
+wieder ein; ab 0.4.11 gibt es als dritte Art zu regeln die „Stufen“. Noch nicht dabei: Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für ein
 Thermostat.
 
 - **Was der Pi lädt:**
@@ -456,17 +461,26 @@ Thermostat.
 - **Erreichbar** ist ein Thermostat, solange es sich in den letzten 2 Stunden gemeldet hat. Nach 30 Minuten Stille
   fragt die App einmal nach seiner Temperatur. Schweigt es länger, hilft meist ein Druck auf die mittlere Taste.
 - Die Uhr der Thermostate stellt Zigbee2MQTT.
-- **Sanft regeln** (ab 0.4.9, *Einrichtung › Geräte*, Zeile „Regelung“ mit den Knöpfen „Sanft“ und „Ab Werk“): Ab Werk
-  öffnet das Thermostat das Ventil ganz, bis die Temperatur erreicht ist, und schließt es dann ganz. „Sanft“ schaltet
-  seine eigene „smarte Regelung“ ein: Es öffnet das Ventil nur so weit wie nötig – wie ein normaler Thermostatkopf.
-  Hat das Thermostat noch nicht gesagt, wie es regelt, fragt die App es einmal danach.
+- **Regelung** (*Einrichtung › Geräte*, Zeile „Regelung“ mit den Knöpfen „Ab Werk“, „Sanft“ und „Stufen“). Hat das
+  Thermostat noch nicht gesagt, wie es regelt, fragt die App es danach (höchstens alle 30 Minuten).
+  - **Ab Werk:** Das Thermostat öffnet das Ventil ganz, bis die Temperatur erreicht ist, und schließt es dann ganz.
+  - **Sanft** (ab 0.4.9) schaltet seine eigene „smarte Regelung“ ein: Es öffnet das Ventil nur so weit wie nötig – wie
+    ein normaler Thermostatkopf.
+  - **Stufen** (ab 0.4.11): Es bleibt beim Wechsel zwischen auf und zu, aber sanfter; die Temperatur hält das
+    Thermostat weiter selbst. **Stufe** 1–5 legt fest, wie weit das Ventil beim Heizen höchstens aufgeht (20, 40, 60,
+    80 oder 100 %). **In Pausen** ist es ganz zu oder bleibt einen Spalt offen (5, 10 oder 15 %). **Spielraum** sagt,
+    wie weit die Temperatur unter das Ziel fallen darf, bevor es wieder aufmacht: 1 °C wie ab Werk oder enger 0,6, 0,4
+    oder 0,2 °C. Beim ersten Mal stellt die App Stufe 3 (60 %), Pausen 5 % und Spielraum 0,4 °C ein. Welche Werte am
+    besten passen, muss man ausprobieren. Mit „Sanft“ gelten die Stufen nicht; wer danach wieder „Stufen“ drückt,
+    bekommt die zuletzt eingestellten Werte. „Ab Werk“ stellt 100 %, zu und 1 °C wieder her.
 - **Firmware einspielen** (ab 0.4.9, Zeile „Firmware“): Liegt bei Zigbee2MQTT eine neue Firmware bereit, spielt der
   Knopf sie über Funk ein. Das dauert 10 bis 100 Minuten; das Thermostat heizt dabei weiter und startet am Ende kurz
   neu. Die Seite zeigt, wie weit es ist. Es geht immer nur ein Thermostat zur Zeit und nur mit mindestens 70 %
   Batterie, wie Zigbee2MQTT es rät.
 - **Nach dem Update** (ab 0.4.10): Das echte Thermostat hatte nach seinem Update „sanft“ vergessen und stand auf Aus.
-  Deshalb merkt sich die App vor dem Einspielen Regelung, Aus/Automatik/Ein, Heizplan, Korrektur und Frostschutz –
-  auch was während des Updates in der App eingestellt wird – und stellt alles eine Minute nach dem Update wieder ein.
+  Deshalb merkt sich die App vor dem Einspielen Regelung (ab 0.4.11 auch die Stufen), Aus/Automatik/Ein, Heizplan,
+  Korrektur und Frostschutz – auch was während des Updates in der App eingestellt wird – und stellt alles eine Minute
+  nach dem Update wieder ein.
   Klappt das nicht, versucht sie es noch zweimal im Abstand von 5 Minuten; dann steht auf der Seite, was zu prüfen
   ist. Das Protokoll sagt, was das Thermostat nach dem Update gemeldet hat und was die App zurückgestellt hat.
 

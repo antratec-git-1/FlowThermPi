@@ -50,7 +50,8 @@ THERMOSTAT_KEYS = frozenset({
     "frost_protection_temperature", "open_window", "open_window_detected", "child_lock", "battery", "linkquality",
     "fault_status", "temporary_mode_mode", "temporary_mode_duration", "temporary_mode_target_temperature",
     "schedule_active_group", "schedule_group_to_edit", "weekly_schedule_status", "temperature_sensor_select",
-    "external_temperature_input", "smart_temperature_control", "update", "last_seen",
+    "external_temperature_input", "smart_temperature_control", "heating_valve_position", "idle_valve_position",
+    "temperature_accuracy", "update", "last_seen",
     *(f"weekly_schedule_{day}" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
                                            "sunday"))})
 UPDATE_KEYS = ("state", "installed_version", "latest_version", "progress", "remaining")
