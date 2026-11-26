@@ -1,5 +1,6 @@
 """Tests for the Zigbee plugs with power metering (like the SONOFF S60ZBTPF): recognised in the Zigbee network, assigned
-to an AeroFlow under Strom und Kosten, measuring while it heats, switched on again from the tile.
+to an AeroFlow at the plug (Geräte › Steckdosen; until 0.4.14 under Strom und Kosten, which PUT /api/costs still takes),
+measuring while it heats, switched on again from the tile.
 
 Mosquitto and Zigbee2MQTT are played by tests/fake_mqtt.py, the AeroFlow heaters by tests/fake_heater.py – nothing real
 is reached. How often and how exactly the real plug reports is to be checked on the device.
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections import deque
 import sys
 import tempfile
 import threading
@@ -169,6 +171,34 @@ class AssignTest(Base):
         self.assertEqual(self.service.store.data["heaters"][AERO]["plug"], PLUG)   # nothing changed
         self.assign({AERO: "", SECOND: PLUG})   # moved in one go
         self.assertEqual([p["heater"] for p in self.service.state()["plugs"]], [SECOND, None])
+
+    def test_choosing_the_heater_at_the_plug(self):
+        """Geräte › Steckdosen (since 0.4.15): the plug picks its heater, like a sensor its room."""
+        self.assertEqual(self.service.set_plug_heater(PLUG, {"heater": AERO}),
+                         {"message": "Steckdose 00CC gehört jetzt zu Heat4U-911001."})
+        until(lambda: self.net.plug(PLUG)["power_on_behavior"] == "on")   # after a power cut it comes on again
+        self.assertEqual(self.sets(), [{"power_on_behavior": "on"}])
+        self.assertEqual(self.heater()["plug"]["id"], PLUG)
+        self.service._plug_samples[AERO] = deque([1300.0])   # measured while it hung on PLUG
+        self.service.set_plug_heater(PLUG, {"heater": SECOND})   # moved: AERO hangs on no plug any more
+        self.assertEqual([p["heater"] for p in self.service.state()["plugs"]], [SECOND, None])
+        self.assertIsNone(self.heater()["plug"])
+        self.assertNotIn(AERO, self.service._plug_samples)   # what it measured belonged to that plug
+        self.service.set_plug_heater(SPARE, {"heater": SECOND})   # a heater hangs on one plug: PLUG is free again
+        self.assertEqual([p["heater"] for p in self.service.state()["plugs"]], [None, SECOND])
+        until(lambda: self.net.plug(SPARE)["power_on_behavior"] == "on")
+        self.assertEqual(self.service.set_plug_heater(SPARE, {"heater": ""}),
+                         {"message": "Steckdose 00DD gehört zu keiner Heizung mehr."})
+        self.assertNotIn("plug", self.service.store.data["heaters"][SECOND])
+        for plug_id, body, status, message in [
+                (PLUG, {"heater": TRV}, 400, "Ein Thermostat hängt an keiner Steckdose – es hat Batterien."),
+                (TRV, {"heater": AERO}, 404, "Diese Steckdose kennt die App nicht (mehr)."),
+                ("0x8c65a3fffe1d0fff", {"heater": AERO}, 404, "Diese Steckdose kennt die App nicht (mehr)."),
+                (PLUG, {"heater": "92229999"}, 404, "Heizung nicht gefunden")]:
+            with self.assertRaises(ActionError) as ctx:
+                self.service.set_plug_heater(plug_id, body)
+            self.assertEqual((ctx.exception.status, str(ctx.exception)), (status, message))
+        self.assertEqual([p["heater"] for p in self.service.state()["plugs"]], [None, None])   # nothing changed
 
     def test_saved_while_zigbee2mqtt_is_off(self):
         self.z2m.stop()

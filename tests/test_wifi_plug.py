@@ -1,5 +1,6 @@
-"""Tests for the WLAN plugs with power metering (Shelly, e.g. Plug M Gen3): found by „Steckdosen suchen“, taken over,
-assigned to an AeroFlow under Strom und Kosten, measuring while it heats, switched on again from the tile.
+"""Tests for the WLAN plugs with power metering (Shelly, e.g. Plug M Gen3): found by the search, taken over, assigned
+to an AeroFlow at the plug (Geräte › Steckdosen; until 0.4.14 under Strom und Kosten, which PUT /api/costs still takes),
+measuring while it heats, switched on again from the tile.
 
 The plugs are played by tests/fake_shelly.py – as Shelly's documentation describes them –, the heaters by
 tests/fake_heater.py; nothing real is reached. How the real plug reports is to be checked on the device.
@@ -112,8 +113,7 @@ class SearchTest(Base):
         with self.assertRaises(ActionError) as ctx:   # not found by a search yet
             self.service.add_wifi_plug({"plug": PLUG})
         self.assertEqual(ctx.exception.status, 404)
-        self.assertEqual(self.adopt()["message"], "WLAN-Steckdose 0001 ist in der App. Zu ihrer Heizung gehört sie, "
-                                                  "sobald du sie unter „Räume“ › „Strom und Kosten“ auswählst.")
+        self.assertEqual(self.adopt()["message"], "WLAN-Steckdose 0001 ist in der App.")
         meta = self.saved()[PLUG]
         self.assertEqual({k: meta[k] for k in ("host", "model", "mac", "device_name")},
                          {"host": f"127.0.0.1:{self.plug.port}", "model": "Shelly Plug M Gen3", "mac": "AABBCCDD0001",
@@ -153,6 +153,26 @@ class AssignTest(Base):
         self.assign({AERO: ""})
         self.assertIsNone(self.heater()["plug"])
         self.assertIn(PLUG, self.saved())   # still a plug of the app, for another heater
+
+    def test_choosing_the_heater_at_the_plug(self):
+        """Geräte › Steckdosen (since 0.4.15): the plug picks its heater, like a sensor its room."""
+        self.adopt()
+        self.assertEqual(self.service.set_plug_heater(PLUG, {"heater": AERO}),
+                         {"message": "WLAN-Steckdose 0001 gehört jetzt zu Heat4U-911001."})
+        self.assertEqual(self.plug.calls, [("Switch.SetConfig", {"id": 0, "config": {"initial_state": "on"}})])
+        self.assertEqual(self.heater()["plug"]["id"], PLUG)
+        self.adopt(SPARE)
+        self.service.set_plug_heater(SPARE, {"heater": AERO})   # a heater hangs on one plug: the first one is free again
+        self.assertEqual([(p["id"], p["heater"]) for p in self.service.state()["plugs"]], [(PLUG, None), (SPARE, AERO)])
+        self.assertEqual(self.spare.initial_state, "on")
+        self.plug.close()   # unplugged: the choice is saved anyway, with a warning
+        self.assertEqual(self.service.set_plug_heater(PLUG, {"heater": SECOND}), {
+            "message": "Gespeichert. WLAN-Steckdose 0001 war gerade nicht zu erreichen – bitte später noch einmal "
+                       "auswählen, damit sie nach einem Stromausfall wieder angeht.", "warning": True})
+        self.assertEqual(self.service.store.data["heaters"][SECOND]["plug"], PLUG)
+        with self.assertRaises(ActionError) as ctx:   # never taken over
+            self.service.set_plug_heater(LOCKED, {"heater": AERO})
+        self.assertEqual(ctx.exception.status, 404)
 
     def test_saved_while_the_plug_is_unplugged(self):
         self.adopt()
@@ -262,7 +282,8 @@ class ApiTest(Base):
         self.call("POST", "/api/plugs", {"plug": PLUG})
         self.call("PUT", "/api/costs", {"price_ct": "", "plugs": {AERO: PLUG}})
         self.call("PUT", "/api/setup/pin", {"pin": "1234"})
-        for method, path in [("POST", "/api/plugs/discover"), ("POST", "/api/plugs"), ("DELETE", f"/api/plugs/{PLUG}")]:
+        for method, path in [("POST", "/api/plugs/discover"), ("POST", "/api/plugs"), ("DELETE", f"/api/plugs/{PLUG}"),
+                             ("PUT", f"/api/plugs/{PLUG}/heater")]:
             self.assertTrue(self.call(method, path, {"plug": SPARE}, expect=403)["pin_required"])
         self.plug.on = False   # someone pressed the plug's button
         self.service.poll_all()
@@ -289,7 +310,8 @@ class ApiTest(Base):
     def test_removing_a_wifi_plug(self):
         self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
         self.call("POST", "/api/plugs", {"plug": PLUG})
-        self.call("PUT", "/api/costs", {"price_ct": "", "plugs": {AERO: PLUG}})
+        self.assertEqual(self.call("PUT", f"/api/plugs/{PLUG}/heater", {"heater": AERO})["message"],
+                         "WLAN-Steckdose 0001 gehört jetzt zu Heat4U-911001.")
         answer = self.call("DELETE", f"/api/plugs/{PLUG}")
         self.assertEqual(answer["message"], "Die Steckdose ist aus der App entfernt. Sie selbst bleibt, wie sie ist – an "
                                             "oder aus.")

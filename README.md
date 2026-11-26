@@ -71,10 +71,10 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **Strom und Kosten** (Tab „Räume“, ganz unten, ab 0.4.13): einen Strompreis für den Haushalt (ct/kWh) und die
   Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter zeigt Strom und Kosten auch
   auf der Startseite (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
-  **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Ab 0.4.14 bekommt jede AeroFlow hier auch ihre
-  Steckdose mit Strommessung – [Zigbee](#zigbee-steckdosen-mit-strommessung) oder
-  [WLAN](#wlan-steckdosen-mit-strommessung) („an der Steckdose“); darunter steht, was sie misst, und
-  **Übernehmen** trägt die beim Heizen gemessene Leistung ein.
+  **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Hängt eine AeroFlow an einer Steckdose mit
+  Strommessung ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung), ab
+  0.4.14), steht hier, was sie misst, und **Übernehmen** trägt die beim Heizen gemessene Leistung ein. Welche
+  Steckdose zu welcher Heizung gehört, wählt man ab 0.4.15 an der Steckdose (Tab „Geräte“ → „Steckdosen“).
 - **Heizpläne:** in der App verwalten (bis zu 10 Zeitfenster pro Tag, Viertelstunden-Raster)
   und an die Heizungen eines Raums **senden**. Die Heizung führt den Plan im Modus
   „Automatik“ selbst aus – auch wenn die App aus ist.
@@ -84,13 +84,19 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   mindestens 5 Minuten läuft), sonst mit dem aktuellen Wert. „Korrektur auf 0 setzen“ nimmt sie zurück.
   Richtig messen: Thermometer in der Raummitte auf 1–1,3 m Höhe, Raum seit 1–2 Stunden auf
   Solltemperatur, über 30–60 Minuten mehrmals ablesen und mitteln.
-- **Raumfühler** (Tab „Geräte“ → „Fühler“): Shelly Pills im Heimnetz suchen, ihre Fühler einem Raum zuweisen und
+- **Raumfühler** (Tab „Geräte“ → „Raumfühler“): Shelly Pills im Heimnetz suchen, ihre Fühler einem Raum zuweisen und
   einstellen, was in der Pill steckt (DS18B20 oder DHT22). Der Fühler zeigt seine Temperatur neben der der Heizungen
   seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Ein **Kalibrierlauf** (zum Beispiel einen Tag
   lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
-- **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt,
-  „heute … kWh“ und ihrer Heizung; WLAN-Steckdosen (Shelly) hier suchen, übernehmen und entfernen. Siehe
+- **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt und
+  „heute … kWh“; an jeder Steckdose wählt man ihre Heizung (ab 0.4.15) und kann sie entfernen. Siehe
   [WLAN-Steckdosen](#wlan-steckdosen-mit-strommessung) und [Zigbee-Steckdosen](#zigbee-steckdosen-mit-strommessung).
+- **Gerät hinzufügen** (Tab „Geräte“, ab 0.4.15): ein Knopf **+ Gerät hinzufügen** für Heizung, Thermostat, Raumfühler
+  und Steckdose, in vier Schritten: *Was?* · *So geht's* (eine kurze Anleitung; die App sucht dabei selbst – im WLAN,
+  über Zigbee oder bei einer Steckdose in beidem) · *Gefunden* (**Übernehmen**; ein Zigbee-Gerät meldet sich von
+  selbst) · *Wohin?* (der Raum, bei einer Steckdose ihre Heizung). Eine AeroFlow lässt sich weiter von Hand mit
+  Adresse und Token eintragen. Jedes Gerät trägt das Schild „WLAN“ oder „Zigbee“; Raum, Heizung, Firmware und
+  **Entfernen …** stehen direkt beim Gerät.
 - **Geräte-Liste filtern:** Im Tab „Geräte“ nach Raum filtern (Alle / je Raum / Nicht zugeordnet,
   jeweils mit Anzahl); die Auswahl merkt sich die App.
 - **Heizplan aus Heizung auslesen** (Tab „Geräte“): liest alle drei Planplätze einer Heizung
@@ -99,16 +105,18 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   erkannt. Funktioniert auch ohne Token.
 - **Uhren:** werden automatisch gestellt (beim Start, bei > 1 min Abweichung, täglich 3 Uhr –
   deckt Sommer-/Winterzeit ab). Ohne Internet stellt der Regler sie nicht selbst um.
-- **WLAN** (nur auf dem Raspberry Pi): Netze in der Nähe suchen, mit Passwort verbinden, gespeicherte
+- **Verbindungen** (Tab, nur auf dem Raspberry Pi, ab 0.4.15): **Heimnetz**, **Zigbee-Funk** und **Fernwartung** an
+  einem Ort – bis 0.4.14 waren das die drei Tabs „WLAN“, „Zigbee“ und „Fernwartung“. Geräte stehen hier keine.
+- **WLAN** („Verbindungen“ → „Heimnetz“): Netze in der Nähe suchen, mit Passwort verbinden, gespeicherte
   WLANs vergessen – siehe [WLAN einrichten](#wlan-einrichten).
-- **Fernwartung** (nur auf dem Raspberry Pi): den Pi mit Tailscale aus der Ferne erreichbar machen, um einem
+- **Fernwartung** („Verbindungen“ → „Fernwartung“): den Pi mit Tailscale aus der Ferne erreichbar machen, um einem
   Haushalt zu helfen, ohne hinzufahren – von sich aus nur, solange die Bewohner es erlauben. Siehe
   [Fernwartung](#fernwartung-tailscale).
-- **Zigbee** (nur auf dem Raspberry Pi, in Arbeit): die Programme für SONOFF-Zigbee-Thermostate installieren,
-  aktualisieren und entfernen, Zigbee mit einem Funkkanal einrichten, Thermostate anlernen und wieder entfernen.
-  Angelernte Thermostate sind Heizungen der App wie die AeroFlow: Raum, Temperatur, Ein/Aus, Boost, Heizplan,
-  Kalibrierung, dazu drei Arten zu regeln (Ab Werk, Sanft, Stufen) und neue Firmware per Knopf – siehe
-  [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
+- **Zigbee** (in Arbeit): unter „Verbindungen“ → „Zigbee-Funk“ die Programme für SONOFF-Zigbee-Thermostate
+  installieren, aktualisieren und entfernen und Zigbee mit einem Funkkanal einrichten; Thermostate unter „Geräte“
+  anlernen und wieder entfernen. Angelernte Thermostate sind Heizungen der App wie die AeroFlow: Raum, Temperatur,
+  Ein/Aus, Boost, Heizplan, Kalibrierung, dazu drei Arten zu regeln (Ab Werk, Sanft, Stufen) und neue Firmware per
+  Knopf – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
@@ -185,9 +193,10 @@ Adresse an – z. B. `http://flowthermpi.local`.
 ## WLAN einrichten
 
 Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danach in der App, unter
-*Einrichtung › WLAN*:
+*Einrichtung › Verbindungen › Heimnetz* (bis 0.4.14 *Einrichtung › WLAN*):
 
-1. Netzwerkkabel am Pi einstecken, die App öffnen (z. B. `http://flowthermpi.local`), *Einrichtung › WLAN*.
+1. Netzwerkkabel am Pi einstecken, die App öffnen (z. B. `http://flowthermpi.local`), *Einrichtung › Verbindungen ›
+   Heimnetz*.
    Die App sucht die WLANs in der Nähe.
 2. Beim eigenen WLAN auf **Verbinden** tippen und das WLAN-Passwort eingeben (bei der FRITZ!Box der
    „WLAN-Netzwerkschlüssel“ auf der Unterseite). Nach bis zu einer Minute meldet die App
@@ -209,13 +218,13 @@ Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danac
   WLAN-Passwort steht nie im Status, im Log oder in Fehlermeldungen. Beim Anlegen der Verbindung steht es
   einen Sekundenbruchteil in den Argumenten von `nmcli`, wie bei `nmcli device wifi connect … password …`.
   Meldungen: `journalctl -u flowthermpi-wifi`.
-- Voraussetzung: Raspberry Pi OS ab Bookworm (NetworkManager). Den Reiter gibt es ab Version 0.3.0; ein Pi
-  mit 0.2.0 bekommt ihn über den Update-Knopf.
+- Voraussetzung: Raspberry Pi OS ab Bookworm (NetworkManager). Die WLAN-Einrichtung gibt es ab Version 0.3.0; ein
+  Pi mit 0.2.0 bekommt sie über den Update-Knopf.
 
 ## Fernwartung (Tailscale)
 
-Damit man einem Haushalt helfen kann, ohne hinzufahren: Unter *Einrichtung › Fernwartung* kommt der Pi in das
-eigene private Netz bei [Tailscale](https://tailscale.com). Darüber öffnet man die App von überall, ohne Freigaben
+Damit man einem Haushalt helfen kann, ohne hinzufahren: Unter *Einrichtung › Verbindungen › Fernwartung* (bis 0.4.14
+*Einrichtung › Fernwartung*) kommt der Pi in das eigene private Netz bei [Tailscale](https://tailscale.com). Darüber öffnet man die App von überall, ohne Freigaben
 im Router. Die Fernwartung ist freiwillig; ohne sie bleibt alles im Heimnetz. Und auch mit ihr ist der Pi von sich
 aus nur erreichbar, solange die Bewohner es erlauben – ähnlich wie bei einer Fernwartungs-Software für den PC.
 
@@ -224,7 +233,7 @@ Mac oder Handy installieren und das [Tailscale-Netz einrichten](#tailscale-netz-
 Der Tarif *Personal* ist kostenlos und für private Nutzung gedacht (Stand November 2026: bis 6 Nutzer, bis 50
 getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tailscale.com/pricing)).
 
-1. Im Heimnetz die App öffnen, *Einrichtung › Fernwartung › Fernwartung einrichten*. Der Pi lädt Tailscale aus
+1. Im Heimnetz die App öffnen, *Einrichtung › Verbindungen › Fernwartung › Fernwartung einrichten*. Der Pi lädt Tailscale aus
    dessen offiziellem, signiertem Paketarchiv (`pkgs.tailscale.com`, etwa 30 MB). Das dauert ein paar Minuten; die
    Heizungen heizen dabei weiter.
 2. Die App zeigt einen QR-Code und einen Anmelde-Link. Mit dem Handy scannen und mit dem eigenen Tailscale-Konto
@@ -239,13 +248,13 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
   bestätigen. Zwei Stunden lang ist der Pi dann aus der Ferne erreichbar; oben steht „Fernhilfe ist an – bis 16:30
   Uhr“ mit **Beenden**. **Fernhilfe verlängern** lässt die zwei Stunden neu beginnen.
 - Auf dem eigenen Mac oder Handy Tailscale einschalten und die App unter der Adresse des Pis öffnen. Fertig?
-  **Beenden** – das geht auch aus der Ferne, in der Heizungsansicht oder unter *Einrichtung › Fernwartung*.
+  **Beenden** – das geht auch aus der Ferne, in der Heizungsansicht oder unter *Verbindungen › Fernwartung*.
 - Nach zwei Stunden schaltet die App Tailscale von selbst aus (`tailscale down`), auch nach einem Neustart der App
   oder des Pis – und ebenso, wenn jemand es auf dem Pi von Hand eingeschaltet hat.
 - Erlauben und verlängern geht nur im Heimnetz, nicht aus der Ferne (über Tailscale). So kann sich niemand selbst
   mehr Zeit geben, als die Bewohner erlaubt haben.
 - Die Fernhilfe schaltet nur ein, was eingerichtet ist: Sie installiert nichts und startet keine neue Anmeldung.
-- *Einrichtung › Fernwartung › Wann ist der Pi erreichbar?:* **Nur nach Freigabe** (Vorgabe) oder **Immer** – dann
+- *Verbindungen › Fernwartung › Wann ist der Pi erreichbar?:* **Nur nach Freigabe** (Vorgabe) oder **Immer** – dann
   bleibt die Fernwartung dauerhaft an, und in der Heizungsansicht steht „Fernwartung ist eingeschaltet“. Ändern lässt
   sich das nur im Heimnetz.
 - Ein Pi, der schon vor Version 0.4.1 eingerichtet wurde, ist danach ebenfalls auf „Nur nach Freigabe“ und schaltet
@@ -255,7 +264,7 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
 
 - **Name:** Im Tailscale-Netz heißt der Pi `flowthermpi-` + **Gerätenummer** (die letzten 8 Zeichen seiner
   Seriennummer), damit sich mehrere Pis auseinanderhalten lassen. Die Gerätenummer steht unter *Einrichtung › Über*
-  und *Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `flowthermpi.local`.
+  und *Verbindungen › Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `flowthermpi.local`.
 - **Die Bewohner sehen es:** Während einer Fernhilfe steht in der Heizungsansicht, bis wann sie läuft; bei „Immer“
   steht dort „Fernwartung ist eingeschaltet“.
 - **Ausschalten** (bei „Nur nach Freigabe“: **Fernhilfe beenden**) trennt den Pi vom Tailscale-Netz
@@ -272,7 +281,7 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
   bestimmt er selbst, ohne Shell. Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Die
   Einstellung und das Ende der Fernhilfe stehen in `/var/lib/flowthermpi/remote-settings.json`. Meldungen:
   `journalctl -u flowthermpi-remote`.
-- Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Den Reiter gibt es ab Version 0.4.0, die Fernhilfe ab
+- Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Die Fernwartung gibt es ab Version 0.4.0, die Fernhilfe ab
   0.4.1; ein älterer Pi bekommt beides über den Update-Knopf.
 
 ### Tailscale-Netz einrichten (einmal, vor dem ersten Pi)
@@ -308,12 +317,13 @@ Ablauf nicht; die App zeigt das Ablaufdatum, solange es eins gibt.
 
 ## Heizungen im Netz suchen
 
-In der Einrichtung unter „Geräte“ → Untertab „Heizung“ → **Im Netz suchen**: Die App fragt jede Adresse des Heimnetzes
-einmal nach ihrer Seriennummer – nur lesend, ohne Token, ein paar Sekunden für ein /24-Netz – und
-listet alle Heizungen auf (Name `Heat4U-…`, IP, Raumtemperatur). Bekannte sind als „in der App“
-markiert, neue haben **Hinzufügen**: Das Formular hat die IP schon eingetragen und erklärt, wie man
-an den Token kommt. Läuft die App in Docker oder in einem anderen Netz, lässt sich das Heimnetz
-angeben (z. B. `192.168.178`; nur private Netze, höchstens /22).
+In der Einrichtung unter „Geräte“ → **+ Gerät hinzufügen** → „Heizung“ (bis 0.4.14 **Im Netz suchen**): Die App fragt
+jede Adresse des Heimnetzes einmal nach ihrer Seriennummer – nur lesend, ohne Token, ein paar Sekunden für ein
+/24-Netz – und listet alle Heizungen auf (Name `Heat4U-…`, IP, Raumtemperatur). Bekannte sind als „in der App“
+markiert, neue haben **Übernehmen**: Das Formular hat die IP schon eingetragen und erklärt, wie man an den Token
+kommt; danach fragt die App nach dem Raum. **von Hand eintragen** öffnet dasselbe Formular leer. Läuft die App in
+Docker oder in einem anderen Netz, lässt sich das Heimnetz angeben (z. B. `192.168.178`; nur private Netze,
+höchstens /22).
 
 **Neue IP-Adresse:** Ist eine bekannte Heizung länger als 3 Minuten nicht erreichbar, sucht die
 App sie (höchstens alle 15 Minuten) im Netz und übernimmt ihre neue Adresse anhand der
@@ -338,7 +348,7 @@ unterstützt sie nicht mehr; einen gespeicherten H&T entfernt sie beim Start (mi
 **Vorher, einmal:** die Pill mit der Shelly-App ins WLAN bringen (oder über ihren Hotspot `ShellyPill-…` und
 `http://192.168.33.1`), den Fühler einstecken und die Pill ans Netzteil hängen.
 
-**Fühler suchen:** In der Einrichtung unter „Geräte“ → Untertab „Fühler“ → **Fühler suchen**. Die App fragt jede
+**Fühler suchen:** In der Einrichtung unter „Geräte“ → **+ Gerät hinzufügen** → „Raumfühler“. Die App fragt jede
 Adresse des Heimnetzes einmal nach `GET /shelly` (rund 3 s für ein /24-Netz) und liest jede gefundene Pill mit
 `Shelly.GetStatus`, `Pill.GetConfig` und `Shelly.GetComponents` aus: was eingestellt ist (DS18B20 oder DHT22) und was
 jeder eingesteckte Fühler misst. Die Pill meldet jeden Fühler als eigene Komponente (der erste DS18B20 heißt
@@ -394,7 +404,7 @@ empfohlen 1 Tag) und **Kalibrierlauf starten**.
 
 SONOFF-Heizkörperthermostate (**TRV Gen2**, Modell TRV-ZBT), die über einen Zigbee-USB-Stick am Pi (**SONOFF
 Dongle Plus MG24**) gesteuert werden – in der App genauso wie die AeroFlow-Heizungen. Ab Version 0.4.4 installiert
-*Einrichtung › Zigbee* die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
+*Einrichtung › Zigbee* (ab 0.4.15 *Verbindungen › Zigbee-Funk*) die Zusatzprogramme dafür auf Knopfdruck; ab 0.4.6 richtet die App Zigbee ein und lernt
 Thermostate an; ab 0.4.8 sind angelernte Thermostate Heizungen der App (*Thermostate steuern*, unten); ab 0.4.9
 regeln sie auf Wunsch sanft und bekommen neue Firmware per Knopf; ab 0.4.10 stellt die App danach ihre Einstellungen
 wieder ein; ab 0.4.11 gibt es als dritte Art zu regeln die „Stufen“. Noch nicht dabei: Heizpläne aus einem Thermostat auslesen und die Shelly Pill als Fühler für ein
@@ -409,8 +419,8 @@ Thermostat.
 - **Feste Versionen, jede Datei geprüft:** Welche Versionen kommen, steht in `install.py` (`ZIGBEE_PARTS`): für
   Node.js und pnpm mit Prüfsumme, für Zigbee2MQTT mit der Git-Commit-Nummer. Die Bausteine prüft pnpm gegen die
   Prüfsummen im Lockfile von Zigbee2MQTT (`--frozen-lockfile`). Passt etwas nicht, wird nichts installiert. Neue
-  Versionen kommen mit einem Update von FlowThermPi; dann steht im Reiter **Neue Versionen installieren**.
-- **Ablauf:** *Einrichtung › Zigbee › Zigbee-Programme installieren*. Die Seite zeigt Schritt und Fortschritt; die
+  Versionen kommen mit einem Update von FlowThermPi; dann steht unter „Zigbee-Funk“ **Neue Versionen installieren**.
+- **Ablauf:** *Einrichtung › Verbindungen › Zigbee-Funk › Zigbee-Programme installieren*. Die Seite zeigt Schritt und Fortschritt; die
   Heizungen heizen weiter, und die Seite darf zu (der Pi macht allein weiter, auch wenn die App neu startet).
   Geschätzt 10 bis 20 Minuten und etwa 200 MB Download – auf einem echten Pi noch nicht gemessen. Klappt etwas nicht,
   nennt die Seite den Grund (etwa „Speicherkarte voll“, „keine Verbindung zum Internet“) und zeigt die letzten
@@ -454,26 +464,32 @@ Thermostat.
 
 **Thermostate und Steckdosen anlernen:**
 
-- **Geräte suchen** (bis 0.4.13 „Thermostate suchen“) öffnet das Zigbee-Netz für 3 Minuten. Die Seite zählt herunter
-  und sagt, was zu tun ist. Am Thermostat: Batterien einlegen, das Drehrad unter 5 °C drehen, bis es aus ist, dann
-  die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt. Nach etwa einer Minute steht es in der
-  Liste – mit Modell, Batterie, Funkqualität und gemessener Temperatur. An einer
+- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Thermostat“ oder „Steckdose“ (bis 0.4.14 **Geräte
+  suchen** im Tab „Zigbee“, bis 0.4.13 „Thermostate suchen“). Die App öffnet das Zigbee-Netz von selbst für 3 Minuten,
+  zählt herunter und sagt, was zu tun ist. Am Thermostat: Batterien einlegen, das Drehrad unter 5 °C drehen, bis es
+  aus ist, dann die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt. An einer
   [Steckdose](#zigbee-steckdosen-mit-strommessung): ihre Taste 5 Sekunden halten, bis das blaue Licht langsam blinkt.
-  Mehrere Geräte gehen nacheinander in derselben Suche; klappt es nicht, das Gerät zum Anlernen näher an den Pi
-  bringen.
-- **Entfernen …** (bei einem Thermostat oder einer Steckdose) meldet es im Zigbee-Netz ab. Antwortet es nicht (es
+  Nach etwa einer Minute steht das Gerät da („✓ angelernt“), und **Weiter** fragt nach Name und Raum (bei einer
+  Steckdose: nach ihrer Heizung); ließ es sich nicht anlernen, steht dort **Entfernen …**. Mehrere Geräte gehen nacheinander in
+  derselben Suche; klappt es nicht, das Gerät zum Anlernen näher an den Pi bringen. **Abbrechen** oder **Fertig**
+  schließt das Zigbee-Netz wieder. Ist Zigbee noch nicht eingerichtet, führt der Ablauf zu „Verbindungen“ ›
+  „Zigbee-Funk“.
+- **Entfernen …** (unter „Geräte“, bei einem Thermostat oder einer Steckdose) meldet es im Zigbee-Netz ab. Antwortet es nicht (es
   schläft oder ist zu weit weg), bietet die Seite **Trotzdem entfernen** an: Dann vergisst der Pi es, ohne auf die
   Antwort zu warten. Eine entfernte Steckdose gehört danach auch zu keiner Heizung mehr.
 - **Wie die App mit Zigbee2MQTT spricht:** über Mosquitto (MQTT), nur auf dem Pi selbst und mit Passwort – mit einem
   kleinen eigenen MQTT-Baustein (`heizapp/mqtt.py`, nur Python-Standardbibliothek).
-- Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
+- Was weder Thermostat noch Steckdose der App ist (etwa ein Gerät, das sich nicht anlernen ließ), steht unter
+  „Geräte“ in **Weitere Zigbee-Geräte**, ebenfalls mit **Entfernen …**.
+- „Zigbee-Funk“ gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt es über den
+  Update-Knopf.
 
 **Thermostate steuern** (ab 0.4.8):
 
 - Jedes angelernte Thermostat steht unter *Einrichtung › Geräte* bei den Heizungen – mit Batterie, Funkqualität,
   Störungen und wann es sich zuletzt gemeldet hat. Dort bekommt es einen Namen und einen Raum. In `heizungen.conf`
   steht es nie; Name und Raum merkt sich die App in `data.json`, auch wenn es kurz aus dem Zigbee-Netz verschwindet.
-  „+ Heizung“ fragt, ob eine AeroFlow (WLAN) oder ein Thermostat (Zigbee) dazukommt.
+  Neue kommen mit **+ Gerät hinzufügen** dazu (bis 0.4.14 „+ Heizung“).
 - Auf der Startseite und unter *Räume* geht alles wie bei der AeroFlow: kälter/wärmer, Ausschalten/Einschalten,
   Wieder nach Plan, volle Kraft (Boost, 30 Minuten), Heizplan senden. Ein Raum darf AeroFlow-Heizungen und
   Thermostate mischen.
@@ -520,17 +536,20 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
 
 - **Welche:** gebaut für die SONOFF S60ZBTPF (16 A, Schuko, etwa 14 €, Stand 25.11.2026). Andere gehen auch, wenn Zigbee2MQTT sie mit
   einem Schalter und einer Leistungsmessung (`power`) kennt; Steckdosenleisten mit mehreren Schaltern nicht.
-- **Anlernen:** unter *Einrichtung › Zigbee* mit **Geräte suchen**, an der Steckdose die Taste 5 Sekunden halten. In
-  der Liste steht sie als „Steckdose“ mit den letzten vier Zeichen ihrer Adresse, mit an/aus, Watt, „heute … kWh“ und
-  zu welcher Heizung sie gehört. Eine Steckdose ist keine Heizung – sie steht unter *Geräte › Steckdosen*, nicht bei
-  den Heizungen.
-- **Zuordnen:** *Räume › Strom und Kosten*, bei der Heizung „an der Steckdose“ wählen, **Speichern**. Nur
-  AeroFlow-Heizungen, jede Steckdose höchstens bei einer Heizung. Beim Speichern stellt die App die Steckdose so ein,
-  dass sie nach einem Stromausfall wieder angeht – sonst bliebe die Heizung kalt.
+- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Steckdose“ (bis 0.4.14 unter *Einrichtung › Zigbee*
+  mit **Geräte suchen**), an der Steckdose die Taste 5 Sekunden halten. Sie heißt dann „Steckdose“ mit den letzten
+  vier Zeichen ihrer Adresse und steht unter *Geräte › Steckdosen* – mit an/aus, Watt, „heute … kWh“ und ihrer
+  Heizung. Eine Steckdose ist keine Heizung; bei den Heizungen steht sie nicht.
+- **Zuordnen:** im letzten Schritt „Wohin?“ oder später an der Steckdose unter *Geräte › Steckdosen* die Heizung
+  wählen (bis 0.4.14 unter *Räume › Strom und Kosten*). Nur AeroFlow-Heizungen, jede Steckdose höchstens bei einer
+  Heizung und jede Heizung an höchstens einer Steckdose. Dabei stellt die App die Steckdose so ein, dass sie nach einem
+  Stromausfall wieder angeht – sonst bliebe die Heizung kalt. Ist sie gerade nicht zu erreichen, sagt die App das;
+  dann die Heizung später noch einmal wählen.
 - **Messen:** Solange die Heizung heizt und die Steckdose mehr als 50 W durchlässt, merkt sich die App alle
   10 Sekunden den Wert (höchstens die letzte Stunde Heizen, nur im Speicher – nach einem Neustart misst sie neu).
   Nach einer Minute Heizen steht unter der Heizung „Beim Heizen gemessen: etwa … W“ (der mittlere Wert, einzelne
-  Ausreißer zählen nicht). **Übernehmen** trägt ihn als Leistung ein; gespeichert ist er erst mit **Speichern**.
+  Ausreißer zählen nicht; zu sehen unter *Räume › Strom und Kosten*). **Übernehmen** trägt ihn als Leistung ein;
+  gespeichert ist er erst mit **Speichern**.
 - **Ausgeschaltet:** Die Taste der Steckdose schaltet sie aus – dann hat die Heizung keinen Strom. Die Startseite
   sagt das und hat **Steckdose einschalten** (ohne PIN). Die App selbst schaltet eine Steckdose nie aus.
 - **Funk:** Eine Steckdose am Strom gibt das Zigbee-Signal weiter; Thermostate weiter weg erreichen den Pi dann
@@ -538,8 +557,9 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
 - **Bekannt** (Zigbee2MQTT, Stand 25.11.2026): Bei der S60ZBTPF kann der Leistungswert minutenlang hängen bleiben,
   während Strom und Energie weiterlaufen (Issue 33770); dann kommt eine Weile kein neuer Messwert dazu.
 - **Nur simuliert geprüft:** Wie oft und wie genau die echte Steckdose meldet, zeigt sich erst am Gerät.
-- **Schnittstelle:** `PUT /api/costs` nimmt `plugs` (`{"<Heizung>": "<IEEE-Adresse>"}`, `""` für keine);
-  `POST /api/heaters/<id>/plug/on` schaltet die Steckdose einer Heizung ein (ohne PIN); in `GET /api/state` stehen
+- **Schnittstelle:** `PUT /api/plugs/<Kennung>/heater` (`{"heater": "<Heizung>"}`, `null` für keine; mit PIN, ab
+  0.4.15) ordnet eine Steckdose zu; `PUT /api/costs` nimmt dafür weiterhin auch `plugs`
+  (`{"<Heizung>": "<IEEE-Adresse>"}`, `""` für keine); `POST /api/heaters/<id>/plug/on` schaltet die Steckdose einer Heizung ein (ohne PIN); in `GET /api/state` stehen
   `plugs` und je Heizung `plug` (mit `id` und `kind`: `zigbee` oder `wifi`).
 
 ## WLAN-Steckdosen mit Strommessung
@@ -556,12 +576,13 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
   (sonst in der ersten Minute die Taste 5 Sekunden halten, bis sie blau blinkt). Mit dem Handy hinein, im Browser
   192.168.33.1 öffnen und das Heim-WLAN eintragen. Kein Passwort für die Steckdose einschalten – dann kann die App sie
   nicht lesen.
-- **Übernehmen:** *Einrichtung › Geräte › Steckdosen*, **Steckdosen suchen** (fragt jede Adresse im Heimnetz, ein paar
-  Sekunden), bei der Steckdose **Übernehmen**. Sie heißt dann „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer
+- **Übernehmen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Steckdose“ (bis 0.4.14 **Steckdosen suchen** unter
+  *Geräte › Steckdosen*). Die App fragt jede Adresse im Heimnetz (ein paar Sekunden); bei der Steckdose
+  **Übernehmen**, dann ihre Heizung wählen. Sie heißt dann „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer
   Kennung. Suchen und Übernehmen lesen nur. **Entfernen …** nimmt sie wieder aus der App; die Steckdose selbst bleibt,
   wie sie ist – an oder aus.
-- **Zuordnen, Messen, Ausgeschaltet:** wie bei der Zigbee-Steckdose – *Räume › Strom und Kosten*, „an der Steckdose“,
-  **Speichern**; dabei stellt die App die Steckdose auf „nach Stromausfall an“. „heute … kWh“ rechnet die App aus dem
+- **Zuordnen, Messen, Ausgeschaltet:** wie bei der Zigbee-Steckdose – die Heizung an der Steckdose wählen (*Geräte ›
+  Steckdosen*); dabei stellt die App die Steckdose auf „nach Stromausfall an“. „heute … kWh“ rechnet die App aus dem
   Zähler der Steckdose (sein Stand bei der ersten Abfrage des Tages steht in `data.json`).
 - **Lesen:** alle 10 Sekunden (`Shelly.GetStatus`); die MAC-Adresse muss passen. Antwortet sie nicht mehr unter ihrer
   Adresse (der Router kann ihr eine neue geben), sucht die App sie höchstens alle 15 Minuten im Heimnetz und merkt sich
@@ -571,8 +592,8 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
 - **Nur simuliert geprüft:** Die Steckdose spielt `tests/fake_shelly.py` so, wie Shellys Dokumentation sie beschreibt.
   Wie die echte Plug M Gen3 antwortet, zeigt sich erst am Gerät.
 - **Schnittstelle:** `POST /api/plugs/discover` sucht, `POST /api/plugs` (`{"plug": "<Kennung>"}`) übernimmt,
-  `DELETE /api/plugs/<Kennung>` entfernt (alle drei mit PIN); bei `PUT /api/costs` steht in `plugs` die Kennung
-  (`shellyplugmg3-…`).
+  `DELETE /api/plugs/<Kennung>` entfernt, `PUT /api/plugs/<Kennung>/heater` ordnet zu (alle vier mit PIN); die
+  Kennung ist hier `shellyplugmg3-…`.
 
 ## Verlauf und Kosten
 
@@ -643,7 +664,7 @@ sauber beendet wurde oder etwa der Strom weg war.
 
 ## Konfiguration: `heizungen.conf`
 
-Heizungen legst du am einfachsten in der App an: Tab „Geräte“ → **+ Heizung**, bzw. **Bearbeiten**
+Heizungen legst du am einfachsten in der App an: Tab „Geräte“ → **+ Gerät hinzufügen** → „Heizung“, bzw. **Bearbeiten**
 bei einer Heizung (Name, IP-Adresse, Token; Token entfernen; Heizung entfernen). Beim Speichern
 prüft die App Adresse und Token direkt an der Heizung und schreibt `heizungen.conf` selbst –
 ohne Neustart. Ins Token-Feld kann auch der komplette QR-Inhalt

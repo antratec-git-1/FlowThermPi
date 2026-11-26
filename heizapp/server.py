@@ -80,6 +80,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", r"/api/plugs/discover", lambda m, b, r: s.find_plugs(b.get("network")), SETUP),   # WLAN plugs
         ("POST", r"/api/plugs", lambda m, b, r: s.add_wifi_plug(b), SETUP),
         ("DELETE", rf"/api/plugs/{i}", lambda m, b, r: s.delete_wifi_plug(m[1]), SETUP),
+        ("PUT", rf"/api/plugs/{i}/heater", lambda m, b, r: s.set_plug_heater(m[1], b), SETUP),   # „gehört zu“
         ("POST", rf"/api/sensors/{i}/calibration", lambda m, b, r: s.start_calibration(m[1], b), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/finish", lambda m, b, r: s.finish_calibration(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/apply", lambda m, b, r: s.apply_calibration(m[1], b), SETUP),

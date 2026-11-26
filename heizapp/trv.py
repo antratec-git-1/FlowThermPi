@@ -241,8 +241,8 @@ class Thermostat:
             raise NoAnswer(problem)
         st = self.net.thermostat(self.ieee)
         if st is None or st["device"] is None:
-            raise NoAnswer("Das Thermostat ist nicht (mehr) im Zigbee-Netz angelernt – unter „Zigbee“ neu anlernen "
-                           "oder hier entfernen.")
+            raise NoAnswer("Das Thermostat ist nicht (mehr) im Zigbee-Netz angelernt – mit „+ Gerät hinzufügen“ neu "
+                           "anlernen oder hier entfernen.")
         if not st["values"]:
             raise NoAnswer("Das Thermostat hat noch keine Werte gemeldet.")
         missing = {k: "" for k in (SMART, *VALVE) if k not in st["values"]}

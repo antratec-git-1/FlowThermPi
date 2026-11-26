@@ -1117,7 +1117,7 @@ class Service:
         pill_id, channel = str(body.get("pill") or ""), body.get("channel")
         hit = self._found_pills.get(pill_id)
         if not hit or time.monotonic() - hit["mono"] > self.FOUND_KEEP:
-            raise ActionError("Diese Pill hat die Suche nicht gefunden – bitte zuerst „Fühler suchen“.", 404)
+            raise ActionError("Diese Pill hat die Suche nicht gefunden – bitte erneut suchen.", 404)
         p = hit["pill"]
         if isinstance(channel, bool) or channel not in [x["channel"] for x in p["probes"]]:
             raise ActionError("Diesen Fühler hat die Pill nicht gemeldet – steckt er? Dann erneut suchen.", 404)
@@ -1191,12 +1191,12 @@ class Service:
             (m["host"] for m in self.store.snapshot()["sensors"].values() if m.get("pill") == pill_id and m.get("host")),
             None)
         if not address:
-            raise ActionError("Diese Pill kennt die App nicht – bitte zuerst „Fühler suchen“.", 404)
+            raise ActionError("Diese Pill kennt die App nicht – bitte zuerst mit „+ Gerät hinzufügen“ suchen.", 404)
         host, _, port = address.partition(":")
         port = int(port) if port.isdigit() else shelly.PORT
         info = shelly.probe(host, port, timeout=2.0)
         if not info or str(info.get("id")) != pill_id:   # gone, or another device has taken the address
-            raise ActionError("Die Pill antwortet nicht unter ihrer letzten Adresse – bitte erneut „Fühler suchen“.", 504)
+            raise ActionError("Die Pill antwortet nicht unter ihrer letzten Adresse – bitte unter „+ Gerät hinzufügen“ › „Raumfühler“ erneut suchen.", 504)
         return host, port
 
     def set_pill_mode(self, pill_id: str, mode) -> dict:
@@ -1921,7 +1921,8 @@ class Service:
 
     # ------------------------------------------------------------------ plugs (Zigbee and WLAN)
     # An AeroFlow can hang on a plug that measures: a Zigbee plug (e.g. SONOFF S60ZBTPF, heizapp.zigbee_net) or a WLAN
-    # plug (Shelly, e.g. Plug M Gen3, heizapp.shelly). Strom und Kosten assigns it. While the heater heats, the app notes
+    # plug (Shelly, e.g. Plug M Gen3, heizapp.shelly). The plug's tile in Geräte assigns it (set_plug_heater; Strom und
+    # Kosten could until 0.4.14, PUT /api/costs still takes "plugs"). While the heater heats, the app notes
     # what the plug lets through – the typical value is the heater's measured power. If the plug is switched off (its
     # button), the heater has no power: the tile says so and switches it on again. The app never switches a plug off.
     # A plug's id is the IEEE address of a Zigbee plug („0x…“) or Shelly's device id of a WLAN plug („shellyplug…“).
@@ -2032,7 +2033,7 @@ class Service:
                            "dauern."}
 
     def _plugs_from(self, body: dict) -> dict[str, str | None]:
-        """The plugs of Strom und Kosten ({heater: plug id or ""}), checked: only AeroFlow heaters, only plugs the app
+        """The plugs of PUT /api/costs ({heater: plug id or ""}), checked: only AeroFlow heaters, only plugs the app
         knows (or the one a heater has already), each plug at one heater at most."""
         wanted = body.get("plugs") or {}
         if not isinstance(wanted, dict):
@@ -2059,6 +2060,46 @@ class Service:
                 raise ActionError(f"{self._plug_name(pid)} kann nur zu einer Heizung gehören.")
             seen.add(pid)
         return clean
+
+    def set_plug_heater(self, plug_id: str, body: dict) -> dict:
+        """Geräte › Steckdosen: the AeroFlow this plug gives power („gehört zu“; heater "" or None: none). A plug belongs
+        to one heater and a heater hangs on one plug – a plug the heater had before no longer belongs to it."""
+        heater_id = body.get("heater") or None
+        if heater_id is not None and not isinstance(heater_id, str):
+            raise ValueError("heater muss eine Kennung sein")
+        data = self.store.snapshot()
+        known = {p["id"] for p in self._plug_list(data)}
+        owners = [hid for hid, meta in data["heaters"].items() if meta.get("plug") == plug_id]
+        if plug_id not in known and not owners:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        e = self._entry(heater_id) if heater_id else None
+        if e is not None and e.zigbee:
+            raise ActionError("Ein Thermostat hängt an keiner Steckdose – es hat Batterien.")
+        if e is not None and plug_id not in known:
+            raise ActionError("Diese Steckdose ist nicht (mehr) im Zigbee-Netz." if self._zigbee_plug_id(plug_id)
+                              else "Diese WLAN-Steckdose ist nicht (mehr) in der App.", 409)
+        before = data["heaters"].get(e.id, {}).get("plug") if e else None
+        with self.store.edit() as d:
+            for hid, meta in d["heaters"].items():
+                if meta.get("plug") == plug_id and (e is None or hid != e.id):
+                    meta.pop("plug", None)
+            if e is not None:
+                d["heaters"].setdefault(e.id, self._new_meta(e))["plug"] = plug_id
+        who = {x.id: self._who(x) for x in self.entries}
+        for hid in owners:   # what a heater measured belongs to the plug it had
+            if e is None or hid != e.id:
+                self._plug_samples.pop(hid, None)
+                log.info("%s hängt an keiner Steckdose mehr", who.get(hid, hid))
+        if e is not None and before != plug_id:
+            self._plug_samples.pop(e.id, None)
+            log.info("%s hängt jetzt an %s (%s)", who.get(e.id, e.id), self._plug_name(plug_id), plug_id)
+        name = self._plug_name(plug_id)
+        if e is None:
+            return {"message": f"{name} gehört zu keiner Heizung mehr."}
+        if self._plugs_on_after_outage({e.id: plug_id}):
+            return {"message": f"Gespeichert. {name} war gerade nicht zu erreichen – bitte später noch einmal "
+                               "auswählen, damit sie nach einem Stromausfall wieder angeht.", "warning": True}
+        return {"message": f"{name} gehört jetzt zu {self._name(e)}."}
 
     def _plugs_on_after_outage(self, plugs: dict[str, str | None]) -> list[str]:
         """Each plug a heater hangs on comes on again after a power cut (Zigbee: power_on_behavior „on“, Shelly:
@@ -2221,11 +2262,11 @@ class Service:
                            "offline": p["offline"], "known": p["id"] in saved} for p in plugs]}
 
     def add_wifi_plug(self, body: dict) -> dict:
-        """„Übernehmen“: a plug from „Steckdosen suchen“ becomes a plug of the app (its heater: Strom und Kosten)."""
+        """„Übernehmen“: a plug from the search becomes a plug of the app (its heater: chosen at the plug)."""
         pid = str(body.get("plug") or "")
         hit = self._found_plugs.get(pid)
         if hit is None or time.monotonic() - hit["mono"] > self.FOUND_KEEP:
-            raise ActionError("Diese Steckdose hat die Suche nicht gefunden – bitte zuerst „Steckdosen suchen“.", 404)
+            raise ActionError("Diese Steckdose hat die Suche nicht gefunden – bitte erneut suchen.", 404)
         p = hit["plug"]
         if p["protected"]:
             raise ActionError("Die Steckdose ist mit einem Passwort geschützt – die App kann sie nicht lesen und nicht "
@@ -2242,8 +2283,7 @@ class Service:
                 self._wifi_plugs[pid]["after_outage"] = shelly.after_outage(*self._split_address(p["address"]))
             except shelly.ShellyError:
                 pass
-        return {"plug": pid, "message": f"{self._plug_name(pid)} ist in der App. Zu ihrer Heizung gehört sie, sobald "
-                                        "du sie unter „Räume“ › „Strom und Kosten“ auswählst."}
+        return {"plug": pid, "message": f"{self._plug_name(pid)} ist in der App."}
 
     def delete_wifi_plug(self, pid: str) -> dict:
         """„Entfernen“: the app forgets a WLAN plug – its heater no longer hangs on it. The plug itself stays as it is."""

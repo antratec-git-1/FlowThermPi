@@ -20,6 +20,13 @@ let dialog = null;       // open dialog: {title, text, fields, buttons, onSubmit
 let pinPromise = null;   // a PIN dialog that is already open
 let setupIdleTimer = null;
 let tab = localStorage.getItem("heizung.tab") || "rooms";
+let connTab = localStorage.getItem("heizung.connTab") || "wifi";   // sub-tab of "Verbindungen": "wifi" | "zigbee" | "remote"
+if (["wifi", "remote", "zigbee"].includes(tab)) {   // until 0.4.14 each had a tab of its own
+  connTab = tab;
+  tab = "connections";
+  localStorage.setItem("heizung.tab", tab);
+  localStorage.setItem("heizung.connTab", connTab);
+}
 let shownTab = null;     // tab last brought into view in the tab bar
 let editing = null;      // plan in the editor: {id|null, name, days}
 let roomForm = null;     // room form in "Räume": {mode: "new"|"edit", id, name, heaters: [ids]}
@@ -31,9 +38,11 @@ let scanNet = "";        // network typed for "Anderes Netz"
 let sensorSearch = null; // „Fühler suchen“ in "Geräte": {running, waiting, data: {networks, seconds, pills}, error}
 let plugSearch = null;   // „Steckdosen suchen“ in "Geräte": {running, data: {networks, seconds, plugs}, error}
 let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, pill, channel, name, room, placeholder}
+let addFlow = null;      // „+ Gerät hinzufügen“ in "Geräte": {step: "what"|"find"|"where", kind, before: Set of Zigbee
+                         // addresses before the search, where: {type: "heater"|"plug", id}, room, name, heater}
 let pillForm = null;     // „Einrichten“ of a Pill: {pill, at: "search"|sensor id, mode}
 const calibHours = {};   // Kalibrierlauf: sensor id -> duration (hours) chosen before „starten“
-let deviceTab = ["sensors", "plugs"].includes(localStorage.getItem("heizung.deviceTab"))   // sub-tab of "Geräte"
+let deviceTab = ["sensors", "plugs"].includes(localStorage.getItem("heizung.deviceTab"))   // sub-tab of "Geräte": heaters, sensors, plugs
   ? localStorage.getItem("heizung.deviceTab") : "heaters";
 const pillRestart = {};  // Pill id -> true while it restarts after „Einrichten“
 const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
@@ -242,11 +251,26 @@ function showView(name) {
   if (name === "setup") sessionStorage.setItem("heizung.view", "setup");
   else sessionStorage.removeItem("heizung.view");
   document.body.className = "view-" + name;
-  if (name === "setup" && tab === "wifi") openWifiTab();
-  if (name === "setup" && tab === "remote") openRemoteTab();
-  if (name === "setup" && tab === "zigbee") openZigbeeTab();
+  if (name === "setup") openTab();
   touchSetup();
   window.scrollTo(0, 0);
+}
+
+function openTab() {   // what the chosen tab needs fresh from the Pi
+  if (tab === "connections") openConnTab();
+  if (tab === "devices" && state && state.app.zigbee) loadZigbee();   // the Zigbee devices and whether Zigbee is ready
+}
+
+// „Verbindungen“: how the Pi itself is connected – each part only on the Pi, set up with the installer
+const CONN_PARTS = [["wifi", "Heimnetz"], ["zigbee", "Zigbee-Funk"], ["remote", "Fernwartung"]];
+function connTabs() { return state ? CONN_PARTS.map(([id]) => id).filter(id => state.app[id]) : []; }
+
+function openConnTab() {
+  const parts = connTabs();
+  if (parts.length && !parts.includes(connTab)) connTab = parts[0];
+  if (connTab === "wifi") openWifiTab();
+  else if (connTab === "remote") openRemoteTab();
+  else if (connTab === "zigbee") openZigbeeTab();
 }
 
 function setHTML(el, html) {  // only touch the DOM if something changed (keeps open dropdowns and focus)
@@ -269,15 +293,10 @@ function render() {
     document.getElementById("pin-button").textContent = state.setup.pin ? "PIN ändern" : "PIN festlegen";
     document.getElementById("pin-warning").hidden = state.setup.pin;
   }
-  const wifiTab = document.querySelector('#tabs [data-tab="wifi"]');
-  if (state) wifiTab.hidden = !state.app.wifi;           // only on the Pi, set up with the installer
-  if (state && tab === "wifi" && !state.app.wifi) tab = "rooms";
-  const remoteTab = document.querySelector('#tabs [data-tab="remote"]');
-  if (state) remoteTab.hidden = !state.app.remote;       // only on the Pi, set up with the installer
-  if (state && tab === "remote" && !state.app.remote) tab = "rooms";
-  const zigbeeTab = document.querySelector('#tabs [data-tab="zigbee"]');
-  if (state) zigbeeTab.hidden = !state.app.zigbee;       // only on the Pi, set up with the installer
-  if (state && tab === "zigbee" && !state.app.zigbee) tab = "rooms";
+  const parts = connTabs();   // „Verbindungen“ only on the Pi, set up with the installer
+  if (state) document.querySelector('#tabs [data-tab="connections"]').hidden = !parts.length;
+  if (state && tab === "connections" && !parts.length) tab = "rooms";
+  if (parts.length && !parts.includes(connTab)) connTab = parts[0];
   for (const b of document.querySelectorAll("#tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   if (tab !== shownTab) {   // a tab bar that scrolls (phone): bring the chosen tab into view – only when it changes
     shownTab = tab;
@@ -285,7 +304,7 @@ function render() {
     if (nav && (b.offsetLeft < nav.scrollLeft || b.offsetLeft + b.offsetWidth > nav.scrollLeft + nav.clientWidth))
       nav.scrollLeft = b.offsetLeft - 8;
   }
-  for (const name of ["rooms", "plans", "devices", "wifi", "remote", "zigbee", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  for (const name of ["rooms", "plans", "devices", "connections", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
@@ -293,10 +312,21 @@ function render() {
   if (tab === "rooms") renderRooms(el);
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
   else if (tab === "about") renderAbout(el);
-  else if (tab === "wifi") renderWifi(el);
-  else if (tab === "remote") renderRemote(el);
-  else if (tab === "zigbee") renderZigbee(el);
+  else if (tab === "connections") renderConnections(el);
   else renderDevices(el);
+}
+
+function renderConnections(el) {   // sub-tabs Heimnetz · Zigbee-Funk · Fernwartung – the ones this Pi has
+  const parts = connTabs();
+  const label = Object.fromEntries(CONN_PARTS);
+  const subtabs = parts.length > 1 ? `<div class="subtabs" role="tablist" aria-label="Verbindung">${parts.map(id =>
+    `<button data-conntab="${id}" role="tab" aria-selected="${connTab === id}">${label[id]}</button>`).join("")}</div>` : "";
+  setHTML(el, subtabs + (connTab === "wifi" ? wifiHTML() : connTab === "remote" ? remoteHTML() : zigbeeHTML()));
+  if (connTab === "wifi" && wifiFocus) {
+    wifiFocus = false;
+    const input = el.querySelector('.wifi-form input[data-wfield="password"]');
+    if (input) input.focus();
+  }
 }
 
 function renderAbout(el) {  // "Über": logo, what the app does, version, licence, source code
@@ -1125,25 +1155,12 @@ function costValues() {
   if (costForm) return costForm;
   const c = state.costs || {}, heaters = state.heaters.filter(h => h.kind !== "zigbee");
   return { price: c.price_ct == null ? "" : ctText(c.price_ct), show: !!c.show,
-           powers: Object.fromEntries(heaters.map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])),
-           plugs: Object.fromEntries(heaters.map(h => [h.id, h.plug ? h.plug.id : ""])) };
+           powers: Object.fromEntries(heaters.map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])) };
 }
 
 function wattText(w) { return Math.round(w).toLocaleString("de-DE") + " W"; }
 
-function plugPickHTML(h, f) {   // which plug (Zigbee or WLAN) the heater hangs on – only once there is one
-  const plugs = state.plugs || [], chosen = f.plugs[h.id] ?? "";
-  if (!plugs.length && !h.plug) return "";
-  const owner = id => (state.heaters.find(x => x.id === id) || {}).name;
-  const options = [`<option value="">keine</option>`].concat(plugs.map(p => `<option value="${esc(p.id)}" ${
-      p.id === chosen ? "selected" : ""}>${esc(p.name)}${p.heater && p.heater !== h.id ? ` (bei ${esc(owner(p.heater) || "einer anderen Heizung")})` : ""}</option>`));
-  if (h.plug && !plugs.some(p => p.id === h.plug.id)) options.push(`<option value="${esc(h.plug.id)}" ${
-    chosen === h.plug.id ? "selected" : ""}>${esc(h.plug.name)} (${h.plug.kind === "zigbee" ? "nicht im Zigbee-Netz" : "nicht mehr in der App"})</option>`);
-  return `<label class="plug-pick">an der Steckdose <select data-cplug="${esc(h.id)}" aria-label="Steckdose von ${esc(h.name)}">${
-    options.join("")}</select></label>${plugLineHTML(h)}`;
-}
-
-function plugLineHTML(h) {   // what the plug measures – and „Übernehmen“ for the power it measured while the heater heated
+function plugLineHTML(h) {   // the heater's plug: what it measures – and „Übernehmen“ for the power it measured while heating
   const p = h.plug;
   if (!p) return "";
   if (!p.found) return `<p class="hint plug-line">${esc(p.kind === "zigbee" ? `${p.name} ist nicht mehr im Zigbee-Netz.`
@@ -1166,8 +1183,8 @@ function costsCardHTML() {
   const powers = heaters.map(h => `<div class="power-item"><label class="power-row"><span class="pname">${deviceIcon(h)}${esc(h.name)}</span>
       <span class="unit-input"><input data-cpower="${esc(h.id)}" inputmode="numeric" list="power-values" autocomplete="off"
         value="${esc(f.powers[h.id] ?? "")}" placeholder="z. B. 1300" aria-label="Leistung von ${esc(h.name)} in Watt"><span>W</span></span></label>
-      ${plugPickHTML(h, f)}</div>`).join("");
-  const anyPlug = (state.plugs || []).length || heaters.some(h => h.plug);
+      ${plugLineHTML(h)}</div>`).join("");
+  const anyPlug = heaters.some(h => h.plug);
   return `<article class="card costs-card">
     <div class="card-head"><h2>Strom und Kosten</h2></div>
     <p class="hint">Die Heizungen melden keinen Verbrauch. Die App schätzt ihn: Heizdauer × Leistung × Strompreis.</p>
@@ -1177,10 +1194,9 @@ function costsCardHTML() {
       <fieldset><legend>Leistung der Heizungen</legend>${powers}
         <p class="hint">Steht auf dem Typenschild, bei der FlexiSmart Pro je nach Größe 650 bis 2450 W. ${anyPlug
           ? `Hängt eine Heizung an einer Steckdose mit Strommessung, misst die App beim Heizen nach – „Übernehmen“
-          trägt den Wert ein. Die App stellt die Steckdose so ein, dass sie nach einem Stromausfall wieder angeht.`
+          trägt den Wert ein. Welche Steckdose zu welcher Heizung gehört, wählst du unter „Geräte“ › „Steckdosen“.`
           : `Genauer wird es, wenn du einmal einen Tag lang mit einem Zwischenstecker mit Strommessung nachmisst – oder
-          die Heizung an eine Steckdose mit Strommessung hängst (WLAN: unter „Geräte“ › „Steckdosen“${state.app && state.app.zigbee
-          ? ", Zigbee: unter „Zigbee“" : ""}).`}</p></fieldset>
+          die Heizung an eine Steckdose mit Strommessung hängst: unter „Geräte“ mit „+ Gerät hinzufügen“.`}</p></fieldset>
       <datalist id="power-values">${POWER_VALUES.map(w => `<option value="${w}">`).join("")}</datalist>
       <label class="check"><input type="checkbox" data-cfield="show" ${f.show ? "checked" : ""}>
         <span>Strom und Kosten auch auf der Startseite zeigen</span></label>
@@ -1197,7 +1213,7 @@ async function saveCosts() {
   busy.add("costs");
   render();
   try {
-    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers, plugs: f.plugs });
+    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers });
     costForm = null;
     toast(res.message || "Gespeichert.", !!res.warning);
   } catch (e) { toast(e.message, true); }
@@ -1353,7 +1369,7 @@ function renderRooms(el) {
   const adding = roomForm && roomForm.mode === "new";
   const head = `<div class="tab-tools"><button class="small primary" data-action="room-new" ${adding ? "disabled" : ""}>+ Raum</button></div>`
     + (adding ? `<article class="card"><div class="card-head"><h2>Neuer Raum</h2></div>${roomFormHTML(roomForm)}</article>` : "");
-  if (!gs.length) { setHTML(el, head + '<p class="empty">Keine Heizungen konfiguriert – unter „Geräte“ über „+ Heizung“ anlegen.</p>'); return; }
+  if (!gs.length) { setHTML(el, head + '<p class="empty">Keine Heizungen konfiguriert – unter „Geräte“ über „+ Gerät hinzufügen“ anlegen.</p>'); return; }
   setHTML(el, head + gs.map(roomCard).join("") + (state.rooms.length || adding ? "" :
     '<p class="empty">Tipp: Über „+ Raum“ einen Raum anlegen und die Heizungen ankreuzen, die dazugehören. ' +
     'So lassen sich mehrere Heizungen gemeinsam steuern und Heizpläne senden.</p>') + costsCardHTML());
@@ -1745,7 +1761,7 @@ function tokenGuideHTML() {
 // ------------------------------------------------------------------ network search ("Im Netz suchen")
 function scanPanelHTML() {
   const s = scan;
-  if (s.running) return `<div class="scan"><p class="scan-wait">Suche im Heimnetz … das dauert ein paar Sekunden.</p></div>`;
+  if (s.running) return `<div class="scan"><p class="scan-wait searching">Suche im Heimnetz … das dauert ein paar Sekunden.</p></div>`;
   const known = Object.fromEntries(state.heaters.filter(h => h.serial).map(h => [String(h.serial), h]));
   const other = `<div class="row scan-other"><span class="muted">Anderes Netz:</span>
       <input data-field="scan-network" value="${esc(scanNet)}" placeholder="z. B. 192.168.178" autocomplete="off"
@@ -1753,7 +1769,7 @@ function scanPanelHTML() {
       <button class="small" data-action="scan-other">Durchsuchen</button></div>`;
   if (s.error) {
     return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
-      <button class="small" data-action="scan-close">Schließen</button></div>
+      <button class="small" data-action="scan-run">Erneut suchen</button></div>
       <p class="error-text">${esc(s.error)}</p>${other}</div>`;
   }
   const d = s.data;
@@ -1762,7 +1778,7 @@ function scanPanelHTML() {
     const where = [f.address, f.room_temp != null ? deg(f.room_temp) : null].filter(Boolean).join(" · ");
     const status = h ? `<span class="tag">in der App: ${esc(h.name)}</span>`
       : `<button class="small primary" data-action="scan-add" data-address="${esc(f.address)}"
-           data-hostname="${esc(f.hostname || "")}">Hinzufügen</button>`;
+           data-hostname="${esc(f.hostname || "")}">Übernehmen</button>`;
     return `<li><span class="dot ${h ? "ok" : "on"}"></span><span class="hname"><b>${esc(f.hostname || f.serial)}</b>
       <span class="muted">${esc(where)}</span></span>${status}</li>`;
   }).join("");
@@ -1773,8 +1789,7 @@ function scanPanelHTML() {
   return `<div class="scan">
     <div class="scan-head"><strong>Suche im Netz</strong>
       <span class="muted">${esc(d.networks.join(", "))} · ${String(d.seconds).replace(".", ",")} s · ${summary}</span>
-      <button class="small" data-action="scan-run">Erneut suchen</button>
-      <button class="small" data-action="scan-close">Schließen</button></div>
+      <button class="small" data-action="scan-run">Erneut suchen</button></div>
     ${items ? `<ul class="heater-list scan-list">${items}</ul>` : `<p class="hint">Sind die Heizungen eingeschaltet und im
       WLAN? Ausgeschaltete Heizungen antworten nicht. Läuft die App in Docker oder in einem anderen Netz, hier das Heimnetz
       angeben.</p>`}
@@ -1844,8 +1859,8 @@ function sensorPanelHTML() {
       <span class="muted">${s.waiting ? "Danach sucht die App von selbst noch einmal." : "Die App fragt jede Adresse im Heimnetz – das dauert ein paar Sekunden."}</span></div></div>`;
   }
   if (s.error) {
-    return `<div class="scan"><div class="scan-head"><strong>Fühler suchen</strong>
-      <button class="small" data-action="sensor-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
+    return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
+      <button class="small" data-action="sensor-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
   }
   const d = s.data;
   const saved = Object.fromEntries((state.sensors || []).map(x => [x.id, x]));
@@ -1859,8 +1874,7 @@ function sensorPanelHTML() {
   const summary = d.pills.length ? `${d.pills.length} Pill${d.pills.length === 1 ? "" : "s"} gefunden` : "keine Pill gefunden";
   return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
       <span class="muted">${esc(d.networks.join(", "))} · ${String(d.seconds).replace(".", ",")} s · ${summary}</span>
-      <button class="small" data-action="sensor-search">Erneut suchen</button>
-      <button class="small" data-action="sensor-close">Schließen</button></div>
+      <button class="small" data-action="sensor-search">Erneut suchen</button></div>
     ${pills || `<p class="hint">Ist die Pill am USB-Netzteil und im WLAN? Eine neue Pill zuerst mit der Shelly-App ins WLAN
       bringen. Läuft die App in Docker oder in einem anderen Netz, findet sie die Pill nicht.</p>`}
   </div>`;
@@ -1881,39 +1895,51 @@ async function runSensorSearch() {  // one sweep of the home network – a Pill 
 }
 
 // ------------------------------------------------------------------ plugs with power metering („Steckdosen“)
-// Zigbee plugs come from the Zigbee network (anlernen unter „Zigbee“), WLAN plugs (Shelly) from „Steckdosen suchen“.
+// Zigbee plugs come from the Zigbee network, WLAN plugs (Shelly) from the search – both with „+ Gerät hinzufügen“.
+// Which AeroFlow hangs on a plug is chosen at the plug, like the room of a sensor.
 function plugFacts(p) {   // "an · 612 W · heute 1,4 kWh"
   return [p.state === "ON" ? "an" : p.state === "OFF" ? "aus" : "", p.state === "ON" && p.power != null ? wattText(p.power) : "",
           p.energy_today != null ? `heute ${kwhText(p.energy_today)}` : ""].filter(Boolean).join(" · ");
 }
 
+function radioTag(zigbee) { return `<span class="tag radio">${zigbee ? "Zigbee" : "WLAN"}</span>`; }   // how the app reaches it
+
+function zigbeeDevice(ieee) { return ((zigbee && zigbee.net && zigbee.net.devices) || []).find(d => d.ieee === ieee) || null; }
+
+function plugHeaterOptions(plugId, chosen) {   // the AeroFlows a plug can belong to – a thermostat has batteries
+  return ['<option value="">– keine –</option>'].concat(state.heaters.filter(h => h.kind !== "zigbee").map(h => `<option value="${
+    esc(h.id)}" ${h.id === chosen ? "selected" : ""}>${esc(h.name)}${h.plug && h.plug.id !== plugId
+    ? ` (hängt an ${esc(h.plug.name)})` : ""}</option>`)).join("");
+}
+
 function plugTileHTML(p) {
-  const owner = p.heater && state.heaters.find(h => h.id === p.heater);
-  const removing = busy.has("plug:" + p.id);
-  const device = p.kind === "zigbee" ? [p.model, "Zigbee"] : [p.model, p.device_name, p.address];
+  const removing = busy.has("plug:" + p.id) || zigbeeNetPending === p.id;
+  const z = p.kind === "zigbee" ? zigbeeDevice(p.id) : null;
+  const device = p.kind === "zigbee" ? [p.model, z && zigbeeSignal(z.signal)] : [p.model, p.device_name, p.address];
+  const aeroflows = state.heaters.some(h => h.kind !== "zigbee");
   return `<div class="device ${removing ? "busy" : ""}" data-plug="${esc(p.id)}">
     <div class="device-head"><span class="dot ${p.error ? "offline" : p.found ? "ok" : ""}"></span><strong class="dname">${esc(p.name)}</strong>
-      <span class="muted">${esc(plugFacts(p) || (p.found ? "" : "noch kein Messwert"))}</span>
-      ${p.kind === "wifi" ? `<button class="small" data-action="plug-remove" ${removing ? "disabled" : ""}>${removing
-        ? "entferne …" : "Entfernen …"}</button>` : ""}</div>
+      ${radioTag(p.kind === "zigbee")}<span class="muted">${esc(plugFacts(p) || (p.found ? "" : "noch kein Messwert"))}</span>
+      <button class="small" data-action="plug-remove" ${removing ? "disabled" : ""}>${removing ? "entferne …" : "Entfernen …"}</button></div>
     <dl>
-      <dt>Heizung</dt><dd>${owner ? `gehört zu ${esc(owner.name)}`
-        : "gehört noch zu keiner Heizung – zuordnen unter „Räume“ › „Strom und Kosten“"}</dd>
-      <dt>Gerät</dt><dd>${esc(device.filter(Boolean).join(" · ") || "–")}${p.kind === "zigbee"
-        ? ' <span class="muted">(anlernen und entfernen unter „Zigbee“)</span>' : ""}</dd>
+      <dt>Heizung</dt><dd>${aeroflows ? `<select data-action="plug-heater" aria-label="Heizung an ${esc(p.name)}" ${
+        busy.has("plugheater:" + p.id) ? "disabled" : ""}>${plugHeaterOptions(p.id, p.heater)}</select>`
+        : '<span class="muted">noch keine AeroFlow-Heizung in der App</span>'}</dd>
+      <dt>Gerät</dt><dd>${esc(device.filter(Boolean).join(" · ") || "–")}</dd>
+      ${p.kind === "zigbee" ? `<dt>Zigbee-Adresse</dt><dd>${esc(p.id)}</dd>` : ""}
       ${p.error ? `<dt>Zustand</dt><dd><span class="error-text">${esc(p.error)}</span></dd>` : ""}
     </dl></div>`;
 }
 
-function plugSearchPanelHTML() {
+function plugSearchPanelHTML() {   // the WLAN part of „+ Gerät hinzufügen“ › Steckdose
   const s = plugSearch;
   if (s.running) {
-    return `<div class="scan"><div class="scan-head"><strong class="searching">Suche läuft …</strong>
+    return `<div class="scan"><div class="scan-head"><strong class="searching">Suche im WLAN …</strong>
       <span class="muted">Die App fragt jede Adresse im Heimnetz – das dauert ein paar Sekunden.</span></div></div>`;
   }
   if (s.error) {
-    return `<div class="scan"><div class="scan-head"><strong>Steckdosen suchen</strong>
-      <button class="small" data-action="plug-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
+    return `<div class="scan"><div class="scan-head"><strong>Suche im WLAN</strong>
+      <button class="small" data-action="plug-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
   }
   const d = s.data, known = new Set((state.plugs || []).map(p => p.id));
   const rows = d.plugs.map(p => {
@@ -1926,34 +1952,20 @@ function plugSearchPanelHTML() {
       <span class="muted">${esc([p.model, p.device_name, p.address, facts].filter(Boolean).join(" · "))}</span></span>${status}</li>`;
   }).join("");
   const summary = d.plugs.length ? `${d.plugs.length} Steckdose${d.plugs.length === 1 ? "" : "n"} gefunden` : "keine Steckdose gefunden";
-  return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
+  return `<div class="scan"><div class="scan-head"><strong>Suche im WLAN</strong>
       <span class="muted">${esc(d.networks.join(", "))} · ${String(d.seconds).replace(".", ",")} s · ${summary}</span>
-      <button class="small" data-action="plug-search">Erneut suchen</button>
-      <button class="small" data-action="plug-close">Schließen</button></div>
+      <button class="small" data-action="plug-search">Erneut suchen</button></div>
     ${rows ? `<ul class="heater-list scan-list">${rows}</ul>` : `<p class="hint">Ist die Steckdose eingesteckt und im WLAN?
-      Eine neue Steckdose zuerst ins WLAN bringen (siehe oben). Läuft die App in Docker oder in einem anderen Netz, findet
-      sie die Steckdose nicht.</p>`}
+      Dann „Erneut suchen“. Läuft die App in Docker oder in einem anderen Netz, findet sie die Steckdose nicht.</p>`}
   </div>`;
 }
 
 function plugsCardHTML() {
   const plugs = state.plugs || [];
-  return `<article class="card"><div class="card-head"><h2>Steckdosen mit Strommessung</h2>
-      <button class="small primary" data-action="plug-search" ${plugSearch && plugSearch.running ? "disabled" : ""}>Steckdosen suchen</button></div>
+  return `<article class="card"><div class="card-head"><h2>Steckdosen mit Strommessung</h2></div>
     <p class="hint">Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen, wie viel Strom sie
-      wirklich zieht. Ist die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten
-      tut die App eine Steckdose nie. Im WLAN passt die <b>Shelly Plug M Gen3</b> (bis 3.000 W).${state.app && state.app.zigbee
-      ? " Zigbee-Steckdosen lernst du unter „Zigbee“ an." : ""}</p>
-    <details class="plug-howto"><summary>So kommt eine neue Shelly-Steckdose ins WLAN</summary>
-      <ol class="zigbee-steps">
-        <li>Die Steckdose einstecken. Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt. Sonst in
-          der ersten Minute nach dem Einstecken die Taste 5 Sekunden halten, bis sie blau blinkt.</li>
-        <li>Mit dem Handy in dieses WLAN gehen und im Browser 192.168.33.1 öffnen.</li>
-        <li>Dort das Heim-WLAN mit seinem Passwort eintragen.</li>
-        <li>Hier „Steckdosen suchen“ drücken und bei der Steckdose „Übernehmen“. Zu ihrer Heizung gehört sie, sobald du sie
-          unter „Räume“ › „Strom und Kosten“ auswählst.</li>
-      </ol></details>
-    ${plugSearch ? plugSearchPanelHTML() : ""}
+      wirklich zieht. Zu welcher Heizung eine Steckdose gehört, wählst du hier bei der Steckdose. Ist die Steckdose aus,
+      zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten tut die App eine Steckdose nie.</p>
     ${plugs.map(plugTileHTML).join("")}
     ${plugs.length ? "" : '<p class="empty">Noch keine Steckdose in der App.</p>'}
   </article>`;
@@ -1973,19 +1985,60 @@ async function runPlugSearch() {  // one sweep of the home network for Shelly pl
   await refresh();
 }
 
-function adoptPlug(id) {   // „Übernehmen“: the plug from the search becomes a plug of the app
-  act("plug:" + id, async () => toast((await api("POST", "api/plugs", { plug: id })).message));
+async function adoptPlug(id) {   // „Übernehmen“: the plug from the search becomes a plug of the app – then: which heater?
+  const key = "plug:" + id;
+  if (busy.has(key)) return;
+  busy.add(key);
+  render();
+  try {
+    toast((await api("POST", "api/plugs", { plug: id })).message);
+    if (addFlow) addWhere("plug", id);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
 }
 
-async function removePlug(id) {   // „Entfernen …“: the app forgets a WLAN plug – the plug itself stays as it is
+async function setPlugHeater(id, heater, quiet = false) {   // „gehört zu“ at the plug – true when saved
+  const key = "plugheater:" + id;
+  if (busy.has(key)) return false;
+  busy.add(key);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  let ok = false;
+  try {
+    const res = await api("PUT", `api/plugs/${encodeURIComponent(id)}/heater`, { heater: heater || null });
+    if (!quiet || res.warning) toast(res.message || "Gespeichert.", !!res.warning);
+    ok = true;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
+  return ok;
+}
+
+async function removePlug(id) {   // „Entfernen …“: a WLAN plug the app forgets, a Zigbee plug the Pi unpairs – the plug stays as it is
   const p = (state.plugs || []).find(x => x.id === id);
   if (!p) return;
   const owner = p.heater && state.heaters.find(h => h.id === p.heater);
+  const zigbeePlug = p.kind === "zigbee";
   const yes = await ask({ title: "Steckdose entfernen?",
-    text: `Die App liest ${p.name} dann nicht mehr.${owner ? ` Sie gehört dann auch nicht mehr zu ${owner.name}.` : ""} Die ` +
-      "Steckdose selbst bleibt, wie sie ist – an oder aus. Später kannst du sie wieder suchen und übernehmen.",
+    text: (zigbeePlug ? `Der Pi meldet ${p.name} im Zigbee-Netz ab.` : `Die App liest ${p.name} dann nicht mehr.`) +
+      (owner ? ` Sie gehört dann auch nicht mehr zu ${owner.name}.` : "") + " Die Steckdose selbst bleibt, wie sie ist – an " +
+      `oder aus. Später kannst du sie mit „+ Gerät hinzufügen“ wieder ${zigbeePlug ? "anlernen" : "übernehmen"}.`,
     buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
-  if (yes) act("plug:" + id, async () => toast((await api("DELETE", `api/plugs/${encodeURIComponent(id)}`)).message));
+  if (!yes) return;
+  if (zigbeePlug) {
+    await zigbeeUnpair(id, "die Steckdose", "sie");
+    return refresh();
+  }
+  act("plug:" + id, async () => toast((await api("DELETE", `api/plugs/${encodeURIComponent(id)}`)).message));
 }
 
 function sensorTileHTML(s, roomOptions) {
@@ -2321,6 +2374,11 @@ async function saveSensor() {
                                  : await api("PATCH", `api/sensors/${encodeURIComponent(f.id)}`, body);
     sensorForm = null;
     toast(res.message || "Gespeichert.");
+    if (f.mode === "new" && addFlow) {
+      deviceTab = "sensors";
+      localStorage.setItem("heizung.deviceTab", deviceTab);
+      closeAdd();
+    }
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -2471,72 +2529,350 @@ function deviceFilterBar() {
     ${state.rooms.map(r => chip(r.id, r.name)).join("")}${chip("none", "Nicht zugeordnet")}</div>`;
 }
 
-function renderDevices(el) {
+function heaterTileHTML(h, roomOptions) {
+  const editingThis = deviceForm && deviceForm.mode === "edit" && deviceForm.id === h.id;
+  const calibThis = !editingThis && calibForm && calibForm.id === h.id;
+  return `<div class="device ${busy.has("dev:" + h.id) ? "busy" : ""}" data-heater="${esc(h.id)}">
+    <div class="device-head"><span class="dot ${h.online ? "ok" : "offline"}"></span>
+      <strong class="dname">${esc(h.name)}</strong>${radioTag(h.kind === "zigbee")}
+      ${h.custom_name && h.hostname ? `<span class="muted">${esc(h.hostname)}</span>` : ""}
+      ${editingThis || calibThis ? "" : '<button class="small" data-action="dev-edit">Bearbeiten</button>'}</div>
+    ${editingThis ? deviceFormHTML(deviceForm) : calibThis ? calibFormHTML(h)
+      : h.kind === "zigbee" ? thermostatFactsHTML(h, roomOptions) : `<dl>
+      <dt>Raum</dt><dd><select data-action="heater-room" aria-label="Raum">${roomOptions(h.room)}</select></dd>
+      <dt>Adresse</dt><dd>${esc(h.host)}${h.hostname ? " · " + esc(h.hostname) : ""}</dd>
+      <dt>Status</dt><dd>${h.online ? "online" : "offline"}${h.error ? ` <span class="error-text">${esc(h.error)}</span>` : ""}</dd>
+      <dt>Steuerung</dt><dd>${h.writable ? "möglich (Token hinterlegt)" : "nur lesen – kein Token (unter „Bearbeiten“ eintragen)"}</dd>
+      <dt>Uhr</dt><dd>${esc(clockText(h))}${h.device_time && Math.abs(h.clock_drift ?? 0) > 5 ? ` <span class="muted">(Heizung: ${esc(h.device_time)})</span>` : ""}
+        ${h.writable && h.online ? '<button class="small" data-action="clock-one">stellen</button>' : ""}</dd>
+      <dt>Kalibrierung</dt><dd>${h.temp_corr == null ? "–" : `Korrektur ${fmtDelta(h.temp_corr)}`}
+        ${h.writable && h.online ? '<button class="small" data-action="calib-open">Kalibrieren</button>' : ""}</dd>
+      <dt>Heizpläne</dt><dd>${h.plan_slot ? `Plan ${h.plan_slot} ausgewählt${h.mode === "auto" ? ", Automatik läuft" : ""}` : "–"}
+        <button class="small" data-action="import-plans" ${h.online ? "" : "disabled"}>${busy.has("dev:" + h.id)
+          ? "lese aus …" : "Heizplan aus Heizung auslesen"}</button></dd>
+      <dt>Seriennr.</dt><dd>${esc(h.serial ?? "–")}</dd>
+      <dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}</dd>
+    </dl>`}</div>`;
+}
+
+function heatersCardHTML(roomOptions) {   // AeroFlow heaters (WLAN) and SONOFF thermostats (Zigbee)
+  const visible = state.heaters.filter(h => deviceFilter === "all" || (deviceFilter === "none" ? !h.room : h.room === deviceFilter));
+  const empty = !visible.length && state.heaters.length ? `<p class="empty">${deviceFilter === "none"
+    ? "Alle Heizungen sind einem Raum zugeordnet." : "Diesem Raum ist keine Heizung zugeordnet."}</p>` : "";
+  const thermostats = state.app.zigbee || state.heaters.some(h => h.kind === "zigbee");
+  return `<article class="card"><div class="card-head"><h2>${thermostats ? "Heizungen und Thermostate" : "Heizungen"}</h2>
+      ${state.heaters.some(h => h.kind !== "zigbee") ? '<button class="small" data-action="clock-all">Alle Uhren stellen</button>' : ""}</div>
+    <p class="hint">Die App stellt die Uhren der AeroFlow-Heizungen selbst: beim Start, bei mehr als 1 Minute Abweichung und
+      täglich um 3 Uhr (deckt auch Sommer-/Winterzeit ab). Ist eine Heizung länger nicht erreichbar, sucht sie sie im Netz
+      und übernimmt eine neue Adresse selbst. Räume legst du im Tab „Räume“ über „+ Raum“ an.</p>
+    ${state.heaters.length ? deviceFilterBar() : '<p class="empty">Noch keine Heizung in der App.</p>'}
+    ${visible.map(h => heaterTileHTML(h, roomOptions)).join("")}${empty}
+  </article>`;
+}
+
+function sensorsCardHTML(roomOptions) {
+  const sensors = state.sensors || [];
+  return `<article class="card"><div class="card-head"><h2>Raumfühler</h2></div>
+    <p class="hint">Als Raumfühler dient die <b>Shelly Pill</b> am USB-Netzteil, mit eingestecktem Temperaturfühler
+      (DS18B20) oder einem DHT22. Sie schläft nie – die App liest sie jede Minute.</p>
+    ${sensors.map(s => sensorTileHTML(s, roomOptions)).join("")}
+    ${sensors.length ? "" : '<p class="empty">Noch kein Fühler gespeichert.</p>'}
+  </article>`;
+}
+
+function zigbeeOthersHTML() {   // in the Zigbee network, but neither a thermostat nor a plug of the app: being paired, failed, unknown
+  if (!(state.app && state.app.zigbee)) return "";
+  const shown = new Set(state.heaters.map(h => h.id).concat((state.plugs || []).map(p => p.id)));
+  const others = ((zigbee && zigbee.net && zigbee.net.devices) || []).filter(d => !shown.has(d.ieee));
+  if (!others.length) return "";
+  return `<article class="card"><div class="card-head"><h2>Weitere Zigbee-Geräte</h2></div>
+    <p class="hint">Diese Geräte sind im Zigbee-Netz, aber (noch) kein Thermostat und keine Steckdose der App.</p>
+    <ul class="net-list zigbee-list">${others.map(zigbeeDeviceHTML).join("")}</ul>
+  </article>`;
+}
+
+function renderDevices(el) {   // every device by its kind – new ones come with „+ Gerät hinzufügen“
   el.className = "tab single";
   if (deviceFilter !== "all" && deviceFilter !== "none" && !state.rooms.some(r => r.id === deviceFilter)) {
     deviceFilter = "all";  // the filtered room was deleted
   }
   const roomOptions = sel => ['<option value="">– kein Raum –</option>'].concat(state.rooms.map(r =>
     `<option value="${esc(r.id)}" ${r.id === sel ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
-  const visible = state.heaters.filter(h => deviceFilter === "all" || (deviceFilter === "none" ? !h.room : h.room === deviceFilter));
-  const empty = !visible.length && state.heaters.length ? `<p class="empty">${deviceFilter === "none"
-    ? "Alle Heizungen sind einem Raum zugeordnet." : "Diesem Raum ist keine Heizung zugeordnet."}</p>` : "";
-  const heaters = visible.map(h => {
-    const editingThis = deviceForm && deviceForm.mode === "edit" && deviceForm.id === h.id;
-    const calibThis = !editingThis && calibForm && calibForm.id === h.id;
-    return `<div class="device ${busy.has("dev:" + h.id) ? "busy" : ""}" data-heater="${esc(h.id)}">
-      <div class="device-head"><span class="dot ${h.online ? "ok" : "offline"}"></span>
-        <strong class="dname">${esc(h.name)}</strong>
-        ${h.custom_name && h.hostname ? `<span class="muted">${esc(h.hostname)}</span>` : ""}
-        ${editingThis || calibThis ? "" : '<button class="small" data-action="dev-edit">Bearbeiten</button>'}</div>
-      ${editingThis ? deviceFormHTML(deviceForm) : calibThis ? calibFormHTML(h)
-        : h.kind === "zigbee" ? thermostatFactsHTML(h, roomOptions) : `<dl>
-        <dt>Raum</dt><dd><select data-action="heater-room" aria-label="Raum">${roomOptions(h.room)}</select></dd>
-        <dt>Adresse</dt><dd>${esc(h.host)}${h.hostname ? " · " + esc(h.hostname) : ""}</dd>
-        <dt>Status</dt><dd>${h.online ? "online" : "offline"}${h.error ? ` <span class="error-text">${esc(h.error)}</span>` : ""}</dd>
-        <dt>Steuerung</dt><dd>${h.writable ? "möglich (Token hinterlegt)" : "nur lesen – kein Token (unter „Bearbeiten“ eintragen)"}</dd>
-        <dt>Uhr</dt><dd>${esc(clockText(h))}${h.device_time && Math.abs(h.clock_drift ?? 0) > 5 ? ` <span class="muted">(Heizung: ${esc(h.device_time)})</span>` : ""}
-          ${h.writable && h.online ? '<button class="small" data-action="clock-one">stellen</button>' : ""}</dd>
-        <dt>Kalibrierung</dt><dd>${h.temp_corr == null ? "–" : `Korrektur ${fmtDelta(h.temp_corr)}`}
-          ${h.writable && h.online ? '<button class="small" data-action="calib-open">Kalibrieren</button>' : ""}</dd>
-        <dt>Heizpläne</dt><dd>${h.plan_slot ? `Plan ${h.plan_slot} ausgewählt${h.mode === "auto" ? ", Automatik läuft" : ""}` : "–"}
-          <button class="small" data-action="import-plans" ${h.online ? "" : "disabled"}>${busy.has("dev:" + h.id)
-            ? "lese aus …" : "Heizplan aus Heizung auslesen"}</button></dd>
-        <dt>Seriennr.</dt><dd>${esc(h.serial ?? "–")}</dd>
-        <dt>Firmware</dt><dd>${esc(h.firmware ?? "–")}</dd>
-      </dl>`}</div>`;
-  }).join("");
+  if (addFlow) return setHTML(el, addFlowHTML(roomOptions));
   const subtab = (id, label, count) => `<button data-subtab="${id}" role="tab" aria-selected="${deviceTab === id}">${label}
       <span class="count">${count}</span></button>`;
-  const subtabs = `<div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizung", state.heaters.length)}
-      ${subtab("sensors", "Fühler", (state.sensors || []).length)}${subtab("plugs", "Steckdosen", (state.plugs || []).length)}</div>`;
-  if (deviceTab === "plugs") return setHTML(el, subtabs + plugsCardHTML());
-  if (deviceTab === "sensors") {
-    return setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Raumfühler</h2>
-      <button class="small primary" data-action="sensor-search" ${sensorSearch && sensorSearch.running ? "disabled" : ""}>Fühler suchen</button></div>
-      <p class="hint">Als Raumfühler dient die <b>Shelly Pill</b> am USB-Netzteil, mit eingestecktem Temperaturfühler
-      (DS18B20) oder einem DHT22. Sie schläft nie – die App liest sie jede Minute. „Fühler suchen“ findet Pills im WLAN;
-      gefundene Fühler mit „Übernehmen“ speichern und einem Raum zuordnen. Eine neue Pill zuerst mit der Shelly-App ins
-      WLAN bringen.</p>
-      ${sensorSearch ? sensorPanelHTML() : ""}
-      ${sensorForm && sensorForm.mode === "new" ? `<div class="device">${sensorFormHTML(sensorForm)}</div>` : ""}
-      ${(state.sensors || []).map(s => sensorTileHTML(s, roomOptions)).join("")}
-      ${!(state.sensors || []).length && !sensorForm ? '<p class="empty">Noch kein Fühler gespeichert.</p>' : ""}
-    </article>`);
+  const bar = `<div class="devices-bar"><div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizungen",
+      state.heaters.length)}${subtab("sensors", "Raumfühler", (state.sensors || []).length)}${subtab("plugs", "Steckdosen",
+      (state.plugs || []).length)}</div>
+    <button class="primary" data-action="add-open">+ Gerät hinzufügen</button></div>`;
+  const list = deviceTab === "plugs" ? plugsCardHTML() : deviceTab === "sensors" ? sensorsCardHTML(roomOptions)
+    : heatersCardHTML(roomOptions);
+  setHTML(el, bar + list + zigbeeOthersHTML());
+}
+
+// ------------------------------------------------------------------ „+ Gerät hinzufügen“
+// 1 Was? – 2 So geht's: a short guide, and the app searches by itself (in the WLAN, over Zigbee or both) – 3 Gefunden:
+// „Übernehmen“ (a Zigbee device joins by itself) – 4 Wohin?: the room, for a plug its heater
+const ADD_STEPS = ["Was?", "So geht’s", "Gefunden", "Wohin?"];
+const THERMOSTAT_STEPS = ["Batterien ins Thermostat legen, falls sie noch nicht drin sind.",
+  "Das Drehrad unter 5 °C drehen, bis das Thermostat aus ist.",
+  "Die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt.",
+  "Warten: Nach etwa einer Minute erscheint es hier."];
+const SHELLY_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.",
+  "Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt. Sonst in der ersten Minute nach dem " +
+  "Einstecken die Taste 5 Sekunden halten, bis sie blau blinkt.",
+  "Mit dem Handy in dieses WLAN gehen, im Browser 192.168.33.1 öffnen und dort das Heim-WLAN mit seinem Passwort eintragen.",
+  "Die App sucht im Heimnetz. Bei der Steckdose „Übernehmen“ drücken – ist sie noch nicht dabei, „Erneut suchen“."];
+const SONOFF_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.",
+  "Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.",
+  "Warten: Nach etwa einer Minute erscheint sie hier."];
+
+function zigbeeReady() { return !!(zigbee && zigbee.supported && zigbee.net && zigbee.net.bridge === "online"); }
+function zigbeeSearching() { return !!(zigbee && zigbee.net && zigbee.net.search && zigbee.net.search.active); }
+function zigbeeAddresses() { return new Set(((zigbee && zigbee.net && zigbee.net.devices) || []).map(d => d.ieee)); }
+function addNewZigbee() {   // the Zigbee devices that came since the guide opened
+  const f = addFlow;
+  return ((zigbee && zigbee.net && zigbee.net.devices) || []).filter(d => f && f.before && !f.before.has(d.ieee));
+}
+
+function addKinds() {   // what can be added here: a thermostat only on a Pi with Zigbee
+  const zig = !!(state.app && state.app.zigbee);
+  return [["heater", "Heizung", "AeroFlow-Heizung mit FlexiSmart-Pro-Regler – im WLAN"]]
+    .concat(zig ? [["thermostat", "Thermostat", "SONOFF-Thermostat für einen Heizkörper – funkt über Zigbee"]] : [])
+    .concat([["sensor", "Raumfühler", "Shelly Pill mit Temperaturfühler – im WLAN"],
+             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
+}
+
+function addStep() {   // 0 … 3 for the steps above the guide
+  const f = addFlow;
+  if (f.step === "what") return 0;
+  if (f.step === "where" || (sensorForm && sensorForm.mode === "new")) return 3;
+  const found = f.kind === "heater" ? !!(deviceForm && deviceForm.mode === "new") || !!(scan && scan.data && scan.data.heaters.length)
+    : f.kind === "sensor" ? !!(sensorSearch && sensorSearch.data && sensorSearch.data.pills.length)
+    : addNewZigbee().length > 0 || (f.kind === "plug" && !!(plugSearch && plugSearch.data && plugSearch.data.plugs.length));
+  return found ? 2 : 1;
+}
+
+function addHowHTML(steps, title = "So geht’s") {
+  return `<div class="add-how"><h3>${title}</h3><ol class="zigbee-steps">${steps.map(s => `<li>${s}</li>`).join("")}</ol></div>`;
+}
+
+function zigbeeMissingHTML() {
+  if (zigbeeStarting()) return '<p class="searching">Zigbee startet gerade – einen Moment …</p>';
+  return `<div class="wifi-note"><p><b>Dafür braucht der Pi zuerst den Zigbee-Funk.</b></p>
+    <p>Das richtest du einmal unter „Verbindungen“ › „Zigbee-Funk“ ein: Zigbee-Stick einstecken, die Zusatzprogramme
+      installieren und einen Funkkanal wählen. Danach geht es hier weiter.</p>
+    <button class="small primary" data-action="add-to-zigbee">Zu „Verbindungen“</button></div>`;
+}
+
+function zigbeeSearchStateHTML() {   // the Zigbee network open for new devices: time left – or search again
+  const s = (zigbee.net && zigbee.net.search) || {}, f = addFlow;
+  if (s.active) {
+    const left = `${Math.floor(s.left / 60)}:${String(s.left % 60).padStart(2, "0")}`;
+    return `<div class="scan"><div class="scan-head"><strong class="searching">Zigbee-Suche läuft – noch ${left}</strong>
+        <button class="small" data-action="zigbee-unsearch" ${zigbeeNetPending ? "disabled" : ""}>${
+          zigbeeNetPending === "unsearch" ? "beende …" : "Suche beenden"}</button></div>
+      <p class="hint">Mehrere Geräte gehen nacheinander in derselben Suche. Klappt es nicht, das Gerät zum Anlernen näher
+        an den Pi bringen. Eine Steckdose gibt das Funksignal auch weiter – Thermostate weiter weg erreichen den Pi dann
+        besser.</p></div>`;
   }
-  setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Heizungen</h2>
-      <button class="small" data-action="clock-all">Alle Uhren stellen</button>
-      <button class="small" data-action="scan-run" ${scan && scan.running ? "disabled" : ""}>Im Netz suchen</button>
-      <button class="small primary" data-action="dev-new" ${deviceForm && deviceForm.mode === "new" ? "disabled" : ""}>+ Heizung</button></div>
-      <p class="hint">Die App stellt die Uhren selbst: beim Start, bei mehr als 1 Minute Abweichung und täglich um 3 Uhr
-      (deckt auch Sommer-/Winterzeit ab). Ist eine Heizung länger nicht erreichbar, sucht sie sie im Netz und übernimmt
-      eine neue Adresse selbst. Räume legst du im Tab „Räume“ über „+ Raum“ an.${state.app && state.app.zigbee
-      ? " SONOFF-Thermostate erscheinen hier von selbst, sobald sie unter „Zigbee“ angelernt sind." : ""}</p>
-      ${scan ? scanPanelHTML() : ""}
-      ${state.heaters.length ? deviceFilterBar() : ""}
-      ${deviceForm && deviceForm.mode === "new" ? `<div class="device">${deviceFormHTML(deviceForm)}</div>` : ""}
-      ${heaters}${empty}
-    </article>`);
+  const text = zigbeeNetPending === "search" ? "Öffne das Zigbee-Netz …" : f.opened ? "Die Zigbee-Suche ist beendet." : "";
+  return `<div class="scan"><div class="scan-head">${text ? `<strong>${text}</strong>` : ""}
+    <button class="small ${f.opened ? "" : "primary"}" data-action="add-zigbee-again" ${zigbeeNetPending || zigbeeBusy()
+      ? "disabled" : ""}>${f.opened ? "Noch einmal suchen" : "Suche starten"}</button></div></div>`;
+}
+
+function addZigbeeItemHTML(d) {   // a device that joined: being paired, ready („Weiter“), failed or unknown („Entfernen …“)
+  const heater = state.heaters.find(h => h.id === d.ieee), plug = (state.plugs || []).find(p => p.id === d.ieee);
+  const ready = d.interview === "done" && d.supported && !!(heater || plug);
+  const [dot, words] = zigbeeDeviceState(d);
+  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : "Unbekanntes Gerät");
+  const title = heater ? heater.name : plug ? plug.name : model;
+  const bad = d.interview === "failed" || (d.interview === "done" && !d.supported);
+  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${ready ? "ok" : dot}"></span><span class="hname"><b>${esc(title)}</b>${
+      title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
+      <span class="muted zigbee-facts">${esc(ready ? "✓ angelernt" : words)}</span></span>
+    ${ready ? `<button class="small primary" data-action="add-next" data-type="${heater ? "heater" : "plug"}">Weiter</button>`
+      : bad ? `<button class="small" data-action="zigbee-forget" ${zigbeeNetPending ? "disabled" : ""}>${
+        zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button>` : ""}</li>`;
+}
+
+function addZigbeeHTML(steps, title) {   // guide, the open network and what joined
+  const found = addNewZigbee();
+  return addHowHTML(steps, title) + zigbeeSearchStateHTML()
+    + (found.length ? `<ul class="net-list zigbee-list">${found.map(addZigbeeItemHTML).join("")}</ul>` : "");
+}
+
+function addFindHTML() {   // steps 2 and 3: the guide and what the search found
+  const f = addFlow;
+  if (f.kind === "heater") {
+    if (deviceForm && deviceForm.mode === "new") return `<div class="device">${deviceFormHTML(deviceForm)}</div>`;
+    return addHowHTML(["Die Heizung einschalten. Sie muss im selben WLAN sein wie die App – wie sie ins WLAN kommt, steht in ihrer Anleitung.",
+        "Die App sucht im Heimnetz nach Heizungen.",
+        "Bei deiner Heizung „Übernehmen“ drücken und den Token eintragen – wie du an ihn kommst, steht dann dabei."])
+      + (scan ? scanPanelHTML() : "")
+      + `<p class="hint">Nicht dabei? Adresse und Token <button class="small" data-action="add-manual">von Hand eintragen</button></p>`;
+  }
+  if (f.kind === "sensor") {
+    if (sensorForm && sensorForm.mode === "new") return `<div class="device">${sensorFormHTML(sensorForm)}</div>`;
+    return addHowHTML(["Den Temperaturfühler (DS18B20 oder DHT22) in die Pill stecken und die Pill an ihr USB-Netzteil.",
+        "Eine neue Pill zuerst mit der Shelly-App ins WLAN bringen.",
+        "Die App sucht im Heimnetz. Beim Fühler „Übernehmen“ drücken, dann Name und Raum wählen."])
+      + (sensorSearch ? sensorPanelHTML() : "");
+  }
+  if (f.kind === "thermostat") {
+    if (!zigbee) return `<p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p>`;
+    return zigbeeReady() ? addZigbeeHTML(THERMOSTAT_STEPS) : zigbeeMissingHTML();
+  }
+  // a plug: Shelly in the WLAN – and with Zigbee a SONOFF too; both searches run at once
+  const zig = state.app && state.app.zigbee;
+  return addHowHTML(SHELLY_STEPS, "Shelly-Steckdose im WLAN <span class=\"muted\">(zum Beispiel Shelly Plug M Gen3)</span>")
+    + (plugSearch ? plugSearchPanelHTML() : "")
+    + (!zig ? "" : !zigbee ? '<p class="searching">Frage den Pi nach Zigbee …</p>'
+      : zigbeeReady() ? addZigbeeHTML(SONOFF_STEPS, "SONOFF-Steckdose über Zigbee <span class=\"muted\">(zum Beispiel S60ZBTPF)</span>")
+      : '<p class="hint">Eine Zigbee-Steckdose geht, sobald der Zigbee-Funk eingerichtet ist – unter „Verbindungen“ › „Zigbee-Funk“.</p>');
+}
+
+function addWhereHTML(roomOptions) {   // step 4: the room – for a plug the heater it gives power
+  const f = addFlow, w = f.where, saving = busy.has("addflow") || busy.has("plugheater:" + w.id);
+  const done = `<div class="row"><button class="primary" data-action="add-finish" ${saving ? "disabled" : ""}>${
+    saving ? "speichere …" : "Fertig"}</button></div>`;
+  if (w.type === "plug") {
+    const p = (state.plugs || []).find(x => x.id === w.id);
+    if (!state.heaters.some(h => h.kind !== "zigbee")) {
+      return `<p><b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App.</p><p class="hint">Noch keine AeroFlow-Heizung in
+        der App. Zu welcher Heizung die Steckdose gehört, wählst du später bei ihr unter „Steckdosen“.</p>${done}`;
+    }
+    return `<p><b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App. Zu welcher Heizung gehört sie?</p>
+      <div class="device-form"><label>Heizung<select data-afield="heater">${plugHeaterOptions(w.id, f.heater)}</select></label>
+      <p class="hint">Die App stellt die Steckdose dabei so ein, dass sie nach einem Stromausfall wieder angeht.</p></div>${done}`;
+  }
+  const h = state.heaters.find(x => x.id === w.id), thermostat = h ? h.kind === "zigbee" : String(w.id).startsWith("0x");
+  return `<p><b>${esc(h ? h.name : thermostat ? "Das Thermostat" : "Die Heizung")}</b> ist in der App. In welchem Raum ${
+      thermostat ? "hängt es" : "steht sie"}?</p>
+    <div class="device-form">
+      ${thermostat ? `<label>Name<input data-afield="name" value="${esc(f.name)}" placeholder="${esc(h ? h.name : "")}"
+        maxlength="40" autocomplete="off"></label>` : ""}
+      <label>Raum<select data-afield="room">${roomOptions(f.room)}</select></label>
+      ${state.rooms.length ? "" : '<p class="hint">Noch kein Raum angelegt – Räume legst du im Tab „Räume“ über „+ Raum“ an.</p>'}
+    </div>${done}`;
+}
+
+function addFlowHTML(roomOptions) {
+  const f = addFlow, now = addStep();
+  const kind = f.kind && addKinds().find(k => k[0] === f.kind);
+  const steps = ADD_STEPS.map((label, i) => `<li class="${i < now ? "done" : i === now ? "now" : ""}"${
+    i === now ? ' aria-current="step"' : ""}>${label}</li>`).join("");
+  const body = f.step === "what"
+    ? `<p>Was kommt dazu?</p><div class="choices">${addKinds().map(([id, label, text]) => `<button class="choice"
+        data-action="add-kind" data-kind="${id}"><b>${label}</b><span>${esc(text)}</span></button>`).join("")}</div>`
+    : f.step === "where" ? addWhereHTML(roomOptions) : addFindHTML();
+  const form = (deviceForm && deviceForm.mode === "new") || (sensorForm && sensorForm.mode === "new");   // has its own „Abbrechen“
+  return `<article class="card add-flow">
+    <div class="card-head"><h2>${kind ? `${kind[1]} hinzufügen` : "Gerät hinzufügen"}</h2>
+      ${f.step === "find" && !form ? '<button class="small" data-action="add-back">Zurück</button>' : ""}
+      <button class="small" data-action="add-close">${f.step === "where" ? "Später" : "Abbrechen"}</button></div>
+    <ol class="add-steps" aria-label="Schritte">${steps}</ol>
+    ${body}
+  </article>`;
+}
+
+function openAdd() {
+  addFlow = { step: "what" };
+  deviceForm = calibForm = sensorForm = pillForm = null;
+  scan = sensorSearch = plugSearch = null;
+  if (state.app.zigbee && !zigbee) loadZigbee();
+  invalidate();
+  render();
+  window.scrollTo(0, 0);
+}
+
+function addReset() {   // leave the guide or go back to „Was?“: searches and half-filled forms go; an open Zigbee search closes
+  const opened = addFlow && addFlow.opened;
+  scan = sensorSearch = plugSearch = null;
+  if (deviceForm && deviceForm.mode === "new") deviceForm = null;
+  if (sensorForm && sensorForm.mode === "new") sensorForm = null;
+  if (pillForm && pillForm.at === "search") pillForm = null;
+  if (opened && zigbeeSearching()) zigbeeSearch(false);
+}
+
+function closeAdd() { addReset(); addFlow = null; invalidate(); render(); }
+
+function addBack() { addReset(); addFlow = { step: "what" }; invalidate(); render(); }
+
+async function addKind(kind) {   // step 2: the guide – and the search starts by itself
+  addFlow = { step: "find", kind, before: zigbeeAddresses() };
+  invalidate();
+  render();
+  if (kind === "heater") return runScan(null);
+  if (kind === "sensor") return runSensorSearch();
+  if (kind === "plug") runPlugSearch();
+  if (!state.app.zigbee) return;
+  if (!zigbee) await loadZigbee();
+  const f = addFlow;
+  if (!f || f.kind !== kind || !zigbeeReady()) return render();
+  f.before = zigbeeAddresses();
+  addZigbeeSearch();
+}
+
+async function addZigbeeSearch() {   // open the Zigbee network – „Abbrechen“ closes it again
+  const f = addFlow;
+  if (!f || zigbeeSearching()) return;
+  f.opened = true;
+  await zigbeeSearch(true);
+}
+
+function addWhere(type, id) {   // step 4
+  const h = type === "heater" ? state.heaters.find(x => x.id === id) : null;
+  const p = type === "plug" ? (state.plugs || []).find(x => x.id === id) : null;
+  addFlow = Object.assign(addFlow || { kind: type }, { step: "where", where: { type, id }, name: "",
+    room: (h && h.room) || "", heater: (p && p.heater) || "" });
+  invalidate();
+  render();
+}
+
+async function addFinish() {   // „Fertig“: save the room (and a thermostat's name) – for a plug its heater
+  const f = addFlow, w = f && f.where;
+  if (!w || busy.has("addflow")) return;
+  if (w.type === "plug") {
+    if (f.heater && !(await setPlugHeater(w.id, f.heater, true))) return;
+    deviceTab = "plugs";
+  } else {
+    const body = {};
+    if (f.room) body.room = f.room;
+    if (String(f.name || "").trim()) body.name = String(f.name).trim();
+    if (Object.keys(body).length) {
+      busy.add("addflow");
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      render();
+      try {
+        await api("PATCH", `api/heaters/${encodeURIComponent(w.id)}`, body);
+      } catch (e) {
+        toast(e.message, true);
+        return;
+      } finally {
+        busy.delete("addflow");
+        invalidate();
+        render();
+      }
+    }
+    deviceTab = "heaters";
+  }
+  localStorage.setItem("heizung.deviceTab", deviceTab);
+  toast("Fertig – das Gerät ist in der App.");
+  closeAdd();
+  await refresh();
+}
+
+function addToZigbee() {   // no Zigbee yet: off to „Verbindungen“ › „Zigbee-Funk“
+  closeAdd();
+  tab = "connections";
+  connTab = "zigbee";
+  localStorage.setItem("heizung.tab", tab);
+  localStorage.setItem("heizung.connTab", connTab);
+  openConnTab();
+  render();
+  window.scrollTo(0, 0);
 }
 
 function openDeviceForm(heaterId, found = null) {  // found: a heater from the network search {address, hostname}
@@ -2572,6 +2908,7 @@ async function saveDevice() {
                                  : await api("PATCH", `api/heaters/${encodeURIComponent(f.id)}`, body);
     deviceForm = null;
     toast(res.message || "Gespeichert.", Boolean(res.warning));
+    if (f.mode === "new" && addFlow && res.id) addWhere("heater", res.id);
   } catch (e) {
     toast(e.message, true);
     invalidate();
@@ -2679,7 +3016,7 @@ async function deleteDevice() {
 async function removeThermostat(h) {  // paired: the Pi unpairs it (and the app forgets it with that) – else only the app forgets it
   const yes = await ask({ title: `„${h.name}“ entfernen?`,
     text: h.paired ? "Der Pi meldet das Thermostat im Zigbee-Netz ab, und die App vergisst Name und Raum. Willst du es " +
-                     "später wieder nutzen, lernst du es unter „Zigbee“ neu an."
+                     "später wieder nutzen, lernst du es mit „+ Gerät hinzufügen“ neu an."
                    : "Die App vergisst Name und Raum des Thermostats. Im Zigbee-Netz ist es schon nicht mehr angelernt.",
     buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
   if (!yes) return;
@@ -2694,21 +3031,6 @@ async function removeThermostat(h) {  // paired: the Pi unpairs it (and the app 
     }
   }
   await refresh();
-}
-
-async function newDevice() {  // with Zigbee on the Pi: an AeroFlow (WLAN) or a thermostat (Zigbee)?
-  if (!(state.app && state.app.zigbee)) return openDeviceForm(null);
-  const kind = await ask({ title: "Was kommt dazu?",
-    text: "Eine AeroFlow-Heizung hängt im WLAN – für sie trägst du Adresse und Token ein. Ein SONOFF-Thermostat funkt " +
-      "über Zigbee: Du lernst es unter „Zigbee“ an, danach erscheint es hier von selbst.",
-    buttons: [{ label: "Abbrechen", value: null }, { label: "Thermostat (Zigbee)", value: "zigbee" },
-              { label: "AeroFlow (WLAN)", value: "aeroflow", cls: "primary" }] });
-  if (kind === "aeroflow") return openDeviceForm(null);
-  if (kind !== "zigbee") return;
-  tab = "zigbee";
-  localStorage.setItem("heizung.tab", tab);
-  openZigbeeTab();
-  render();
 }
 
 async function patch(url, body, message) {
@@ -3002,17 +3324,12 @@ function wifiNetworksHTML(w) {
   </div>`;
 }
 
-function renderWifi(el) {
+function wifiHTML() {   // „Verbindungen“ › „Heimnetz“: the Pi's own WLAN
   const w = wifi;
-  if (!w) return setHTML(el, `<div class="card"><p class="${wifiError ? "error-text" : "searching"}">${esc(wifiError || "Frage den Pi …")}</p></div>`);
-  if (!w.supported) return setHTML(el, `<div class="card"><p>Das WLAN lässt sich hier nur einrichten, wenn FlowThermPi mit dem
-    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
-  setHTML(el, wifiStatusHTML(w) + wifiNetworksHTML(w));
-  if (wifiFocus) {
-    wifiFocus = false;
-    const input = el.querySelector('.wifi-form input[data-wfield="password"]');
-    if (input) input.focus();
-  }
+  if (!w) return `<div class="card"><p class="${wifiError ? "error-text" : "searching"}">${esc(wifiError || "Frage den Pi …")}</p></div>`;
+  if (!w.supported) return `<div class="card"><p>Das WLAN lässt sich hier nur einrichten, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
+  return wifiStatusHTML(w) + wifiNetworksHTML(w);
 }
 
 // ------------------------------------------------------------------ Fernwartung ("Einrichtung › Fernwartung")
@@ -3036,7 +3353,9 @@ async function loadRemote() {
 
 function followRemote() {
   const on = remoteRunning() || !!(remote && remote.watching);
-  if (on && !remoteTimer) remoteTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "remote") loadRemote(); }, 2000);
+  if (on && !remoteTimer) remoteTimer = setInterval(() => {
+    if (!document.hidden && view === "setup" && tab === "connections" && connTab === "remote") loadRemote();
+  }, 2000);
   if (!on && remoteTimer) { clearInterval(remoteTimer); remoteTimer = null; }
 }
 
@@ -3246,12 +3565,12 @@ function remoteAboutHTML(r) {
   </div>`;
 }
 
-function renderRemote(el) {
+function remoteHTML() {   // „Verbindungen“ › „Fernwartung“
   const r = remote;
-  if (!r) return setHTML(el, `<div class="card"><p class="${remoteError ? "error-text" : "searching"}">${esc(remoteError || "Frage den Pi …")}</p></div>`);
-  if (!r.supported) return setHTML(el, `<div class="card"><p>Fernwartung gibt es nur, wenn FlowThermPi mit dem
-    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
-  setHTML(el, remoteStatusHTML(r) + remoteLoginHTML(r) + remoteModeHTML(r) + remoteAboutHTML(r));
+  if (!r) return `<div class="card"><p class="${remoteError ? "error-text" : "searching"}">${esc(remoteError || "Frage den Pi …")}</p></div>`;
+  if (!r.supported) return `<div class="card"><p>Fernwartung gibt es nur, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
+  return remoteStatusHTML(r) + remoteLoginHTML(r) + remoteModeHTML(r) + remoteAboutHTML(r);
 }
 
 // ------------------------------------------------------------------ Zigbee ("Einrichtung › Zigbee")
@@ -3296,8 +3615,12 @@ async function loadZigbee() {
 function followZigbee() {
   const every = !(zigbee && zigbee.supported) ? 0 : zigbeeLive() ? 2000 : 15000;
   if (zigbeeTimer && every !== zigbeeEvery) { clearInterval(zigbeeTimer); zigbeeTimer = null; }
-  if (every && !zigbeeTimer) zigbeeTimer = setInterval(() => { if (!document.hidden && view === "setup" && tab === "zigbee") loadZigbee(); }, every);
+  if (every && !zigbeeTimer) zigbeeTimer = setInterval(() => { if (!document.hidden && zigbeeInView()) loadZigbee(); }, every);
   zigbeeEvery = every;
+}
+
+function zigbeeInView() {   // „Verbindungen“ › „Zigbee-Funk“ – and „Geräte“, which shows the Zigbee devices and adds new ones
+  return view === "setup" && (tab === "devices" || (tab === "connections" && connTab === "zigbee"));
 }
 
 async function openZigbeeTab() {  // fresh state from the Pi: the stick may have been plugged in since
@@ -3554,6 +3877,8 @@ function zigbeeNetHTML(z) {
         <dt>Angelernt</dt><dd>${count === 1 ? "1 Gerät" : `${count} Geräte`}</dd>
         ${net.version ? `<dt>Zigbee2MQTT</dt><dd>${esc(net.version)}</dd>` : ""}
       </dl>
+      ${online ? `<p class="hint">Die Geräte stehen unter „Geräte“. Ein neues Thermostat oder eine neue Steckdose lernst du dort
+        mit „+ Gerät hinzufügen“ an.</p>` : ""}
       ${zigbeeStarting() ? `<p class="hint">Das dauert etwa eine halbe Minute.</p>` : ""}
       ${s.failed ? `<p class="error-text">Zigbee2MQTT startet nicht${stickIn ? "" : " – der Stick steckt nicht"}.</p>` : ""}
       ${s.log ? `<details><summary>Meldungen von Zigbee2MQTT</summary><pre class="zigbee-log">${esc(s.log)}</pre></details>` : ""}
@@ -3585,64 +3910,14 @@ function zigbeeDeviceHTML(d) {
     plug && d.switch ? (d.switch === "ON" ? "an" : "aus") : "", plug && d.power_w != null ? keep(wattText(d.power_w)) : "",
     plug && d.energy_today != null ? keep(`heute ${kwhText(d.energy_today)}`) : "", keep(zigbeeSignal(d.signal)),
     d.temperature != null ? keep(deg(d.temperature)) : ""].filter(Boolean).join(" · ");
-  const owner = plug ? heaters.find(h => h.plug && h.plug.id === d.ieee) : null;
-  const where = !plug ? "" : `<span class="zigbee-owner">${owner ? `gehört zu ${esc(owner.name)}`
-    : "gehört noch zu keiner Heizung – zuordnen unter „Räume“ › „Strom und Kosten“"}</span>`;
   const title = named ? named.custom_name : d.plug ? plugName(d.ieee) : model;
   return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(title)}</b>${
       title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
       ${d.new ? `<span class="tag ok">neu</span>` : ""}
-      <span class="muted zigbee-facts">${esc(facts)}</span>${where}
+      <span class="muted zigbee-facts">${esc(facts)}</span>
       <span class="muted zigbee-ieee">${esc(d.ieee)}</span></span>
     <button class="small" data-action="zigbee-forget" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
       zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button></li>`;
-}
-
-function zigbeeSearchHTML(net) {
-  const s = net.search || {};
-  if (s.active) {
-    const left = `${Math.floor(s.left / 60)}:${String(s.left % 60).padStart(2, "0")}`;
-    return `<div class="wifi-note zigbee-search">
-      <p class="searching"><b>Suche läuft – noch ${left}</b></p>
-      <p class="zigbee-kind"><b>Thermostat</b></p>
-      <ol class="zigbee-steps">
-        <li>Batterien ins Thermostat legen, falls sie noch nicht drin sind.</li>
-        <li>Das Drehrad unter 5 °C drehen, bis das Thermostat aus ist.</li>
-        <li>Die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt.</li>
-        <li>Warten: Nach etwa einer Minute erscheint es unten in der Liste.</li>
-      </ol>
-      <p class="zigbee-kind"><b>Steckdose mit Strommessung</b> (zum Beispiel SONOFF S60ZBTPF)</p>
-      <ol class="zigbee-steps">
-        <li>Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.</li>
-        <li>Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.</li>
-        <li>Warten: Nach etwa einer Minute erscheint sie unten in der Liste.</li>
-      </ol>
-      <p class="hint">Mehrere Geräte gehen nacheinander in derselben Suche. Klappt es nicht, das Gerät zum Anlernen näher an
-        den Pi bringen. Eine Steckdose gibt das Funksignal auch weiter – Thermostate weiter weg erreichen den Pi dann besser.</p>
-      <button class="small" data-action="zigbee-unsearch" ${zigbeeNetPending ? "disabled" : ""}>${
-        zigbeeNetPending === "unsearch" ? "beende …" : "Suche beenden"}</button>
-    </div>`;
-  }
-  return `<p>„Geräte suchen“ öffnet das Zigbee-Netz für ${Math.round((s.seconds || 180) / 60)} Minuten, und die App sagt dir,
-      was am Thermostat oder an der Steckdose zu tun ist.</p>
-    <div class="row"><button class="primary" data-action="zigbee-search" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
-      zigbeeNetPending === "search" ? "öffne das Netz …" : "Geräte suchen"}</button></div>`;
-}
-
-function zigbeeDevicesHTML(z) {
-  const p = z.programs, net = z.net;
-  if (!p || !net || !p.complete || !p.service.present || zigbeeRunning()) return "";
-  const online = net.bridge === "online", devices = net.devices || [];
-  return `<div class="card zigbee-devices"><div class="card-head"><h2>Thermostate und Steckdosen</h2></div>
-    ${online ? zigbeeSearchHTML(net) : `<p class="muted">Geräte suchen geht, sobald Zigbee2MQTT läuft.</p>`}
-    ${devices.length ? `<ul class="net-list zigbee-list">${devices.map(zigbeeDeviceHTML).join("")}</ul>`
-      : online ? `<p class="muted">Noch kein Gerät angelernt.</p>` : ""}
-    ${devices.some(d => d.thermostat) ? `<p class="hint">Namen und Räume gibst du den Thermostaten unter „Geräte“; den
-      Heizplan bekommen sie über ihren Raum.</p>` : ""}
-    ${devices.some(d => d.plug) ? `<p class="hint">Eine Steckdose ordnest du ihrer Heizung unter „Räume“ › „Strom und Kosten“
-      zu. Die App schaltet eine Steckdose nie aus – ist sie aus, zeigt die Startseite das und schaltet sie mit einem Tipp
-      wieder ein.</p>` : ""}
-  </div>`;
 }
 
 function zigbeeAboutHTML() {
@@ -3660,12 +3935,12 @@ function zigbeeAboutHTML() {
   </div>`;
 }
 
-function renderZigbee(el) {
+function zigbeeHTML() {   // „Verbindungen“ › „Zigbee-Funk“: programs, stick, channel – the devices are under „Geräte“
   const z = zigbee;
-  if (!z) return setHTML(el, `<div class="card"><p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p></div>`);
-  if (!z.supported) return setHTML(el, `<div class="card"><p>Zigbee gibt es nur, wenn FlowThermPi mit dem
-    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`);
-  setHTML(el, zigbeeStatusHTML(z) + zigbeeNetHTML(z) + zigbeeDevicesHTML(z) + zigbeeAboutHTML());
+  if (!z) return `<div class="card"><p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p></div>`;
+  if (!z.supported) return `<div class="card"><p>Zigbee gibt es nur, wenn FlowThermPi mit dem
+    Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
+  return zigbeeStatusHTML(z) + zigbeeNetHTML(z) + zigbeeAboutHTML();
 }
 
 // ------------------------------------------------------------------ events
@@ -3709,9 +3984,14 @@ document.addEventListener("click", e => {
     tab = t.dataset.tab;
     localStorage.setItem("heizung.tab", tab);
     if (tab === "plans" && editing) renderEditor();
-    if (tab === "wifi") openWifiTab();
-    if (tab === "remote") openRemoteTab();
-    if (tab === "zigbee") openZigbeeTab();
+    openTab();
+    render();
+    return;
+  }
+  if (t.dataset.conntab) {
+    connTab = t.dataset.conntab;
+    localStorage.setItem("heizung.connTab", connTab);
+    openConnTab();
     render();
     return;
   }
@@ -3742,17 +4022,22 @@ document.addEventListener("click", e => {
       deviceFilter = t.dataset.filter;
       localStorage.setItem("heizung.deviceFilter", deviceFilter);
       return render();
-    case "dev-new": return newDevice();
-    case "scan-run": return runScan(null);
+    case "add-open": return openAdd();
+    case "add-close": return closeAdd();
+    case "add-back": return addBack();
+    case "add-kind": return addKind(t.dataset.kind);
+    case "add-manual": return openDeviceForm(null);
+    case "add-next": return addWhere(t.dataset.type, t.closest("[data-ieee]").dataset.ieee);
+    case "add-finish": return addFinish();
+    case "add-to-zigbee": return addToZigbee();
+    case "add-zigbee-again": return addZigbeeSearch();
+    case "scan-run": return scan && scan.running ? undefined : runScan(null);
     case "scan-other": return runScan(scanNet.trim() || null);
-    case "scan-close": scan = null; return render();
     case "scan-add": return openDeviceForm(null, { address: t.dataset.address, hostname: t.dataset.hostname });
     case "plug-search": return plugSearch && plugSearch.running ? undefined : runPlugSearch();
-    case "plug-close": plugSearch = null; return render();
     case "plug-adopt": return adoptPlug(t.dataset.plug);
     case "plug-remove": return removePlug(t.closest("[data-plug]").dataset.plug);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
-    case "sensor-close": sensorSearch = null; if (pillForm && pillForm.at === "search") pillForm = null; return render();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
     case "sensor-edit": return openSensorForm(t.closest(".device").dataset.sensor);
     case "sensor-refresh": return refreshSensor(t.closest(".device").dataset.sensor);
@@ -3802,7 +4087,6 @@ document.addEventListener("click", e => {
     case "zigbee-setup": return zigbeeSetup();
     case "zigbee-start": return zigbeeDo("start", { path: "service", body: { on: true } });
     case "zigbee-stop": return zigbeeStop();
-    case "zigbee-search": return zigbeeSearch(true);
     case "zigbee-unsearch": return zigbeeSearch(false);
     case "zigbee-forget": return zigbeeForget(t.closest("[data-ieee]").dataset.ieee);
     case "logs-email": return logsEmailSave();
@@ -3826,7 +4110,7 @@ document.addEventListener("change", e => {
     return;
   }
   if (t.dataset.cfield === "show") { editCosts().show = t.checked; return; }
-  if (t.dataset.cplug) { editCosts().plugs[t.dataset.cplug] = t.value; return render(); }
+  if (addFlow && t.dataset.afield) { addFlow[t.dataset.afield] = t.value; return; }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {
@@ -3835,6 +4119,7 @@ document.addEventListener("change", e => {
       return patch(`api/heaters/${encodeURIComponent(t.closest(".device").dataset.heater)}`, { room: t.value || null }, "Raum zugeordnet.");
     case "sensor-room":
       return patch(`api/sensors/${encodeURIComponent(t.closest(".device").dataset.sensor)}`, { room: t.value || null }, "Raum zugeordnet.");
+    case "plug-heater": return setPlugHeater(t.closest("[data-plug]").dataset.plug, t.value);
     case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });
@@ -3866,6 +4151,7 @@ document.addEventListener("input", e => {
   if (e.target.dataset.cfield === "price") { editCosts().price = e.target.value; return; }
   if (e.target.dataset.cpower) { editCosts().powers[e.target.dataset.cpower] = e.target.value; return; }
   if (wifiForm && ["ssid", "password"].includes(e.target.dataset.wfield)) { wifiForm[e.target.dataset.wfield] = e.target.value; return; }
+  if (addFlow && e.target.dataset.afield) { addFlow[e.target.dataset.afield] = e.target.value; return; }
   if (sensorForm && e.target.dataset.sfield) { sensorForm[e.target.dataset.sfield] = e.target.value; return; }
   if (deviceForm && e.target.closest(".device-form")) updateDeviceForm(e.target);
   if (roomForm && e.target.closest(".room-form")) updateRoomForm(e.target);
@@ -3886,6 +4172,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Enter" && wifiForm && e.target.closest(".wifi-form")) return connectWifi();
   if (e.key === "Enter" && e.target.dataset.field === "scan-network") { e.target.blur(); return runScan(scanNet.trim() || null); }
   if (e.key === "Enter" && e.target.dataset.lfield === "email") { e.target.blur(); return logsEmailSave(); }
+  if (e.key === "Enter" && addFlow && e.target.dataset.afield === "name") { e.target.blur(); return addFinish(); }
   if (e.key === "Enter" && deviceForm && e.target.closest(".device-form")) saveDevice();
   if (e.key === "Enter" && roomForm && e.target.closest(".room-form") && e.target.dataset.field === "name") saveRoom();
 });
