@@ -575,7 +575,9 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
 - **Ins WLAN bringen:** einstecken. Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt
   (sonst in der ersten Minute die Taste 5 Sekunden halten, bis sie blau blinkt). Mit dem Handy hinein, im Browser
   192.168.33.1 öffnen und das Heim-WLAN eintragen. Kein Passwort für die Steckdose einschalten – dann kann die App sie
-  nicht lesen.
+  nicht lesen. Danach das Handy zurück ins Heim-WLAN: Solange es im WLAN der Steckdose ist, erreicht es die App nicht
+  („Keine Verbindung zur Heizungs-App“). Kommt man zur App zurück oder antwortet sie wieder, sucht sie von selbst noch
+  einmal – ebenso bei der Pill.
 - **Übernehmen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Steckdose“ (bis 0.4.14 **Steckdosen suchen** unter
   *Geräte › Steckdosen*). Die App fragt jede Adresse im Heimnetz (ein paar Sekunden); bei der Steckdose
   **Übernehmen**, dann ihre Heizung wählen. Sie heißt dann „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer

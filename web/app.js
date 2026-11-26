@@ -72,10 +72,16 @@ function fmtTime(iso) {
 }
 function tempColor(t) { const x = Math.max(0, Math.min(1, (t - 15) / 10)); return `hsl(${210 - 190 * x}, 72%, ${50 - 8 * x}%)`; }
 
+const OFFLINE = "Keine Verbindung zur Heizungs-App – ist das Handy im Heim-WLAN?";
 async function api(method, url, body, retried = false) {
   const opt = { method, headers: {}, credentials: "same-origin" };
   if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
-  const res = await fetch(url, opt);
+  let res;
+  try {
+    res = await fetch(url, opt);
+  } catch (_) {   // no answer at all (Safari: "Load failed") – phone in another WLAN, Pi restarting, connection cut
+    throw Object.assign(new Error(OFFLINE), { offline: true });
+  }
   let data = {};
   try { data = await res.json(); } catch (_) { /* no JSON body */ }
   if (res.status === 403 && data.pin_required && !retried) {   // setup locked (again): ask for the PIN, then retry once
@@ -126,6 +132,7 @@ async function refresh() {
     setBanner(updating() ? "Die Heizungs-App wird gerade aktualisiert und ist gleich kurz nicht erreichbar. " +
       "Die Heizungen heizen weiter." : null, true);
     showAppInfo(state.app);
+    searchAgain();
     if (view === "setup" && !state.setup.unlocked && !pinPromise) showView("home");  // e.g. the app was restarted
   } catch (e) {
     setStatus("keine Verbindung zur App", true);
@@ -1860,7 +1867,8 @@ function sensorPanelHTML() {
   }
   if (s.error) {
     return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
-      <button class="small" data-action="sensor-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
+      <button class="small" data-action="sensor-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p>${
+      s.offline ? '<p class="hint">Sobald das Handy wieder im Heim-WLAN ist, sucht die App von selbst noch einmal.</p>' : ""}</div>`;
   }
   const d = s.data;
   const saved = Object.fromEntries((state.sensors || []).map(x => [x.id, x]));
@@ -1887,6 +1895,7 @@ async function runSensorSearch() {  // one sweep of the home network – a Pill 
     s.data = await api("POST", "api/sensors/discover", {});
   } catch (e) {
     s.error = e.message;
+    if (e.offline) s.offline = Date.now();   // searchAgain() tries again once the Pi answers
   }
   s.running = false;
   if (sensorSearch !== s) return;
@@ -1939,7 +1948,8 @@ function plugSearchPanelHTML() {   // the WLAN part of „+ Gerät hinzufügen�
   }
   if (s.error) {
     return `<div class="scan"><div class="scan-head"><strong>Suche im WLAN</strong>
-      <button class="small" data-action="plug-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
+      <button class="small" data-action="plug-search">Erneut suchen</button></div><p class="error-text">${esc(s.error)}</p>${
+      s.offline ? '<p class="hint">Sobald das Handy wieder im Heim-WLAN ist, sucht die App von selbst noch einmal.</p>' : ""}</div>`;
   }
   const d = s.data, known = new Set((state.plugs || []).map(p => p.id));
   const rows = d.plugs.map(p => {
@@ -1978,11 +1988,22 @@ async function runPlugSearch() {  // one sweep of the home network for Shelly pl
     s.data = await api("POST", "api/plugs/discover", {});
   } catch (e) {
     s.error = e.message;
+    if (e.offline) s.offline = Date.now();   // searchAgain() tries again once the Pi answers
   }
   s.running = false;
   if (plugSearch !== s) return;
   invalidate();
   await refresh();
+}
+
+function searchAgain(back = false) {   // „+ Gerät hinzufügen“ searches the WLAN again by itself: once the Pi answers
+  // after a search could not reach it (the phone was in the plug's own WLAN, say), and – back – whenever the page is
+  // seen again, so a Pill or plug just brought into the WLAN shows up without „Erneut suchen“
+  const f = addFlow;
+  if (!f || f.step !== "find" || document.hidden) return;
+  const due = s => s && !s.running && (back || (s.offline && Date.now() - s.offline > 4000));
+  if (f.kind === "plug" && due(plugSearch)) runPlugSearch();
+  else if (f.kind === "sensor" && !sensorForm && due(sensorSearch)) runSensorSearch();
 }
 
 async function adoptPlug(id) {   // „Übernehmen“: the plug from the search becomes a plug of the app – then: which heater?
@@ -2622,7 +2643,8 @@ const SHELLY_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung
   "Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt. Sonst in der ersten Minute nach dem " +
   "Einstecken die Taste 5 Sekunden halten, bis sie blau blinkt.",
   "Mit dem Handy in dieses WLAN gehen, im Browser 192.168.33.1 öffnen und dort das Heim-WLAN mit seinem Passwort eintragen.",
-  "Die App sucht im Heimnetz. Bei der Steckdose „Übernehmen“ drücken – ist sie noch nicht dabei, „Erneut suchen“."];
+  "Das Handy wieder ins Heim-WLAN bringen und hierher zurückkommen – die App sucht dann von selbst. Bei der Steckdose " +
+  "„Übernehmen“ drücken; ist sie noch nicht dabei, „Erneut suchen“."];
 const SONOFF_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.",
   "Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.",
   "Warten: Nach etwa einer Minute erscheint sie hier."];
@@ -4176,7 +4198,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Enter" && deviceForm && e.target.closest(".device-form")) saveDevice();
   if (e.key === "Enter" && roomForm && e.target.closest(".room-form") && e.target.dataset.field === "name") saveRoom();
 });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { searchAgain(true); refresh(); } });
 document.addEventListener("toggle", e => {   // „Stunde für Stunde“ stays open when the Verlauf is redrawn
   if (hist && e.target.classList && e.target.classList.contains("hist-table")) hist.table = e.target.open;
 }, true);
