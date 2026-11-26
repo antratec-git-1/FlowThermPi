@@ -76,6 +76,10 @@ def _json(payload: bytes):
         return None
 
 
+def _wh(kwh):
+    return round(kwh * 1000, 3) if kwh is not None else None
+
+
 def _text(value, limit: int = 120) -> str | None:
     return value[:limit] if isinstance(value, str) and value else None
 
@@ -586,8 +590,8 @@ class ZigbeeNet:
                     for ieee, d in self._devices.items() if d.get("plug") and d["interview"] == "done"]
 
     def plug(self, ieee: str) -> dict | None:
-        """What a plug reported last: {state: ON | OFF | None, power (W), energy_today (kWh), power_on_behavior,
-        heard, seq} – None if it is not paired as a plug (any more)."""
+        """What a plug reported last: {state: ON | OFF | None, power (W), energy_today (kWh), energy_wh (its meter, Wh),
+        power_on_behavior, heard, seq} – None if it is not paired as a plug (any more)."""
         with self._lock:
             device = self._devices.get(ieee)
             if not (device and device.get("plug") and device["interview"] == "done"):
@@ -597,6 +601,7 @@ class ZigbeeNet:
             return {"state": values.get("state") if values.get("state") in ("ON", "OFF") else None,
                     "power": _number(values.get("power"), 0, MAX_POWER),
                     "energy_today": _number(values.get("energy_today"), 0, MAX_ENERGY),
+                    "energy_wh": _wh(_number(values.get("energy"), 0, MAX_ENERGY)),
                     "power_on_behavior": _text(values.get("power_on_behavior"), 20),
                     "heard": state["heard"] or None, "seq": state["seq"]}
 

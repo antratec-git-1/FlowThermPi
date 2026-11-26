@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Callable
 
-from . import coap, discovery, history, plans, shelly, trv
+from . import coap, discovery, energy, history, plans, shelly, trv
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
@@ -85,6 +85,15 @@ def _span(seconds: float) -> str:
     if seconds < 2 * 86400:
         return f"{seconds // 3600:.0f} Std."
     return f"{seconds // 86400:.0f} Tage"
+
+
+def _device_title(value) -> str | None:
+    """A name a device gives itself (a Shelly plug: its name in the Shelly app), fit for the page and the protocol: one
+    line, at most 40 characters – None if it has none."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())[:40].strip()
+    return text or None
 
 
 def _since(start: float | None) -> str:
@@ -186,6 +195,9 @@ class Service:
         # Verlauf: five-minute entries of every device in history/ next to data.json (heizapp.history)
         self.history = history.History(os.path.join(os.path.dirname(os.path.abspath(data_path)), "history"), self.tz)
         self._record_failed = False   # a failing Verlauf is said once in the protocol, not every 10 s
+        # Strom der Steckdosen: quarter hours of every plug in energy/ next to data.json (heizapp.energy)
+        self.energy = energy.PlugEnergy(os.path.join(os.path.dirname(os.path.abspath(data_path)), "energy"), self.tz)
+        self._energy_failed = False
         self._stop = threading.Event()
         self._entries_lock = threading.Lock()  # guards changes of the heater list / heizungen.conf
         self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="heizung")
@@ -202,6 +214,7 @@ class Service:
         self._wifi_plugs: dict[str, dict] = {}    # WLAN plug id -> its last reading {on, power, energy_today, mono …}
         self._found_plugs: dict[str, dict] = {}   # WLAN plug id -> {mono, plug}: recent results of „Steckdosen suchen“
         self._plugs_searched = 0.0
+        self._plug_names_read: dict[str, float] = {}   # WLAN plug id -> when its name was read last (monotonic)
         self._wifi_failed = False
         self._restore_lock = threading.Lock()
         self._last_daily_sync = None
@@ -245,6 +258,7 @@ class Service:
     def stop(self) -> None:
         self._stop.set()
         self.history.flush()   # the finished entries of the last minutes
+        self.energy.flush()
 
     def _run(self) -> None:
         self.poll_all(full=True)
@@ -256,6 +270,7 @@ class Service:
                 self._heal()
                 self.poll_sensors()
                 self._record()
+                self._record_energy()
                 now = self.now()
                 if now.hour == DAILY_SYNC_HOUR and self._last_daily_sync != now.date():
                     self._last_daily_sync = now.date()
@@ -324,16 +339,18 @@ class Service:
 
     def forget_thermostat(self, ieee: str, result: dict | None = None) -> dict:
         """After „Entfernen“ in the Zigbee network: the app forgets the thermostat's name and room too – and a plug no
-        longer belongs to its heater."""
+        longer belongs to its heater or its room."""
         heaters = self.store.data["heaters"]
         thermostat = bool(heaters.get(ieee, {}).get("zigbee"))
         owners = [hid for hid, meta in heaters.items() if meta.get("plug") == ieee]
-        if thermostat or owners:
+        placed = ieee in (self.store.data.get("plug_rooms") or {})
+        if thermostat or owners or placed:
             with self.store.edit() as d:
                 if thermostat:
                     d["heaters"].pop(ieee, None)
                 for hid in owners:
                     d["heaters"].get(hid, {}).pop("plug", None)
+                (d.get("plug_rooms") or {}).pop(ieee, None)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
@@ -1602,6 +1619,9 @@ class Service:
             for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
                 if meta.get("room") == room_id:
                     meta["room"] = None
+            for pid, room in list((d.get("plug_rooms") or {}).items()):
+                if room == room_id:
+                    d["plug_rooms"].pop(pid)
         with self._calib_lock:   # a calibration of the room ends with it
             gone = [sid for sid, run in self._calib_runs.items() if run.get("room") == room_id]
             for sid in gone:
@@ -1838,6 +1858,30 @@ class Service:
                 self._record_failed = True
                 log.exception("Verlauf: Aufzeichnen fehlgeschlagen")
 
+    def _record_energy(self, now: float | None = None) -> None:
+        """What every plug reported last, for its quarter hours (heizapp.energy) – only with a clock that is right."""
+        if not self.clock_trusted():
+            return
+        try:   # the recording must never hold up the rest of the loop
+            data = self.store.snapshot()
+            readings = []
+            for pid in data.get("plugs") or {}:   # WLAN plugs: read this round – or earlier (counted once)
+                r = self._wifi_plugs.get(pid) or {}
+                if not r.get("protected") and r.get("heard"):
+                    readings.append({"id": pid, "at": r["heard"], "wh": r.get("energy_wh"), "w": r.get("power")})
+            for p in (self.zigbee.plugs() if self.zigbee else []):
+                v = self.zigbee.plug(p["ieee"]) or {}
+                if v.get("heard"):
+                    readings.append({"id": p["ieee"], "at": v["heard"], "wh": v.get("energy_wh"), "w": v.get("power")})
+            for r in readings:
+                r.update(self._plug_place(r["id"], data))
+            self.energy.sample(time.time() if now is None else now, readings)
+            self._energy_failed = False
+        except Exception:
+            if not self._energy_failed:
+                self._energy_failed = True
+                log.exception("Strom der Steckdosen: Aufzeichnen fehlgeschlagen")
+
     @staticmethod
     def _costs(data: dict) -> dict:
         c = (data.get("settings") or {}).get("costs") or {}
@@ -1939,8 +1983,34 @@ class Service:
         return str(pid).startswith("0x")
 
     @classmethod
-    def _plug_name(cls, pid: str) -> str:
+    def _plug_default_name(cls, pid: str) -> str:
         return f"{'Steckdose' if cls._zigbee_plug_id(pid) else 'WLAN-Steckdose'} {pid[-4:].upper()}"
+
+    def _plug_name(self, pid: str, data: dict | None = None) -> str:
+        """What the app calls a plug: a WLAN plug by its name in the Shelly app – without one (and a Zigbee plug)
+        „WLAN-Steckdose“ or „Steckdose“ with the last four characters of its id."""
+        meta = ((data if data is not None else self.store.data).get("plugs") or {}).get(pid) or {}
+        return _device_title(meta.get("device_name")) or self._plug_default_name(pid)
+
+    def _note_plug_name(self, pid: str, name) -> None:
+        """The name a WLAN plug has in the Shelly app, as read just now: into data.json if it changed."""
+        self._plug_names_read[pid] = time.monotonic()
+        new = _device_title(name)
+        meta = (self.store.data.get("plugs") or {}).get(pid)
+        if meta is None or _device_title(meta.get("device_name")) == new:
+            return
+        before = self._plug_name(pid)
+        with self.store.edit() as d:
+            if pid in d.get("plugs") or {}:
+                d["plugs"][pid]["device_name"] = new
+        log.info("%s heißt jetzt „%s“", before, self._plug_name(pid))
+
+    @staticmethod
+    def _plug_place(pid: str, data: dict) -> dict:
+        """Where a plug is: the AeroFlow it gives power and that heater's room – without a heater its own room."""
+        heater = next((hid for hid, meta in data["heaters"].items() if meta.get("plug") == pid), None)
+        room = data["heaters"][heater].get("room") if heater else (data.get("plug_rooms") or {}).get(pid)
+        return {"heizung": heater, "raum": room if room in data["rooms"] else None}
 
     def _assigned_plug(self, e: HeaterState) -> tuple[str | None, dict | None]:
         """The plug an AeroFlow hangs on (its id) and what it reported last: None if it is not in the Zigbee network, or
@@ -2005,9 +2075,10 @@ class Service:
         out = []
         for pid, kind, model, address, device_name in known:
             v = (self.zigbee.plug(pid) if kind == "zigbee" else self._wifi_plug(pid)) or {}
-            out.append({"id": pid, "kind": kind, "name": self._plug_name(pid), "model": model, "heater": owners.get(pid),
+            out.append({"id": pid, "kind": kind, "name": self._plug_name(pid, data), "model": model, "heater": owners.get(pid),
                         "found": kind == "zigbee" or bool(v), "state": v.get("state"), "power": v.get("power"),
                         "energy_today": v.get("energy_today"), "address": address, "device_name": device_name,
+                        "room": self._plug_place(pid, data)["raum"],
                         "error": None if kind == "zigbee" else self._wifi_plug_error(pid)})
         return out
 
@@ -2085,6 +2156,7 @@ class Service:
                     meta.pop("plug", None)
             if e is not None:
                 d["heaters"].setdefault(e.id, self._new_meta(e))["plug"] = plug_id
+                (d.get("plug_rooms") or {}).pop(plug_id, None)   # it is in the heater's room now
         who = {x.id: self._who(x) for x in self.entries}
         for hid in owners:   # what a heater measured belongs to the plug it had
             if e is None or hid != e.id:
@@ -2100,6 +2172,33 @@ class Service:
             return {"message": f"Gespeichert. {name} war gerade nicht zu erreichen – bitte später noch einmal "
                                "auswählen, damit sie nach einem Stromausfall wieder angeht.", "warning": True}
         return {"message": f"{name} gehört jetzt zu {self._name(e)}."}
+
+    def set_plug_room(self, plug_id: str, body: dict) -> dict:
+        """Geräte › Steckdosen: the room of a plug that gives no AeroFlow power – any other device (room "" or None:
+        none). A plug at a heater is in the heater's room."""
+        room_id = body.get("room") or None
+        if room_id is not None and not isinstance(room_id, str):
+            raise ValueError("room muss eine Kennung sein")
+        data = self.store.snapshot()
+        if plug_id not in {p["id"] for p in self._plug_list(data)}:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        if room_id is not None and room_id not in data["rooms"]:
+            raise ActionError("Raum nicht gefunden", 404)
+        name = self._plug_name(plug_id, data)
+        if self._plug_place(plug_id, data)["heizung"]:
+            raise ActionError(f"{name} gehört zu einer Heizung und ist in deren Raum. Für einen eigenen Raum zuerst "
+                              "bei „Heizung“ „– keine –“ wählen.", 409)
+        with self.store.edit() as d:
+            if room_id is None:
+                (d.get("plug_rooms") or {}).pop(plug_id, None)
+            else:
+                d.setdefault("plug_rooms", {})[plug_id] = room_id
+        if room_id is None:
+            log.info("%s ist in keinem Raum mehr", name)
+            return {"message": f"{name} ist in keinem Raum mehr."}
+        room = data["rooms"][room_id]["name"]
+        log.info("%s ist jetzt im Raum %s", name, room)
+        return {"message": f"{name} ist jetzt im Raum „{room}“."}
 
     def _plugs_on_after_outage(self, plugs: dict[str, str | None]) -> list[str]:
         """Each plug a heater hangs on comes on again after a power cut (Zigbee: power_on_behavior „on“, Shelly:
@@ -2177,6 +2276,7 @@ class Service:
                     self._wifi_plug_lost(pid)
                 else:
                     self._note_wifi_plug(pid, r)
+            self._read_plug_names({pid: r["address"] for pid, r in readings.items() if r is not None})
             self._wifi_failed = False
             return {pid for pid, r in readings.items() if r is not None and not r.get("protected")}
         except Exception:
@@ -2184,6 +2284,20 @@ class Service:
                 self._wifi_failed = True
                 log.exception("WLAN-Steckdosen: Lesen fehlgeschlagen")
             return set()
+
+    PLUG_NAME_EVERY = 10 * 60   # seconds between two readings of a WLAN plug's name (renamed in the Shelly app?)
+
+    def _read_plug_names(self, answered: dict[str, str]) -> None:
+        """The name of every WLAN plug that answered, every ten minutes: one renamed in the Shelly app is renamed in
+        the app as well. Shelly's identification (/shelly) has it, also with a password."""
+        now = time.monotonic()
+        for pid, address in answered.items():
+            if now - self._plug_names_read.get(pid, -self.PLUG_NAME_EVERY) < self.PLUG_NAME_EVERY:
+                continue
+            self._plug_names_read[pid] = now   # also when it does not answer: not again every round
+            info = shelly.probe(*self._split_address(address), timeout=1.5, kinds=("plug",))
+            if info and str(info.get("id")) == pid:
+                self._note_plug_name(pid, info.get("name"))
 
     def _locate_plugs(self, ids: set, addresses: list) -> list[dict]:
         """WLAN plugs that did not answer at their last address: one sweep of the home network for them."""
@@ -2252,12 +2366,15 @@ class Service:
         saved = self.store.snapshot().get("plugs") or {}
         for p in plugs:
             self._found_plugs[p["id"]] = {"mono": time.monotonic(), "plug": p}
+            if p["id"] in saved:
+                self._note_plug_name(p["id"], p["name"])
             if p["id"] in saved and not p["offline"]:
                 self._note_wifi_plug(p["id"], p)   # a new address counts at once
         log.info("Steckdosensuche in %s: %s", ", ".join(map(str, nets)),
                  ", ".join(f"{self._plug_name(p['id'])} {p['address']}" for p in plugs) or "keine Steckdose gefunden")
         return {"networks": [str(n) for n in nets], "seconds": round(time.monotonic() - started, 1),
-                "plugs": [{"id": p["id"], "name": self._plug_name(p["id"]), "device_name": p["name"], "model": p["model"],
+                "plugs": [{"id": p["id"], "name": _device_title(p["name"]) or self._plug_default_name(p["id"]),
+                           "device_name": _device_title(p["name"]), "model": p["model"],
                            "address": p["address"], "on": p["on"], "power": p["power"], "protected": p["protected"],
                            "offline": p["offline"], "known": p["id"] in saved} for p in plugs]}
 
@@ -2274,7 +2391,8 @@ class Service:
         with self.store.edit() as d:
             new = pid not in d.setdefault("plugs", {})
             d["plugs"].setdefault(pid, {}).update(host=p["address"], model=p["model"], mac=p["mac"],
-                                                  device_name=p["name"])
+                                                  device_name=_device_title(p["name"]))
+        self._plug_names_read[pid] = time.monotonic()
         if new:
             log.info("%s (%s, %s) ist jetzt in der App", self._plug_name(pid), p["model"], p["address"])
         if not p["offline"]:
@@ -2291,14 +2409,17 @@ class Service:
         if pid not in (data.get("plugs") or {}):
             raise ActionError("Diese Steckdose kennt die App nicht.", 404)
         owners = [hid for hid, meta in data["heaters"].items() if meta.get("plug") == pid]
+        name = self._plug_name(pid, data)
         with self.store.edit() as d:
             d["plugs"].pop(pid, None)
+            (d.get("plug_rooms") or {}).pop(pid, None)
             for hid in owners:
                 d["heaters"].get(hid, {}).pop("plug", None)
         for hid in owners:
             self._plug_samples.pop(hid, None)
         self._wifi_plugs.pop(pid, None)
-        log.info("%s aus der App entfernt%s", self._plug_name(pid),
+        self._plug_names_read.pop(pid, None)
+        log.info("%s aus der App entfernt%s", name,
                  "".join(f" – {self._who(e)} hängt an keiner Steckdose mehr" for e in self.entries if e.id in owners))
         return {"message": "Die Steckdose ist aus der App entfernt. Sie selbst bleibt, wie sie ist – an oder aus."}
 
@@ -2369,6 +2490,56 @@ class Service:
                 "points": points, "has_sensor": bool(sensors),
                 **history.totals(rows, self._heater_infos(data, heaters), points, costs["price_ct"]),
                 "price_ct": costs["price_ct"], "show_costs": costs["show"]}
+
+    def _heater_title(self, heater_id: str | None, data: dict) -> str | None:
+        e = next((x for x in self.entries if x.id == heater_id), None)
+        return (data["heaters"].get(heater_id, {}).get("name") or self._device_name(e)) if e else None
+
+    def energy_view(self, plug_id: str, day_text: str) -> dict:
+        """„Strom“ of one plug on one day: what flowed through it in every quarter hour (heizapp.energy)."""
+        try:
+            day = date.fromisoformat(day_text)
+        except ValueError:
+            raise ActionError("Unbekanntes Datum") from None
+        data = self.store.snapshot()
+        plug = next((p for p in self._plug_list(data) if p["id"] == plug_id), None)
+        if plug is None:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        today = self.now().date()
+        rows = self.energy.rows_between(day, day, {plug_id}).get(plug_id, {}) if day <= today else {}
+        points = [{"t": t, "wh": r["wh"], "w_max": r["w_max"]} for t, r in sorted(rows.items())]
+        wh, price = sum(p["wh"] for p in points), self._costs(data)["price_ct"]
+        place, first = self._plug_place(plug_id, data), self.energy.first_day()
+        return {"kind": "plug", "id": plug_id, "name": plug["name"], "day": day.isoformat(),
+                "label": self.history.label(day, today), "tz": getattr(self.tz, "key", None),
+                "start": self.history.moment(day), "end": self.history.moment(day, 24),
+                "now": time.time() if day == today else None, "slot": energy.SLOT,
+                "ticks": [{"t": self.history.moment(day, h), "label": f"{h} Uhr" if h in (0, 24) else str(h)}
+                          for h in (0, 6, 12, 18, 24)],
+                "points": points, "kwh": round(wh / 1000, 3) if points else None,
+                "eur": round(wh / 1000 * price / 100, 2) if points and price else None, "price_ct": price,
+                "w_max": max((p["w_max"] for p in points if p["w_max"] is not None), default=None),
+                "room": data["rooms"][place["raum"]]["name"] if place["raum"] else None,
+                "heater": self._heater_title(place["heizung"], data),
+                "first_day": first.isoformat() if first else None, "recording": self.energy.active}
+
+    def energy_table(self, first_text: str, last_text: str) -> tuple[str, bytes, str]:
+        """„Als Tabelle“: the quarter hours of every plug from one day to another, for Excel – (file name, bytes,
+        type)."""
+        try:
+            first, last = sorted((date.fromisoformat(first_text), date.fromisoformat(last_text)))
+        except ValueError:
+            raise ActionError("Unbekanntes Datum") from None
+        if (last - first).days >= energy.MAX_DAYS:
+            raise ActionError(f"Höchstens {energy.MAX_DAYS} Tage auf einmal.")
+        data = self.store.snapshot()
+        rows = self.energy.rows_between(first, last)
+        names = {pid: self._plug_name(pid, data) for pid in rows}   # also of a plug removed since
+        rooms = {rid: room["name"] for rid, room in data["rooms"].items()}
+        heaters = {e.id: self._heater_title(e.id, data) for e in self.entries}
+        span = first.isoformat() if first == last else f"{first.isoformat()}-bis-{last.isoformat()}"
+        return (f"strom-steckdosen-{span}.csv", energy.table(rows, self.energy.local, names, rooms, heaters),
+                "text/csv; charset=utf-8")
 
     # ------------------------------------------------------------------ snapshot for the UI
     def state(self) -> dict:

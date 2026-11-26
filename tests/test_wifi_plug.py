@@ -101,7 +101,7 @@ class SearchTest(Base):
         self.assertEqual([p["id"] for p in res["plugs"]], [PLUG, SPARE, LOCKED])   # no Pill, no H&T, no power strip
         self.assertEqual({k: res["plugs"][0][k] for k in ("name", "device_name", "model", "on", "power", "protected",
                                                           "known")},
-                         {"name": "WLAN-Steckdose 0001", "device_name": "Küche", "model": "Shelly Plug M Gen3",
+                         {"name": "Küche", "device_name": "Küche", "model": "Shelly Plug M Gen3",
                           "on": True, "power": 0.0, "protected": False, "known": False})
         self.assertEqual((res["plugs"][2]["protected"], res["plugs"][2]["on"]), (True, None))
         self.assertEqual([p["id"] for p in self.service.find_sensors("192.168.5")["pills"]], ["shellypill-aabbccddeeff"])
@@ -113,16 +113,16 @@ class SearchTest(Base):
         with self.assertRaises(ActionError) as ctx:   # not found by a search yet
             self.service.add_wifi_plug({"plug": PLUG})
         self.assertEqual(ctx.exception.status, 404)
-        self.assertEqual(self.adopt()["message"], "WLAN-Steckdose 0001 ist in der App.")
+        self.assertEqual(self.adopt()["message"], "Küche ist in der App.")
         meta = self.saved()[PLUG]
         self.assertEqual({k: meta[k] for k in ("host", "model", "mac", "device_name")},
                          {"host": f"127.0.0.1:{self.plug.port}", "model": "Shelly Plug M Gen3", "mac": "AABBCCDD0001",
                           "device_name": "Küche"})
         self.assertEqual(meta["day"]["wh"], 12340.0)   # where its counter stood: today's energy starts here
         self.assertEqual(self.service.state()["plugs"], [
-            {"id": PLUG, "kind": "wifi", "name": "WLAN-Steckdose 0001", "model": "Shelly Plug M Gen3", "heater": None,
+            {"id": PLUG, "kind": "wifi", "name": "Küche", "model": "Shelly Plug M Gen3", "heater": None,
              "found": True, "state": "ON", "power": 0.0, "energy_today": 0.0, "address": f"127.0.0.1:{self.plug.port}",
-             "device_name": "Küche", "error": None}])
+             "device_name": "Küche", "room": None, "error": None}])
         self.assertEqual(self.plug.calls, [])   # taking over only reads
         self.assertEqual(self.service.find_plugs("192.168.5")["plugs"][0]["known"], True)
         with self.assertRaises(ActionError) as ctx:
@@ -140,12 +140,12 @@ class AssignTest(Base):
         self.assertEqual(self.plug.initial_state, "on")   # after a power cut it comes on again
         p = self.heater()["plug"]
         self.assertEqual({k: p[k] for k in ("id", "kind", "name", "found", "state", "after_outage", "error", "samples")},
-                         {"id": PLUG, "kind": "wifi", "name": "WLAN-Steckdose 0001", "found": True, "state": "ON",
+                         {"id": PLUG, "kind": "wifi", "name": "Küche", "found": True, "state": "ON",
                           "after_outage": "on", "error": None, "samples": 0})
         self.assertEqual([p["heater"] for p in self.service.state()["plugs"]], [AERO])
         self.assign({AERO: PLUG})   # saved again: nothing goes out
         self.assertEqual(len(self.plug.calls), 1)
-        for plugs, message in [({SECOND: PLUG}, "WLAN-Steckdose 0001 kann nur zu einer Heizung gehören."),
+        for plugs, message in [({SECOND: PLUG}, "Küche kann nur zu einer Heizung gehören."),
                                ({SECOND: SPARE}, "Heat4U-922002: Diese WLAN-Steckdose ist nicht (mehr) in der App.")]:
             with self.assertRaises(ActionError) as ctx:
                 self.assign(plugs)
@@ -158,7 +158,7 @@ class AssignTest(Base):
         """Geräte › Steckdosen (since 0.4.15): the plug picks its heater, like a sensor its room."""
         self.adopt()
         self.assertEqual(self.service.set_plug_heater(PLUG, {"heater": AERO}),
-                         {"message": "WLAN-Steckdose 0001 gehört jetzt zu Heat4U-911001."})
+                         {"message": "Küche gehört jetzt zu Heat4U-911001."})
         self.assertEqual(self.plug.calls, [("Switch.SetConfig", {"id": 0, "config": {"initial_state": "on"}})])
         self.assertEqual(self.heater()["plug"]["id"], PLUG)
         self.adopt(SPARE)
@@ -167,7 +167,7 @@ class AssignTest(Base):
         self.assertEqual(self.spare.initial_state, "on")
         self.plug.close()   # unplugged: the choice is saved anyway, with a warning
         self.assertEqual(self.service.set_plug_heater(PLUG, {"heater": SECOND}), {
-            "message": "Gespeichert. WLAN-Steckdose 0001 war gerade nicht zu erreichen – bitte später noch einmal "
+            "message": "Gespeichert. Küche war gerade nicht zu erreichen – bitte später noch einmal "
                        "auswählen, damit sie nach einem Stromausfall wieder angeht.", "warning": True})
         self.assertEqual(self.service.store.data["heaters"][SECOND]["plug"], PLUG)
         with self.assertRaises(ActionError) as ctx:   # never taken over
@@ -178,7 +178,7 @@ class AssignTest(Base):
         self.adopt()
         self.plug.close()
         self.assertEqual(self.assign({AERO: PLUG}), {
-            "message": "Gespeichert. WLAN-Steckdose 0001 war gerade nicht zu erreichen – bitte später noch einmal "
+            "message": "Gespeichert. Küche war gerade nicht zu erreichen – bitte später noch einmal "
                        "speichern, damit sie nach einem Stromausfall wieder angeht.", "warning": True})
         self.assertEqual(self.service.store.data["heaters"][AERO]["plug"], PLUG)   # the assignment is saved anyway
 
@@ -232,7 +232,7 @@ class MeasureTest(Base):
         self.plug.on, self.plug.errors = False, ["overtemp"]
         with self.assertLogs("heizapp", "WARNING") as said:
             self.polls()
-        self.assertIn("WLAN-Steckdose 0001 meldet: overtemp", said.output[-1])
+        self.assertIn("Küche meldet: overtemp", said.output[-1])
         p = self.heater()["plug"]
         self.assertEqual((p["state"], p["error"]), ("OFF", "Die Steckdose ist zu heiß geworden und hat abgeschaltet."))
 
@@ -311,7 +311,7 @@ class ApiTest(Base):
         self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
         self.call("POST", "/api/plugs", {"plug": PLUG})
         self.assertEqual(self.call("PUT", f"/api/plugs/{PLUG}/heater", {"heater": AERO})["message"],
-                         "WLAN-Steckdose 0001 gehört jetzt zu Heat4U-911001.")
+                         "Küche gehört jetzt zu Heat4U-911001.")
         answer = self.call("DELETE", f"/api/plugs/{PLUG}")
         self.assertEqual(answer["message"], "Die Steckdose ist aus der App entfernt. Sie selbst bleibt, wie sie ist – an "
                                             "oder aus.")

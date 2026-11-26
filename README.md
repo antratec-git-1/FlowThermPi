@@ -89,12 +89,15 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Ein **Kalibrierlauf** (zum Beispiel einen Tag
   lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
 - **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt und
-  „heute … kWh“; an jeder Steckdose wählt man ihre Heizung (ab 0.4.15) und kann sie entfernen. Siehe
+  „heute … kWh“; an jeder Steckdose wählt man ihre Heizung (ab 0.4.15) oder – ohne Heizung – ihren Raum (ab 0.4.17)
+  und kann sie entfernen. **Viertelstunden ansehen** zeigt ihren Strom je Viertelstunde, auch als Tabelle für Excel
+  (ab 0.4.17, siehe [Strom der Steckdosen](#strom-der-steckdosen-in-viertelstunden)). Siehe
   [WLAN-Steckdosen](#wlan-steckdosen-mit-strommessung) und [Zigbee-Steckdosen](#zigbee-steckdosen-mit-strommessung).
 - **Gerät hinzufügen** (Tab „Geräte“, ab 0.4.15): ein Knopf **+ Gerät hinzufügen** für Heizung, Thermostat, Raumfühler
   und Steckdose, in vier Schritten: *Was?* · *So geht's* (eine kurze Anleitung; die App sucht dabei selbst – im WLAN,
   über Zigbee oder bei einer Steckdose in beidem) · *Gefunden* (**Übernehmen**; ein Zigbee-Gerät meldet sich von
-  selbst) · *Wohin?* (der Raum, bei einer Steckdose ihre Heizung). Eine AeroFlow lässt sich weiter von Hand mit
+  selbst) · *Wohin?* (der Raum, bei einer Steckdose ihre Heizung oder – ohne Heizung – ihr Raum). Eine AeroFlow lässt
+  sich weiter von Hand mit
   Adresse und Token eintragen. Jedes Gerät trägt das Schild „WLAN“ oder „Zigbee“; Raum, Heizung, Firmware und
   **Entfernen …** stehen direkt beim Gerät.
 - **Geräte-Liste filtern:** Im Tab „Geräte“ nach Raum filtern (Alle / je Raum / Nicht zugeordnet,
@@ -119,6 +122,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Knopf – siehe [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit).
 - **Protokoll** (Tab „Über“): die E-Mail-Adresse des Helfers eintragen, das ausführliche Protokoll für 24 Stunden
   einschalten, selbst ein Protokoll speichern – siehe [Protokoll](#protokoll-wenn-etwas-schiefgeht).
+- **IP-Adressen** (ab 0.4.17): Jede angezeigte IP-Adresse ist ein Link und öffnet die Seite des Geräts (Shelly, Pill,
+  Router …) in einem neuen Tab. Netze wie „192.168.1.0/24“ sind keine Links.
 - Ausgelegt für bis zu 10 Heizungen (mehr gehen auch).
 
 ## Start
@@ -476,7 +481,7 @@ Thermostat.
   „Zigbee-Funk“.
 - **Entfernen …** (unter „Geräte“, bei einem Thermostat oder einer Steckdose) meldet es im Zigbee-Netz ab. Antwortet es nicht (es
   schläft oder ist zu weit weg), bietet die Seite **Trotzdem entfernen** an: Dann vergisst der Pi es, ohne auf die
-  Antwort zu warten. Eine entfernte Steckdose gehört danach auch zu keiner Heizung mehr.
+  Antwort zu warten. Eine entfernte Steckdose gehört danach auch zu keiner Heizung und keinem Raum mehr.
 - **Wie die App mit Zigbee2MQTT spricht:** über Mosquitto (MQTT), nur auf dem Pi selbst und mit Passwort – mit einem
   kleinen eigenen MQTT-Baustein (`heizapp/mqtt.py`, nur Python-Standardbibliothek).
 - Was weder Thermostat noch Steckdose der App ist (etwa ein Gerät, das sich nicht anlernen ließ), steht unter
@@ -544,7 +549,8 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
   wählen (bis 0.4.14 unter *Räume › Strom und Kosten*). Nur AeroFlow-Heizungen, jede Steckdose höchstens bei einer
   Heizung und jede Heizung an höchstens einer Steckdose. Dabei stellt die App die Steckdose so ein, dass sie nach einem
   Stromausfall wieder angeht – sonst bliebe die Heizung kalt. Ist sie gerade nicht zu erreichen, sagt die App das;
-  dann die Heizung später noch einmal wählen.
+  dann die Heizung später noch einmal wählen. Ab 0.4.17 kann eine Steckdose ohne Heizung auch nur einem Raum gehören
+  (etwa mit einem anderen Gerät daran) – siehe [Strom der Steckdosen](#strom-der-steckdosen-in-viertelstunden).
 - **Messen:** Solange die Heizung heizt und die Steckdose mehr als 50 W durchlässt, merkt sich die App alle
   10 Sekunden den Wert (höchstens die letzte Stunde Heizen, nur im Speicher – nach einem Neustart misst sie neu).
   Nach einer Minute Heizen steht unter der Heizung „Beim Heizen gemessen: etwa … W“ (der mittlere Wert, einzelne
@@ -580,8 +586,10 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
   einmal – ebenso bei der Pill.
 - **Übernehmen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Steckdose“ (bis 0.4.14 **Steckdosen suchen** unter
   *Geräte › Steckdosen*). Die App fragt jede Adresse im Heimnetz (ein paar Sekunden); bei der Steckdose
-  **Übernehmen**, dann ihre Heizung wählen. Sie heißt dann „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer
-  Kennung. Suchen und Übernehmen lesen nur. **Entfernen …** nimmt sie wieder aus der App; die Steckdose selbst bleibt,
+  **Übernehmen**, dann ihre Heizung oder ihren Raum wählen. Ab 0.4.17 heißt sie in der App so wie in der Shelly-App
+  (ihr Gerätename); hat sie dort keinen, „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer Kennung. Einen neuen
+  Namen aus der Shelly-App übernimmt die App beim nächsten Suchen, sonst nach höchstens 10 Minuten (`/shelly`, das
+  auch eine Steckdose mit Passwort beantwortet). Suchen und Übernehmen lesen nur. **Entfernen …** nimmt sie wieder aus der App; die Steckdose selbst bleibt,
   wie sie ist – an oder aus.
 - **Zuordnen, Messen, Ausgeschaltet:** wie bei der Zigbee-Steckdose – die Heizung an der Steckdose wählen (*Geräte ›
   Steckdosen*); dabei stellt die App die Steckdose auf „nach Stromausfall an“. „heute … kWh“ rechnet die App aus dem
@@ -596,6 +604,39 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
 - **Schnittstelle:** `POST /api/plugs/discover` sucht, `POST /api/plugs` (`{"plug": "<Kennung>"}`) übernimmt,
   `DELETE /api/plugs/<Kennung>` entfernt, `PUT /api/plugs/<Kennung>/heater` ordnet zu (alle vier mit PIN); die
   Kennung ist hier `shellyplugmg3-…`.
+
+## Strom der Steckdosen in Viertelstunden
+
+Ab 0.4.17. Für jede Steckdose mit Strommessung schreibt die App mit, wie viel Strom in jeder Viertelstunde durch sie
+geflossen ist – ob an ihr eine Heizung hängt oder ein anderes Gerät.
+
+- **Ansehen:** *Einrichtung › Geräte › Steckdosen* › **Viertelstunden ansehen**: der Tag als Balken, ein Balken je
+  Viertelstunde, darüber Strom, Kosten (mit eingetragenem Strompreis) und die höchste Leistung des Tages; mit ‹ ›
+  andere Tage; darunter „Viertelstunde für Viertelstunde“ als Tabelle. Ein Tipp auf einen Balken zeigt Wh, den Schnitt
+  in W und die höchste gemessene Leistung. Gestreift heißt: keine Werte.
+- **Als Tabelle für Excel:** „dieser Tag“ oder „dieser Monat“ lädt eine CSV-Datei mit allen Steckdosen herunter
+  (Semikolon und Dezimalkomma, so öffnet sie ein deutsches Excel direkt): Tag, Beginn, Ende, Steckdose, Raum, Heizung,
+  Strom (Wh), Höchste Leistung (W).
+- **Raum ohne Heizung:** An der Steckdose unter „Raum“ (oder im Schritt „Wohin?“) einen Raum wählen; das geht nur,
+  solange keine Heizung gewählt ist – mit Heizung ist ihr Raum der der Heizung. Jede Zeile merkt sich Raum und
+  Heizung der Viertelstunde; zieht die Steckdose um, bleiben die alten Zeilen beim alten Raum.
+- **Wie gemessen:** aus dem Zähler der Steckdose (Shelly `aenergy.total`, Zigbee `energy`), alle 10 Sekunden gelesen.
+  Was zwischen zwei Ablesungen floss, verteilt die App gleichmäßig auf die Zeit dazwischen, auch über
+  Viertelstunden-Grenzen. Ohne Zähler: Leistung × Zeit, höchstens 20 Minuten ohne Wert. Ein Zähler, der zurückspringt
+  (neu gestartet), zählt von null weiter; ein Sprung, den die Steckdose gar nicht ziehen kann (über 4.000 W), zählt als
+  Leistung × Zeit (Zigbee2MQTT hat dafür einen bekannten Fehler). Meldet eine Steckdose sich mehr als 6 Stunden nicht,
+  bleibt diese Zeit leer – nichts wird geschätzt. Die höchste Leistung ist der höchste gemessene Wert, bei einer ganz
+  gemessenen Viertelstunde mindestens ihr Schnitt.
+- **Wo:** `energy/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/energy/`), eine Datei je
+  Monat, etwa 6 KB am Tag je Steckdose. Geschrieben wird alle 15 Minuten; den letzten Zählerstand merkt sich die App
+  in `energy/zaehler.json`, damit nach einem Neustart oder Stromausfall nichts doppelt zählt: Was in der Zeit floss,
+  kommt mit dem nächsten Zählerstand dazu. Aufgezeichnet wird erst, wenn die Uhrzeit stimmt.
+- **Datenschutz:** wie beim Verlauf – die Werte bleiben auf dem Pi und kommen nicht in „Protokoll speichern“.
+- **Nur simuliert geprüft:** mit erfundenen Zählerständen (`tests/test_energy.py`) und in der Demo. Wie die echte
+  Steckdose ihren Zähler meldet, zeigt sich erst am Gerät.
+- **Schnittstelle** (alle mit PIN): `GET /api/plugs/<Kennung>/energy/JJJJ-MM-TT` (ein Tag in Viertelstunden),
+  `GET /api/energy/JJJJ-MM-TT/JJJJ-MM-TT` (die CSV-Datei, alle Steckdosen, höchstens 366 Tage),
+  `PUT /api/plugs/<Kennung>/room` (`{"room": "<Raum>"}`, `null` für keinen; nur ohne Heizung).
 
 ## Verlauf und Kosten
 
@@ -743,7 +784,9 @@ Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Dat
 erfundenen Uhrzeiten und Werten (`tests/test_history.py`), auch über Monatswechsel und Sommer-/Winterzeit. Die
 Steckdosen spielt `tests/fake_mqtt.py` wie eine SONOFF S60ZBTPF (`tests/test_plug.py`), die WLAN-Steckdosen
 `tests/fake_shelly.py` wie eine Shelly Plug M Gen3 – auch eine mit Passwort und eine Steckdosenleiste
-(`tests/test_wifi_plug.py`); wie oft und wie genau die echten melden, prüfen die Tests nicht.
+(`tests/test_wifi_plug.py`); wie oft und wie genau die echten melden, prüfen die Tests nicht. Den Strom in
+Viertelstunden prüft `tests/test_energy.py` mit erfundenen Zählerständen – auch Neustart, Lücken, zurückspringende
+Zähler und die Datei für Excel.
 
 ## Ideen für später
 

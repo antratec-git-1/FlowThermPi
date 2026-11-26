@@ -284,6 +284,42 @@ function setHTML(el, html) {  // only touch the DOM if something changed (keeps 
   if (el._html === html) return;
   el._html = html;
   el.innerHTML = html;
+  linkAddresses(el);
+}
+
+// Every IP address on the page is a link: a tap opens the device's own web page (Shelly, Pill, router …) in a new tab.
+// Not inside buttons, lists to choose from or form fields – and not a network like „192.168.1.0/24“.
+const IP_RE = /(https?:\/\/)?((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(:\d{1,5})?/g;
+const NO_LINK = "a, button, select, option, textarea, label, summary, script, style, svg, [contenteditable]";
+function ipMatches(text) {   // [start, end, href] of every IP address in a text
+  const out = [];
+  IP_RE.lastIndex = 0;
+  for (let m; (m = IP_RE.exec(text)); ) {
+    const before = text[m.index - 1] || "", after = text.slice(IP_RE.lastIndex, IP_RE.lastIndex + 2);
+    if (/[\w.:\/-]/.test(before) || /^(\.?\d|\w)/.test(after) || (!m[1] && after[0] === "/")) continue;
+    out.push([m.index, IP_RE.lastIndex, `${m[1] || "http://"}${m[2]}${m[3] || ""}/`]);
+  }
+  return out;
+}
+function linkAddresses(root) {
+  const found = [], walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walk.nextNode()); ) {
+    if (!/\d\.\d/.test(n.nodeValue) || !n.parentElement || n.parentElement.closest(NO_LINK)) continue;
+    const hits = ipMatches(n.nodeValue);
+    if (hits.length) found.push([n, hits]);
+  }
+  for (const [n, hits] of found) {   // after the walk: changing the text nodes during it would confuse the walker
+    const text = n.nodeValue, frag = document.createDocumentFragment();
+    let at = 0;
+    for (const [a, b, href] of hits) {
+      const link = document.createElement("a");
+      Object.assign(link, { href, target: "_blank", rel: "noopener noreferrer", className: "ip", textContent: text.slice(a, b) });
+      frag.append(text.slice(at, a), link);
+      at = b;
+    }
+    frag.append(text.slice(at));
+    n.replaceWith(frag);
+  }
 }
 
 function setStatus(text, error = false) {
@@ -930,14 +966,25 @@ function closeHistory() {
   renderHistory();
 }
 
+function openPlugEnergy(id) {   // „Strom“ of a plug: what flowed through it in every quarter hour, day by day
+  if (!state) return;
+  hist = { kind: "plug", id, from: "setup", day: state.now.slice(0, 10), data: null, error: "", loading: true, table: false,
+          first: null };
+  histHover = null;
+  renderHistory();
+  loadHistory();
+}
+
 async function loadHistory(day) {
   const h = hist;
   if (!h) return;
   if (day && day !== h.day) { h.day = day; h.loading = true; histHover = null; renderHistory(); }
   try {
-    const data = await api("GET", `${apiBase(h)}/history/${h.day}`);
+    const data = await api("GET", h.kind === "plug" ? `api/plugs/${encodeURIComponent(h.id)}/energy/${h.day}`
+      : `${apiBase(h)}/history/${h.day}`);
     if (hist !== h || data.day !== h.day) return;   // closed, or another day chosen meanwhile
     h.data = data;
+    if (h.kind === "plug") h.first = data.first_day;
     h.error = "";
   } catch (e) {
     if (hist !== h) return;
@@ -952,22 +999,26 @@ function renderHistory() {
   document.body.classList.toggle("sheet-open", !!hist);
   if (!hist || !state) { el.hidden = true; el.innerHTML = ""; el._html = null; return; }
   const h = hist, d = h.data && h.data.day === h.day ? h.data : null;
-  const today = state.now.slice(0, 10), first = state.history && state.history.first_day;
+  const today = state.now.slice(0, 10), plug = h.kind === "plug";
+  const first = plug ? h.first : state.history && state.history.first_day;
   const prev = first && h.day > first ? addDays(h.day, -1) : null, next = h.day < today ? addDays(h.day, 1) : null;
-  const g = groups().find(x => x.kind === h.kind && x.id === h.id);
+  const g = plug ? (state.plugs || []).find(x => x.id === h.id) : groups().find(x => x.kind === h.kind && x.id === h.id);
   const name = d ? d.name : g ? g.name : "";
   const step = (to, label, sym) => `<button class="day-step" data-action="hist-day" data-day="${to || ""}" ${
     to && !h.loading ? "" : "disabled"} aria-label="${label}">${sym}</button>`;
   setHTML(el, `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="hist-title">
-    <div class="sheet-head"><h2 id="hist-title"><span class="kicker">Verlauf</span>${esc(name)}</h2>
+    <div class="sheet-head"><h2 id="hist-title"><span class="kicker">${plug ? "Strom" : "Verlauf"}</span>${esc(name)}</h2>
       <button class="sheet-close" data-action="hist-close">Schließen</button></div>
     <div class="hist-day">${step(prev, "Tag davor", "‹")}<span class="day-label">${
       esc(d ? d.label : h.loading ? "…" : "")}</span>${step(next, "Tag danach", "›")}</div>
-    ${d ? historyBodyHTML(d, h.from) : `<p class="hist-empty">${esc(h.error || "Der Verlauf wird geladen …")}</p>`}
+    ${d ? (plug ? energyBodyHTML(d) : historyBodyHTML(d, h.from))
+      : `<p class="hist-empty">${esc(h.error || (plug ? "Der Strom wird geladen …" : "Der Verlauf wird geladen …"))}</p>`}
   </div>`);
   el.hidden = false;
-  drawHistoryChart();
+  drawSheetChart();
 }
+
+function drawSheetChart() { return hist && hist.kind === "plug" ? drawEnergyChart() : drawHistoryChart(); }
 
 function historyBodyHTML(d, from) {
   const costs = costsShown(from), setup = from === "setup", m = histModel(d);
@@ -999,6 +1050,144 @@ function historyBodyHTML(d, from) {
     ${devices}
     ${notes.length ? `<ul class="hist-notes">${notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     ${hourTableHTML(d)}`;
+}
+
+function whText(wh, keepWh) {  // 412.5 -> "413 Wh", 1840 -> "1,8 kWh" (with keepWh "1.840 Wh", for the table)
+  if (wh >= 1000 && !keepWh) return kwhText(wh / 1000);
+  return (wh < 10 ? (Math.round(wh * 10) / 10).toLocaleString("de-DE") : Math.round(wh).toLocaleString("de-DE")) + " Wh";
+}
+
+function lastOfMonth(day) {  // "2026-11-26" -> "2026-11-30"
+  const [y, m] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+}
+
+function energyBodyHTML(d) {  // „Strom“ of a plug: what flowed through it in every quarter hour of the day
+  const stats = [["Strom", d.kwh != null ? kwhText(d.kwh) : "–"]];
+  if (d.eur != null) stats.push(["Kosten", "etwa " + euroText(d.eur)]);
+  if (d.w_max != null) stats.push(["Höchste Leistung", wattText(d.w_max)]);
+  const where = [d.heater ? `an ${d.heater}` : "", d.room ? `im Raum „${d.room}“` : ""].filter(Boolean).join(" · ");
+  const m = energyModel(d), notes = [];
+  if (!d.points.length) notes.push(d.now ? "Heute gibt es noch keine Werte." : "Für diesen Tag gibt es keine Werte.");
+  if (d.now && !d.recording)
+    notes.push("Gerade wird nichts aufgezeichnet. Nach dem Einschalten wartet die App, bis die Uhrzeit stimmt.");
+  notes.push("Jeder Balken ist eine Viertelstunde, gemessen vom Zähler der Steckdose. Meldet sie sich eine Weile nicht, " +
+    "verteilt die App, was in der Zeit floss, gleichmäßig auf die Viertelstunden.");
+  if (d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Räume“ › „Strom und Kosten“.");
+  const month = d.day.slice(0, 8) + "01";
+  return `${where ? `<p class="hist-where">${esc(where)}</p>` : ""}
+    <dl class="hist-stats">${stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+    <div class="hist-chart" id="hist-chart"></div>
+    <ul class="hist-legend"><li><span class="key power" aria-hidden="true"></span>Strom je Viertelstunde</li>${
+      m.gaps.length ? '<li><span class="key gap" aria-hidden="true"></span>keine Werte</li>' : ""}</ul>
+    <ul class="hist-notes">${notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
+    ${quarterTableHTML(d)}
+    <p class="hist-download">Als Tabelle für Excel, alle Steckdosen: <a href="api/energy/${d.day}/${d.day}" download>dieser Tag</a>
+      · <a href="api/energy/${month}/${lastOfMonth(d.day)}" download>dieser Monat</a></p>`;
+}
+
+function energyModel(d) {  // the quarter hours by time, the stretches without values, until when
+  const byT = new Map(d.points.map(p => [p.t, p]));
+  const until = d.now != null ? Math.min(d.end, Math.floor(d.now / d.slot) * d.slot + d.slot) : d.end;
+  const gaps = [];
+  for (let t = d.start; t < until; t += d.slot) {
+    if (byT.has(t)) continue;
+    const last = gaps[gaps.length - 1];
+    if (last && last[1] === t) last[1] = t + d.slot; else gaps.push([t, t + d.slot]);
+  }
+  if (d.now != null && gaps.length && gaps[gaps.length - 1][1] === until)
+    gaps[gaps.length - 1][1] = Math.min(until, Math.max(gaps[gaps.length - 1][0], d.now));   // not past „jetzt“
+  return { byT, gaps, until };
+}
+
+function drawEnergyChart() {  // one bar per quarter hour, as high as the energy that flowed in it
+  const box = document.getElementById("hist-chart");
+  const d = hist && hist.data && hist.data.day === hist.day ? hist.data : null;
+  if (!box || !d || d.kind !== "plug") return;
+  const m = energyModel(d), n = v => v.toFixed(1);
+  const W = Math.max(280, Math.round(box.clientWidth || 600));
+  const left = 58, right = 12, top = 22, plotH = W < 520 ? 170 : 220, base = top + plotH, axisY = base + 20, H = axisY + 6;
+  const x0 = left, x1 = W - right, span = d.end - d.start;
+  const X = t => x0 + (t - d.start) / span * (x1 - x0);
+  const most = Math.max(0, ...d.points.map(p => p.wh));
+  const nice = x => { const e = Math.pow(10, Math.floor(Math.log10(x))); return [1, 2, 5, 10].map(f => f * e).find(v => x <= v); };
+  const step = nice(Math.max(most, 8) / 4), hi = Math.max(step, Math.ceil(most / step) * step);
+  const Y = v => base - Math.min(v, hi) / hi * plotH;
+  const parts = ['<defs><pattern id="hist-hatch" width="6" height="6" patternUnits="userSpaceOnUse" ' +
+    'patternTransform="rotate(45)"><line x1="1" y1="0" x2="1" y2="6" class="gap-line"/></pattern></defs>'];
+  for (const [a, b] of m.gaps)
+    parts.push(`<rect class="gap" x="${n(X(a))}" y="${top}" width="${n(X(b) - X(a))}" height="${plotH}"/>`);
+  for (let v = 0; v <= hi; v += step)
+    parts.push(`<line class="grid" x1="${x0}" x2="${x1}" y1="${n(Y(v))}" y2="${n(Y(v))}"/>` +
+      `<text class="ylab" x="${x0 - 8}" y="${n(Y(v) + 4)}">${esc(whText(v))}</text>`);
+  for (const tick of d.ticks) {
+    const x = X(tick.t), anchor = tick.t <= d.start ? "start" : tick.t >= d.end ? "end" : "middle";
+    if (tick.t > d.start && tick.t < d.end) parts.push(`<line class="grid" x1="${n(x)}" x2="${n(x)}" y1="${top}" y2="${base}"/>`);
+    parts.push(`<text class="xlab" x="${n(x)}" y="${axisY}" text-anchor="${anchor}">${esc(tick.label)}</text>`);
+  }
+  const gap = (X(d.start + d.slot) - X(d.start)) > 4 ? 1 : 0.5;   // a thin line of background between the bars
+  for (const p of d.points) {
+    if (!(p.wh > 0)) continue;
+    const h = Math.max(1.5, base - Y(p.wh)), x = X(p.t) + gap / 2, w = Math.max(0.5, X(p.t + d.slot) - X(p.t) - gap);
+    parts.push(`<rect class="qbar" x="${n(x)}" y="${n(base - h)}" width="${n(w)}" height="${n(h)}"/>`);
+  }
+  parts.push(`<line class="lane-base" x1="${x0}" x2="${x1}" y1="${base}" y2="${base}"/>`);
+  if (d.now != null && d.now < d.end) {
+    const x = X(d.now);
+    parts.push(`<line class="now" x1="${n(x)}" x2="${n(x)}" y1="${top - 4}" y2="${base}"/>` +
+      `<text class="now-lab" x="${n(x)}" y="${top - 8}" text-anchor="${x > x1 - 24 ? "end" : x < x0 + 24 ? "start" : "middle"}">jetzt</text>`);
+  }
+  parts.push(`<g class="cross" visibility="hidden"><line y1="${top}" y2="${base}"/></g>`);
+  box.innerHTML = `<svg class="hist-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${
+    esc(`Strom je Viertelstunde, ${d.label}`)}">${parts.join("")}</svg><div class="hist-tip" hidden></div>`;
+  box._geo = { d, m, X, Y, x0, x1, top, W };
+  box.onpointermove = box.onpointerdown = ev => {
+    const t = histSlotAt(ev);
+    if (t !== histHover) { histHover = t; showEnergyHover(); }
+  };
+  box.onpointerleave = ev => { if (ev.pointerType === "mouse") { histHover = null; showEnergyHover(); } };
+  showEnergyHover();
+}
+
+function showEnergyHover() {  // a line through the quarter hour at histHover and what flowed in it
+  const box = document.getElementById("hist-chart"), g = box && box._geo;
+  if (!g) return;
+  const cross = box.querySelector(".cross"), tip = box.querySelector(".hist-tip"), t = histHover;
+  if (t == null || t < g.d.start || t >= g.m.until) { cross.setAttribute("visibility", "hidden"); tip.hidden = true; return; }
+  const d = g.d, p = g.m.byT.get(t), x = g.X(t + d.slot / 2), line = cross.querySelector("line");
+  line.setAttribute("x1", x);
+  line.setAttribute("x2", x);
+  cross.setAttribute("visibility", "visible");
+  const lines = [`<b>${esc(histClock(t, d))}–${esc(histClock(t + d.slot, d))} Uhr</b>`];
+  if (!p) lines.push("keine Werte");
+  else {
+    lines.push(esc(whText(p.wh)));
+    if (p.wh > 0 && (d.now == null || t + d.slot <= d.now))   // the quarter hour that is still running: no average yet
+      lines.push(`im Schnitt ${esc(wattText(p.wh * 3600 / d.slot))}`);
+    if (p.w_max != null) lines.push(`höchstens ${esc(wattText(p.w_max))}`);
+  }
+  tip.innerHTML = lines.map(l => `<span>${l}</span>`).join("");
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  tip.style.left = `${Math.round(x + 14 + w <= g.W ? x + 14 : Math.max(0, x - 14 - w))}px`;
+  tip.style.top = `${g.top}px`;
+}
+
+function quarterTableHTML(d) {  // the same day as a table: one line per hour with its four quarter hours
+  const rows = new Map();
+  for (const p of d.points) {
+    const clock = histClock(p.t, d), hour = Number(clock.slice(0, 2)), q = Math.floor(Number(clock.slice(3, 5)) / 15);
+    const r = rows.get(hour) || { hour, q: [null, null, null, null], sum: 0 };
+    r.q[q] = (r.q[q] || 0) + p.wh;
+    r.sum += p.wh;
+    rows.set(hour, r);
+  }
+  const list = [...rows.values()].sort((a, b) => a.hour - b.hour);
+  if (!list.length) return "";
+  return `<details class="hist-table" ${hist && hist.table ? "open" : ""}><summary>Viertelstunde für Viertelstunde</summary><table>
+    <thead><tr><th>Stunde</th><th>:00</th><th>:15</th><th>:30</th><th>:45</th><th>zusammen</th></tr></thead>
+    <tbody>${list.map(r => `<tr><td>${r.hour} Uhr</td>${r.q.map(v => `<td>${v == null ? "–" : esc(whText(v, true))}</td>`).join("")}<td>${
+      esc(whText(r.sum, true))}</td></tr>`).join("")}</tbody></table></details>`;
 }
 
 function histModel(d) {  // the day in five-minute steps: points by time, the stretches without values, until when
@@ -1251,6 +1440,7 @@ function renderDialog() {
     <div class="dialog-buttons">${d.buttons.map((b, i) =>
       `<button data-dialog-button="${i}" class="${b.cls || ""}" ${d.busy ? "disabled" : ""}>${esc(b.label)}</button>`).join("")}</div>
   </div>`;
+  linkAddresses(el);
   el.hidden = false;
   const first = el.querySelector("input");
   if (first) first.focus();
@@ -1921,10 +2111,25 @@ function plugHeaterOptions(plugId, chosen) {   // the AeroFlows a plug can belon
     ? ` (hängt an ${esc(h.plug.name)})` : ""}</option>`)).join("");
 }
 
+function plugRoomOptions(chosen) {   // the rooms a plug without a heater can be in
+  return ['<option value="">– kein Raum –</option>'].concat(state.rooms.map(r => `<option value="${esc(r.id)}" ${
+    r.id === chosen ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
+}
+
+function plugRoomHTML(p) {   // at a heater: the heater's room – without one: a room to choose (any other device)
+  if (p.heater) {
+    const r = state.rooms.find(x => x.id === p.room);
+    return r ? `${esc(r.name)} <span class="muted">– der Raum der Heizung</span>` : '<span class="muted">wie die Heizung – die hat noch keinen Raum</span>';
+  }
+  return `<select data-action="plug-room" aria-label="Raum von ${esc(p.name)}" ${busy.has("plugroom:" + p.id) ? "disabled" : ""}>${
+    plugRoomOptions(p.room)}</select>`;
+}
+
 function plugTileHTML(p) {
   const removing = busy.has("plug:" + p.id) || zigbeeNetPending === p.id;
   const z = p.kind === "zigbee" ? zigbeeDevice(p.id) : null;
-  const device = p.kind === "zigbee" ? [p.model, z && zigbeeSignal(z.signal)] : [p.model, p.device_name, p.address];
+  const device = p.kind === "zigbee" ? [p.model, z && zigbeeSignal(z.signal)]
+    : [p.model, p.device_name !== p.name ? p.device_name : "", p.address];   // its own name is its name in the app
   const aeroflows = state.heaters.some(h => h.kind !== "zigbee");
   return `<div class="device ${removing ? "busy" : ""}" data-plug="${esc(p.id)}">
     <div class="device-head"><span class="dot ${p.error ? "offline" : p.found ? "ok" : ""}"></span><strong class="dname">${esc(p.name)}</strong>
@@ -1934,6 +2139,8 @@ function plugTileHTML(p) {
       <dt>Heizung</dt><dd>${aeroflows ? `<select data-action="plug-heater" aria-label="Heizung an ${esc(p.name)}" ${
         busy.has("plugheater:" + p.id) ? "disabled" : ""}>${plugHeaterOptions(p.id, p.heater)}</select>`
         : '<span class="muted">noch keine AeroFlow-Heizung in der App</span>'}</dd>
+      <dt>Raum</dt><dd>${plugRoomHTML(p)}</dd>
+      <dt>Strom</dt><dd><button class="small" data-action="plug-energy">Viertelstunden ansehen</button></dd>
       <dt>Gerät</dt><dd>${esc(device.filter(Boolean).join(" · ") || "–")}</dd>
       ${p.kind === "zigbee" ? `<dt>Zigbee-Adresse</dt><dd>${esc(p.id)}</dd>` : ""}
       ${p.error ? `<dt>Zustand</dt><dd><span class="error-text">${esc(p.error)}</span></dd>` : ""}
@@ -1959,7 +2166,8 @@ function plugSearchPanelHTML() {   // the WLAN part of „+ Gerät hinzufügen�
       : `<button class="small primary" data-action="plug-adopt" data-plug="${esc(p.id)}" ${busy.has("plug:" + p.id)
         ? "disabled" : ""}>Übernehmen</button>`;
     return `<li><span class="dot ${p.protected || p.offline ? "offline" : "ok"}"></span><span class="hname"><b>${esc(p.name)}</b>
-      <span class="muted">${esc([p.model, p.device_name, p.address, facts].filter(Boolean).join(" · "))}</span></span>${status}</li>`;
+      <span class="muted">${esc([p.model, p.device_name !== p.name ? p.device_name : "", p.address, facts].filter(Boolean)
+        .join(" · "))}</span></span>${status}</li>`;
   }).join("");
   const summary = d.plugs.length ? `${d.plugs.length} Steckdose${d.plugs.length === 1 ? "" : "n"} gefunden` : "keine Steckdose gefunden";
   return `<div class="scan"><div class="scan-head"><strong>Suche im WLAN</strong>
@@ -1974,8 +2182,9 @@ function plugsCardHTML() {
   const plugs = state.plugs || [];
   return `<article class="card"><div class="card-head"><h2>Steckdosen mit Strommessung</h2></div>
     <p class="hint">Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen, wie viel Strom sie
-      wirklich zieht. Zu welcher Heizung eine Steckdose gehört, wählst du hier bei der Steckdose. Ist die Steckdose aus,
-      zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten tut die App eine Steckdose nie.</p>
+      wirklich zieht. Zu welcher Heizung eine Steckdose gehört – oder ohne Heizung, in welchem Raum sie ist –, wählst du
+      hier bei der Steckdose. „Viertelstunden ansehen“ zeigt, wie viel Strom sie in jeder Viertelstunde gezählt hat. Ist
+      die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten tut die App eine Steckdose nie.</p>
     ${plugs.map(plugTileHTML).join("")}
     ${plugs.length ? "" : '<p class="empty">Noch keine Steckdose in der App.</p>'}
   </article>`;
@@ -2033,6 +2242,27 @@ async function setPlugHeater(id, heater, quiet = false) {   // „gehört zu“ 
   try {
     const res = await api("PUT", `api/plugs/${encodeURIComponent(id)}/heater`, { heater: heater || null });
     if (!quiet || res.warning) toast(res.message || "Gespeichert.", !!res.warning);
+    ok = true;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
+  return ok;
+}
+
+async function setPlugRoom(id, room, quiet = false) {   // a plug without a heater: the room it is in – true when saved
+  const key = "plugroom:" + id;
+  if (busy.has(key)) return false;
+  busy.add(key);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  let ok = false;
+  try {
+    const res = await api("PUT", `api/plugs/${encodeURIComponent(id)}/room`, { room: room || null });
+    if (!quiet) toast(res.message || "Gespeichert.");
     ok = true;
   } catch (e) {
     toast(e.message, true);
@@ -2662,7 +2892,7 @@ function addKinds() {   // what can be added here: a thermostat only on a Pi wit
   return [["heater", "Heizung", "AeroFlow-Heizung mit FlexiSmart-Pro-Regler – im WLAN"]]
     .concat(zig ? [["thermostat", "Thermostat", "SONOFF-Thermostat für einen Heizkörper – funkt über Zigbee"]] : [])
     .concat([["sensor", "Raumfühler", "Shelly Pill mit Temperaturfühler – im WLAN"],
-             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
+             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder einen Raum – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
 }
 
 function addStep() {   // 0 … 3 for the steps above the guide
@@ -2761,13 +2991,17 @@ function addWhereHTML(roomOptions) {   // step 4: the room – for a plug the he
     saving ? "speichere …" : "Fertig"}</button></div>`;
   if (w.type === "plug") {
     const p = (state.plugs || []).find(x => x.id === w.id);
+    const named = `<b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App.`;
+    const room = `<label>Raum<select data-afield="room">${roomOptions(f.room)}</select></label>`;
     if (!state.heaters.some(h => h.kind !== "zigbee")) {
-      return `<p><b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App.</p><p class="hint">Noch keine AeroFlow-Heizung in
-        der App. Zu welcher Heizung die Steckdose gehört, wählst du später bei ihr unter „Steckdosen“.</p>${done}`;
+      return `<p>${named} In welchem Raum ist sie?</p><div class="device-form">${room}<p class="hint">Noch keine
+        AeroFlow-Heizung in der App. Hängt später eine an der Steckdose, wählst du sie bei ihr unter „Steckdosen“.</p></div>${done}`;
     }
-    return `<p><b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App. Zu welcher Heizung gehört sie?</p>
+    return `<p>${named} Zu welcher Heizung gehört sie – oder in welchen Raum?</p>
       <div class="device-form"><label>Heizung<select data-afield="heater">${plugHeaterOptions(w.id, f.heater)}</select></label>
-      <p class="hint">Die App stellt die Steckdose dabei so ein, dass sie nach einem Stromausfall wieder angeht.</p></div>${done}`;
+      ${f.heater ? '<p class="hint">Die App stellt die Steckdose dabei so ein, dass sie nach einem Stromausfall wieder angeht.</p>'
+        : `${room}<p class="hint">Ohne Heizung – etwa an einem anderen Gerät – zählt ihr Strom für den Raum, den du hier wählst.</p>`}
+      </div>${done}`;
   }
   const h = state.heaters.find(x => x.id === w.id), thermostat = h ? h.kind === "zigbee" : String(w.id).startsWith("0x");
   return `<p><b>${esc(h ? h.name : thermostat ? "Das Thermostat" : "Die Heizung")}</b> ist in der App. In welchem Raum ${
@@ -2857,7 +3091,7 @@ async function addFinish() {   // „Fertig“: save the room (and a thermostat'
   const f = addFlow, w = f && f.where;
   if (!w || busy.has("addflow")) return;
   if (w.type === "plug") {
-    if (f.heater && !(await setPlugHeater(w.id, f.heater, true))) return;
+    if (f.heater ? !(await setPlugHeater(w.id, f.heater, true)) : f.room && !(await setPlugRoom(w.id, f.room, true))) return;
     deviceTab = "plugs";
   } else {
     const body = {};
@@ -4059,6 +4293,7 @@ document.addEventListener("click", e => {
     case "plug-search": return plugSearch && plugSearch.running ? undefined : runPlugSearch();
     case "plug-adopt": return adoptPlug(t.dataset.plug);
     case "plug-remove": return removePlug(t.closest("[data-plug]").dataset.plug);
+    case "plug-energy": return openPlugEnergy(t.closest("[data-plug]").dataset.plug);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
     case "sensor-edit": return openSensorForm(t.closest(".device").dataset.sensor);
@@ -4132,7 +4367,11 @@ document.addEventListener("change", e => {
     return;
   }
   if (t.dataset.cfield === "show") { editCosts().show = t.checked; return; }
-  if (addFlow && t.dataset.afield) { addFlow[t.dataset.afield] = t.value; return; }
+  if (addFlow && t.dataset.afield) {   // a plug's heater chosen or taken away: its room is asked for only without one
+    addFlow[t.dataset.afield] = t.value;
+    if (t.dataset.afield === "heater") render();
+    return;
+  }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {
@@ -4142,6 +4381,7 @@ document.addEventListener("change", e => {
     case "sensor-room":
       return patch(`api/sensors/${encodeURIComponent(t.closest(".device").dataset.sensor)}`, { room: t.value || null }, "Raum zugeordnet.");
     case "plug-heater": return setPlugHeater(t.closest("[data-plug]").dataset.plug, t.value);
+    case "plug-room": return setPlugRoom(t.closest("[data-plug]").dataset.plug, t.value);
     case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });
@@ -4202,7 +4442,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) { se
 document.addEventListener("toggle", e => {   // „Stunde für Stunde“ stays open when the Verlauf is redrawn
   if (hist && e.target.classList && e.target.classList.contains("hist-table")) hist.table = e.target.open;
 }, true);
-window.addEventListener("resize", () => { cancelAnimationFrame(histResize); histResize = requestAnimationFrame(drawHistoryChart); });
+window.addEventListener("resize", () => { cancelAnimationFrame(histResize); histResize = requestAnimationFrame(drawSheetChart); });
 document.addEventListener("pointerdown", touchSetup, true);
 document.addEventListener("keydown", touchSetup, true);
 

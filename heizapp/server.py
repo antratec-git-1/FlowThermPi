@@ -81,6 +81,11 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", r"/api/plugs", lambda m, b, r: s.add_wifi_plug(b), SETUP),
         ("DELETE", rf"/api/plugs/{i}", lambda m, b, r: s.delete_wifi_plug(m[1]), SETUP),
         ("PUT", rf"/api/plugs/{i}/heater", lambda m, b, r: s.set_plug_heater(m[1], b), SETUP),   # „gehört zu“
+        ("PUT", rf"/api/plugs/{i}/room", lambda m, b, r: s.set_plug_room(m[1], b), SETUP),   # a room, no heater
+        ("GET", rf"/api/plugs/{i}/energy/(\d{{4}}-\d{{2}}-\d{{2}})",   # „Strom“: one day in quarter hours
+         lambda m, b, r: s.energy_view(m[1], m[2]), SETUP),
+        ("GET", r"/api/energy/(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})",   # „Als Tabelle“: all plugs, for Excel
+         lambda m, b, r: Download(*s.energy_table(m[1], m[2])), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration", lambda m, b, r: s.start_calibration(m[1], b), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/finish", lambda m, b, r: s.finish_calibration(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/apply", lambda m, b, r: s.apply_calibration(m[1], b), SETUP),

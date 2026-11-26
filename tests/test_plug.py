@@ -317,6 +317,13 @@ class ApiTest(Base):
         self.assertIsNone(h["plug"])
         self.assertNotIn("plug", self.service.store.data["heaters"][AERO])
 
+    def test_a_removed_plug_forgets_its_room_too(self):
+        room = self.service.create_room({"name": "Werkstatt"})["id"]
+        self.service.set_plug_room(SPARE, {"room": room})   # no heater: a plug with its own room
+        self.assertEqual(self.service.store.data["plug_rooms"], {SPARE: room})
+        self.call("POST", f"/api/zigbee/devices/{SPARE}/remove", {"force": False})
+        self.assertEqual(self.service.store.data["plug_rooms"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

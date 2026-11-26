@@ -193,6 +193,8 @@ input[type="number"] { width: 72px; }
 dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 10px 0 0; font-size: 14px; }
 dt { color: var(--muted); }
 dd { margin: 0; word-break: break-word; }
+.device dd { min-width: 0; }   /* a long choice („Salon Fenster (hängt an …)“) must not widen the page on a phone */
+.device dd select { max-width: 100%; }
 
 .empty { color: var(--muted); }
 
@@ -284,8 +286,8 @@ dd { margin: 0; word-break: break-word; }
 /* „Verlauf“ of a room (opened from its tile or its card in the setup) and „Strom und Kosten“.
    Chart colours checked for colour blindness and 3:1 against the card, light and dark: heating warm, window open blue;
    no values hatched grey (texture, named in the legend and the tooltip). */
-:root { --chart-heat: #8a3412; --chart-win: #2f7fc0; }
-@media (prefers-color-scheme: dark) { :root { --chart-heat: #c8743e; --chart-win: #4a9ad6; } }
+:root { --chart-heat: #8a3412; --chart-win: #2f7fc0; --chart-power: #0d5960; }
+@media (prefers-color-scheme: dark) { :root { --chart-heat: #c8743e; --chart-win: #4a9ad6; --chart-power: #5fb8bf; } }
 .tile-history { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 52px;
                 padding: 8px 14px; border: 0; border-radius: 14px; background: var(--pill); font-size: 17px; text-align: left;
                 touch-action: manipulation; }
@@ -325,6 +327,7 @@ body.sheet-open { overflow: hidden; }
 .hist-svg .soll { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .hist-svg .heat { fill: var(--chart-heat); }
 .hist-svg .win { fill: var(--chart-win); }
+.hist-svg .qbar { fill: var(--chart-power); }   /* not .bar: that one is the plan bar, 16 px high */
 .hist-svg .gap { fill: url(#hist-hatch); }
 .hist-svg .gap-line { stroke: var(--off); stroke-width: 2; }
 .hist-svg .now { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
@@ -341,6 +344,7 @@ body.sheet-open { overflow: hidden; }
 .key.soll { height: 0; border-radius: 0; border-top: 2px dashed var(--muted); }
 .key.heat { background: var(--chart-heat); }
 .key.win { background: var(--chart-win); }
+.key.power { background: var(--chart-power); }
 .key.gap { background: repeating-linear-gradient(45deg, var(--off) 0 2px, transparent 2px 5px); box-shadow: inset 0 0 0 1px var(--off); }
 .hist-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 16px; }
 .hist-devices li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
@@ -348,6 +352,10 @@ body.sheet-open { overflow: hidden; }
 .hist-devices .dval { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .hist-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 15px; color: var(--muted); }
 .hist-empty { margin: 0; color: var(--muted); }
+.hist-where { margin: -6px 0 0; color: var(--muted); font-size: 16px; }
+.hist-download { margin: 0; font-size: 15px; color: var(--muted); }
+.hist-download a { color: var(--text); }
+a.ip { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .hist-table summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--primary); font-size: 16px; }
 .hist-table table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
 .hist-table th, .hist-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
