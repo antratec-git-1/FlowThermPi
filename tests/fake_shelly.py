@@ -2,8 +2,10 @@
 
 FakeShelly answers "/shelly" and "/rpc/Shelly.GetStatus" – by default as a Shelly H&T Gen3, which the app no
 longer lists. FakePill is a Shelly „The Pill“: it also answers "Pill.GetConfig" and "Shelly.GetComponents" and
-takes "Pill.SetConfig" and "Shelly.Reboot" as JSON-RPC frames on "POST /rpc". Every request is recorded in
-.requests as (method, path), every POST /rpc call in .calls as (method, params).
+takes "Pill.SetConfig" and "Shelly.Reboot" as JSON-RPC frames on "POST /rpc". FakePlug is a plug with power metering
+(by default a Shelly Plug M Gen3), as Shelly's documentation describes it: "switch:0" in Shelly.GetStatus,
+"Switch.GetConfig", and "Switch.Set" / "Switch.SetConfig" on "POST /rpc". Every request is recorded in .requests as
+(method, path), every POST /rpc call in .calls as (method, params).
 """
 from __future__ import annotations
 
@@ -159,5 +161,67 @@ class FakePill(FakeShelly):
                 self.reboots += 1
                 self.mode, self.pending = self.pending or self.mode, None
                 return 200, {**reply, "result": None}
+            return 200, {**reply, "error": {"code": 404, "message": f"No handler for {name}"}}
+        return super().answer(method, path, body)
+
+
+class FakePlug(FakeShelly):
+    """A Shelly plug that measures. on: its switch; power: what the heater behind it draws (W) – only flows while on;
+    energy_wh: its counter (Wh, only counts up); initial_state: what it does after a power cut. switches=4 plays a power
+    strip (several switches), errors e.g. ["overtemp"] a plug that switched itself off. The app name "PlugMG3" is a
+    guess – the app goes by the model code, which Home Assistant's aioshelly lists."""
+
+    def __init__(self, ident: str = "shellyplugmg3-aabbccdd0001", name: str | None = None, on: bool = True,
+                 power: float = 0.0, energy_wh: float = 12340.0, initial_state: str = "off", password: bool = False,
+                 model: str = "S3PL-30110EU", app: str = "PlugMG3", switches: int = 1, errors: list | None = None):
+        self.on, self.load, self.energy_wh = on, power, energy_wh
+        self.initial_state = initial_state
+        self.switches = switches
+        self.errors = list(errors or [])
+        super().__init__(ident=ident, app=app, model=model, status={}, password=password, name=name)
+        self.info.update(fw_id="20251120-100000/1.7.1-gtest", ver="1.7.1")
+
+    def switch_status(self, cid: int = 0) -> dict:
+        on = self.on if cid == 0 else False
+        st = {"id": cid, "source": "init", "output": on, "apower": round(self.load, 1) if on else 0.0, "voltage": 231.2,
+              "freq": 50.0, "current": round(self.load / 231.2, 3) if on else 0.0,
+              "aenergy": {"total": round(self.energy_wh, 3), "by_minute": [0.0, 0.0, 0.0], "minute_ts": 1764000000},
+              "temperature": {"tC": 31.5, "tF": 88.7}}
+        if self.errors and cid == 0:
+            st["errors"] = list(self.errors)
+        return st
+
+    def current_status(self) -> dict:
+        st = {"ble": {}, "cloud": {"connected": False}, "mqtt": {"connected": False}, "plugs_ui": {},
+              "sys": {"mac": self.info["mac"], "restart_required": False, "available_updates": {}},
+              "wifi": {"sta_ip": "127.0.0.1", "status": "got ip", "ssid": "Test", "rssi": -61}}
+        for cid in range(self.switches):
+            st[f"switch:{cid}"] = self.switch_status(cid)
+        return st
+
+    def answer(self, method: str, path: str, body: bytes) -> tuple[int, object]:
+        if self.password and path.startswith("/rpc"):
+            return 401, {"code": 401}
+        url = urlsplit(path)
+        if method == "GET" and url.path == "/rpc/Switch.GetConfig":
+            return 200, {"id": 0, "name": None, "in_mode": "momentary", "initial_state": self.initial_state,
+                         "auto_on": False, "auto_on_delay": 60.0, "auto_off": False, "auto_off_delay": 60.0,
+                         "power_limit": 3000, "voltage_limit": 280, "current_limit": 13.0}
+        if method == "GET" and url.path == "/rpc/Switch.GetStatus":
+            return 200, self.switch_status(int((parse_qs(url.query).get("id") or ["0"])[0]))
+        if method == "POST" and path == "/rpc":
+            frame = json.loads(body or b"{}")
+            name, params = frame.get("method"), frame.get("params") or {}
+            self.calls.append((name, params))
+            reply = {"id": frame.get("id"), "src": self.info["id"]}
+            if name == "Switch.Set" and params.get("id") == 0 and isinstance(params.get("on"), bool):
+                was, self.on = self.on, params["on"]
+                return 200, {**reply, "result": {"was_on": was}}
+            if name == "Switch.SetConfig" and params.get("id") == 0:
+                state = (params.get("config") or {}).get("initial_state")
+                if state not in (None, "off", "on", "restore_last", "match_input"):
+                    return 200, {**reply, "error": {"code": -103, "message": "Invalid argument 'initial_state'!"}}
+                self.initial_state = state or self.initial_state
+                return 200, {**reply, "result": {"restart_required": False}}
             return 200, {**reply, "error": {"code": 404, "message": f"No handler for {name}"}}
         return super().answer(method, path, body)

@@ -10,6 +10,10 @@ Its thermostats behave like the SONOFF TRV-ZBT in Zigbee2MQTT (zigbee-herdsman-c
 message, as Zigbee2MQTT only logs it – and after `delay` seconds the thermostat's whole state comes back, retained,
 with a fresh last_seen; …/get brings the state, too. A thermostat in `asleep` answers nothing.
 
+Its plugs behave like the SONOFF S60ZBTPF (plug with power metering, a router): …/set takes state (ON, OFF, TOGGLE)
+and power_on_behavior (off, on, toggle, previous); switched off, it measures nothing. What it measures is made up –
+report() sets it, as if a heater behind it heated. join_kind says what joins during a search: a thermostat or a plug.
+
 A firmware update (bridge/request/device/ota_update/update) goes as the Zigbee2MQTT guide describes it (read on
 25.11.2026): the device reports its progress `ota_steps` times, `ota_every` seconds apart; only at the end comes the
 answer, with the firmware before and after – or with `ota_error`. When it restarts with the new firmware, the
@@ -296,6 +300,41 @@ def thermostat(ieee: str, interview: str = "SUCCESSFUL") -> dict:
             "interview_state": interview, "endpoints": {}}
 
 
+PLUG_MODEL = "S60ZBTPF"
+
+
+def plug_state(power: float = 0.0, on: bool = True) -> dict:
+    """A S60ZBTPF's state as Zigbee2MQTT publishes it (the meter readings are made up)."""
+    return {"state": "ON" if on else "OFF", "power": power if on else 0, "current": round(power / 230, 2) if on else 0,
+            "voltage": 231, "energy": 12.34, "energy_today": 0.42, "energy_yesterday": 1.8, "energy_month": 12.34,
+            "power_on_behavior": "previous", "network_indicator": True, "outlet_control_protect": False,
+            "overload_protection": 16, "linkquality": 168,
+            "update": {"state": "idle", "installed_version": 4101, "latest_version": 4101}}
+
+
+def plug(ieee: str, interview: str = "SUCCESSFUL") -> dict:
+    """A SONOFF S60ZBTPF as bridge/devices lists it – a router on mains power, the definition only once interviewed."""
+    done = interview == "SUCCESSFUL"
+    numeric = lambda name, unit: {"type": "numeric", "name": name, "property": name, "unit": unit, "access": 5}  # noqa: E731
+    return {"ieee_address": ieee, "type": "Router", "network_address": 0x6B12, "supported": done,
+            "friendly_name": ieee, "disabled": False, "description": None,
+            "definition": {"source": "native", "model": PLUG_MODEL, "vendor": "SONOFF",
+                           "description": "Zigbee smart plug with power metering",
+                           "exposes": [{"type": "switch", "features": [
+                                           {"type": "binary", "name": "state", "property": "state", "access": 7,
+                                            "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE"}]},
+                                       {"type": "enum", "name": "power_on_behavior", "property": "power_on_behavior",
+                                        "values": ["off", "on", "toggle", "previous"], "access": 7},
+                                       numeric("power", "W"), numeric("current", "A"), numeric("voltage", "V"),
+                                       numeric("energy", "kWh"), numeric("energy_today", "kWh"),
+                                       {"type": "numeric", "name": "linkquality", "property": "linkquality",
+                                        "access": 1}],
+                           "supports_ota": True, "options": []} if done else None,
+            "power_source": "Mains (single phase)", "software_build_id": "1.0.5" if done else None,
+            "model_id": PLUG_MODEL, "manufacturer": "SONOFF", "interviewing": interview == "IN_PROGRESS",
+            "interview_completed": done, "interview_state": interview, "endpoints": {}}
+
+
 class FakeZ2M:
     """Zigbee2MQTT 2.x as the app sees it over MQTT. join_after: seconds after permit_join until a thermostat joins
     (None: nobody comes); interview: seconds its interview takes."""
@@ -325,6 +364,7 @@ class FakeZ2M:
         self.ota_error: str | None = None   # why a firmware update fails (e.g. the device does not take part)
         self.ota_firmware = "1.1.4"         # the firmware (software_build_id) after an update
         self.ota_forgets = {"smart_temperature_control": "OFF", "system_mode": "off"}   # … and what it forgets then
+        self.join_kind = "thermostat"       # what joins during a search: "thermostat" or "plug"
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
         broker.hooks.append(self._command)
@@ -366,18 +406,27 @@ class FakeZ2M:
     def _event(self, kind: str, data: dict) -> None:
         self.broker.publish(f"{self.BASE}/bridge/event", {"type": kind, "data": data})
 
-    def _values(self, ieee: str) -> None:
-        """The thermostat's whole state, retained – as after every message from it."""
+    def _fresh(self, ieee: str) -> dict:
+        """The state a device starts with – a plug's or a thermostat's."""
+        return plug_state() if self._is_plug(ieee) else trv_state()
+
+    def _is_plug(self, ieee: str) -> bool:
         with self.lock:
-            state = self.states.setdefault(ieee, trv_state())
+            return any(d["ieee_address"] == ieee and d["model_id"] == PLUG_MODEL for d in self.devices)
+
+    def _values(self, ieee: str) -> None:
+        """The device's whole state, retained – as after every message from it."""
+        with self.lock:
+            state = self.states.setdefault(ieee, self._fresh(ieee))
             state["last_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
             payload = dict(state)
         self.broker.publish(f"{self.BASE}/{ieee}", payload, retain=True)
 
     def report(self, ieee: str, **values) -> None:
-        """The thermostat reports by itself (someone turned the wheel, the room cooled down, …)."""
+        """The device reports by itself (someone turned the wheel, the room cooled down, the heater behind a plug
+        heats, someone pressed the plug's button …)."""
         with self.lock:
-            self.states.setdefault(ieee, trv_state()).update(values)
+            self.states.setdefault(ieee, self._fresh(ieee)).update(values)
         self._values(ieee)
 
     # commands to a thermostat
@@ -403,8 +452,35 @@ class FakeZ2M:
             return
         later(self.delay, lambda: self._apply(ieee, body) if kind == "set" else self._values(ieee))
 
+    def _apply_plug(self, ieee: str, body: dict) -> None:
+        """What the S60ZBTPF's converters do with a set: state and power_on_behavior; switched off it measures 0 W."""
+        with self.lock:
+            state = self.states.setdefault(ieee, plug_state())
+            new = dict(state)
+            for key, value in body.items():
+                if key == "state" and isinstance(value, str) and value.upper() in ("ON", "OFF", "TOGGLE"):
+                    value = value.upper()
+                    new["state"] = ("OFF" if new["state"] == "ON" else "ON") if value == "TOGGLE" else value
+                elif key == "power_on_behavior" and value in ("off", "on", "toggle", "previous"):
+                    new[key] = value
+                else:
+                    self.refused.append(f"No converter available for '{key}'" if key not in ("state", "power_on_behavior")
+                                        else f"Invalid value {value} for {key}")
+                    return
+            if new["state"] == "OFF":
+                new.update(power=0, current=0)
+            state.clear()
+            state.update(new)
+        self._values(ieee)
+
     def _apply(self, ieee: str, body: dict) -> None:
         """What the TRV-ZBT's converters do with a set: check each value, write it, then publish the state."""
+        with self.lock:
+            device = next((d for d in self.devices if d["ieee_address"] == ieee), None)
+        if device is None:   # removed while the command was on its way: nothing happens
+            return
+        if device["model_id"] == PLUG_MODEL:
+            return self._apply_plug(ieee, body)
         with self.lock:
             state = self.states.setdefault(ieee, trv_state())
             plans = self.plans.setdefault(ieee, {g: {d: state[f"weekly_schedule_{d}"] for d in DAYS} for g in "123"})
@@ -580,20 +656,22 @@ class FakeZ2M:
         later(self.ota_every, lambda: step(0))
 
     def _join(self) -> None:
-        """A thermostat whose middle button was held for 2 s: it joins, is interviewed, reports its values."""
+        """A thermostat whose middle button was held for 2 s (or a plug whose button was held for 5 s): it joins, is
+        interviewed, reports its values."""
+        make = plug if self.join_kind == "plug" else thermostat
         with self.lock:
             if not (self.online and self.permit_end and self.permit_end > time.time()):
                 return
             ieee = f"0x{self.next_ieee:016x}"
             self.next_ieee += 1
-            device = thermostat(ieee, "IN_PROGRESS")
+            device = make(ieee, "IN_PROGRESS")
             self.devices.append(device)
         self._event("device_joined", {"friendly_name": ieee, "ieee_address": ieee})
         self._event("device_interview", {"friendly_name": ieee, "status": "started", "ieee_address": ieee})
         self._devices()
 
         def done() -> None:
-            finished = thermostat(ieee)
+            finished = make(ieee)
             with self.lock:
                 if device not in self.devices:
                     return

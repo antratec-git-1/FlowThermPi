@@ -40,6 +40,10 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   gibt. Mit ‹ › geht es zu den Tagen davor; ein Tipp auf die Kurve zeigt die Werte dieser fünf Minuten, „Stunde für
   Stunde“ dasselbe als Tabelle. Strom und Kosten („etwa 0,90 €“) stehen nur dabei, wenn sie in der Einrichtung
   eingeschaltet sind – siehe [Verlauf und Kosten](#verlauf-und-kosten).
+- **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
+  ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
+  Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
+  keinen Strom.“ **Steckdose einschalten** schaltet sie wieder ein (ohne PIN). Ausschalten kann die App sie nicht.
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 - **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
@@ -67,7 +71,10 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 - **Strom und Kosten** (Tab „Räume“, ganz unten, ab 0.4.13): einen Strompreis für den Haushalt (ct/kWh) und die
   Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter zeigt Strom und Kosten auch
   auf der Startseite (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
-  **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten).
+  **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Ab 0.4.14 bekommt jede AeroFlow hier auch ihre
+  Steckdose mit Strommessung – [Zigbee](#zigbee-steckdosen-mit-strommessung) oder
+  [WLAN](#wlan-steckdosen-mit-strommessung) („an der Steckdose“); darunter steht, was sie misst, und
+  **Übernehmen** trägt die beim Heizen gemessene Leistung ein.
 - **Heizpläne:** in der App verwalten (bis zu 10 Zeitfenster pro Tag, Viertelstunden-Raster)
   und an die Heizungen eines Raums **senden**. Die Heizung führt den Plan im Modus
   „Automatik“ selbst aus – auch wenn die App aus ist.
@@ -81,6 +88,9 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   einstellen, was in der Pill steckt (DS18B20 oder DHT22). Der Fühler zeigt seine Temperatur neben der der Heizungen
   seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Ein **Kalibrierlauf** (zum Beispiel einen Tag
   lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
+- **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt,
+  „heute … kWh“ und ihrer Heizung; WLAN-Steckdosen (Shelly) hier suchen, übernehmen und entfernen. Siehe
+  [WLAN-Steckdosen](#wlan-steckdosen-mit-strommessung) und [Zigbee-Steckdosen](#zigbee-steckdosen-mit-strommessung).
 - **Geräte-Liste filtern:** Im Tab „Geräte“ nach Raum filtern (Alle / je Raum / Nicht zugeordnet,
   jeweils mit Anzahl); die Auswahl merkt sich die App.
 - **Heizplan aus Heizung auslesen** (Tab „Geräte“): liest alle drei Planplätze einer Heizung
@@ -442,15 +452,18 @@ Thermostat.
 - **Startet nicht:** Die Seite sagt es und zeigt die letzten Meldungen von Zigbee2MQTT (Passwörter und Schlüssel
   darin versteckt), daneben „Neu starten“. Meldungen: `journalctl -u flowthermpi-zigbee2mqtt`.
 
-**Thermostate anlernen:**
+**Thermostate und Steckdosen anlernen:**
 
-- **Thermostate suchen** öffnet das Zigbee-Netz für 3 Minuten. Die Seite zählt herunter und sagt, was am Thermostat
-  zu tun ist: Batterien einlegen, das Drehrad unter 5 °C drehen, bis es aus ist, dann die mittlere Taste 2 Sekunden
-  drücken, bis das Verbindungszeichen blinkt. Nach etwa einer Minute steht es in der Liste – mit Modell, Batterie,
-  Funkqualität und gemessener Temperatur. Mehrere Thermostate gehen nacheinander in derselben Suche; klappt es nicht,
-  das Thermostat zum Anlernen näher an den Pi bringen.
-- **Entfernen …** (bei einem Thermostat) meldet es im Zigbee-Netz ab. Antwortet es nicht (es schläft oder ist zu weit
-  weg), bietet die Seite **Trotzdem entfernen** an: Dann vergisst der Pi es, ohne auf seine Antwort zu warten.
+- **Geräte suchen** (bis 0.4.13 „Thermostate suchen“) öffnet das Zigbee-Netz für 3 Minuten. Die Seite zählt herunter
+  und sagt, was zu tun ist. Am Thermostat: Batterien einlegen, das Drehrad unter 5 °C drehen, bis es aus ist, dann
+  die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt. Nach etwa einer Minute steht es in der
+  Liste – mit Modell, Batterie, Funkqualität und gemessener Temperatur. An einer
+  [Steckdose](#zigbee-steckdosen-mit-strommessung): ihre Taste 5 Sekunden halten, bis das blaue Licht langsam blinkt.
+  Mehrere Geräte gehen nacheinander in derselben Suche; klappt es nicht, das Gerät zum Anlernen näher an den Pi
+  bringen.
+- **Entfernen …** (bei einem Thermostat oder einer Steckdose) meldet es im Zigbee-Netz ab. Antwortet es nicht (es
+  schläft oder ist zu weit weg), bietet die Seite **Trotzdem entfernen** an: Dann vergisst der Pi es, ohne auf die
+  Antwort zu warten. Eine entfernte Steckdose gehört danach auch zu keiner Heizung mehr.
 - **Wie die App mit Zigbee2MQTT spricht:** über Mosquitto (MQTT), nur auf dem Pi selbst und mit Passwort – mit einem
   kleinen eigenen MQTT-Baustein (`heizapp/mqtt.py`, nur Python-Standardbibliothek).
 - Den Reiter gibt es nur auf dem Pi (mit `install.py` eingerichtet); ein älterer Pi bekommt ihn über den Update-Knopf.
@@ -500,6 +513,67 @@ Thermostat.
   Klappt das nicht, versucht sie es noch zweimal im Abstand von 5 Minuten; dann steht auf der Seite, was zu prüfen
   ist. Das Protokoll sagt, was das Thermostat nach dem Update gemeldet hat und was die App zurückgestellt hat.
 
+## Zigbee-Steckdosen mit Strommessung
+
+Ab 0.4.14. Die AeroFlow meldet keinen Verbrauch. Eine Zigbee-Steckdose mit Strommessung zwischen Wanddose und Heizung
+misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, nicht bei Festanschluss.
+
+- **Welche:** gebaut für die SONOFF S60ZBTPF (16 A, Schuko, etwa 14 €, Stand 25.11.2026). Andere gehen auch, wenn Zigbee2MQTT sie mit
+  einem Schalter und einer Leistungsmessung (`power`) kennt; Steckdosenleisten mit mehreren Schaltern nicht.
+- **Anlernen:** unter *Einrichtung › Zigbee* mit **Geräte suchen**, an der Steckdose die Taste 5 Sekunden halten. In
+  der Liste steht sie als „Steckdose“ mit den letzten vier Zeichen ihrer Adresse, mit an/aus, Watt, „heute … kWh“ und
+  zu welcher Heizung sie gehört. Eine Steckdose ist keine Heizung – sie steht unter *Geräte › Steckdosen*, nicht bei
+  den Heizungen.
+- **Zuordnen:** *Räume › Strom und Kosten*, bei der Heizung „an der Steckdose“ wählen, **Speichern**. Nur
+  AeroFlow-Heizungen, jede Steckdose höchstens bei einer Heizung. Beim Speichern stellt die App die Steckdose so ein,
+  dass sie nach einem Stromausfall wieder angeht – sonst bliebe die Heizung kalt.
+- **Messen:** Solange die Heizung heizt und die Steckdose mehr als 50 W durchlässt, merkt sich die App alle
+  10 Sekunden den Wert (höchstens die letzte Stunde Heizen, nur im Speicher – nach einem Neustart misst sie neu).
+  Nach einer Minute Heizen steht unter der Heizung „Beim Heizen gemessen: etwa … W“ (der mittlere Wert, einzelne
+  Ausreißer zählen nicht). **Übernehmen** trägt ihn als Leistung ein; gespeichert ist er erst mit **Speichern**.
+- **Ausgeschaltet:** Die Taste der Steckdose schaltet sie aus – dann hat die Heizung keinen Strom. Die Startseite
+  sagt das und hat **Steckdose einschalten** (ohne PIN). Die App selbst schaltet eine Steckdose nie aus.
+- **Funk:** Eine Steckdose am Strom gibt das Zigbee-Signal weiter; Thermostate weiter weg erreichen den Pi dann
+  besser.
+- **Bekannt** (Zigbee2MQTT, Stand 25.11.2026): Bei der S60ZBTPF kann der Leistungswert minutenlang hängen bleiben,
+  während Strom und Energie weiterlaufen (Issue 33770); dann kommt eine Weile kein neuer Messwert dazu.
+- **Nur simuliert geprüft:** Wie oft und wie genau die echte Steckdose meldet, zeigt sich erst am Gerät.
+- **Schnittstelle:** `PUT /api/costs` nimmt `plugs` (`{"<Heizung>": "<IEEE-Adresse>"}`, `""` für keine);
+  `POST /api/heaters/<id>/plug/on` schaltet die Steckdose einer Heizung ein (ohne PIN); in `GET /api/state` stehen
+  `plugs` und je Heizung `plug` (mit `id` und `kind`: `zigbee` oder `wifi`).
+
+## WLAN-Steckdosen mit Strommessung
+
+Ab 0.4.14. Dasselbe wie mit einer [Zigbee-Steckdose](#zigbee-steckdosen-mit-strommessung), nur ohne Zigbee-Stick: eine
+Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) – ohne Cloud und ohne Konto.
+
+- **Welche:** gebaut für die **Shelly Plug M Gen3** (S3PL-30110EU, Schuko, 13 A, bis 3.000 W, etwa 10 €, Stand
+  26.11.2026); die größte AeroFlow hat 2.450 W. Andere Shelly-Steckdosen ab Generation 2 mit Strommessung gehen auch,
+  wenn sie die Leistung der Heizung vertragen (die Plug S Gen3 nur 2.500 W); Steckdosenleisten mit mehreren Schaltern
+  nicht. Nicht passend: Tapo, Tuya/Smart Life, Meross und reine Matter-Steckdosen – sie lassen sich nicht einfach ohne
+  Cloud lesen.
+- **Ins WLAN bringen:** einstecken. Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt
+  (sonst in der ersten Minute die Taste 5 Sekunden halten, bis sie blau blinkt). Mit dem Handy hinein, im Browser
+  192.168.33.1 öffnen und das Heim-WLAN eintragen. Kein Passwort für die Steckdose einschalten – dann kann die App sie
+  nicht lesen.
+- **Übernehmen:** *Einrichtung › Geräte › Steckdosen*, **Steckdosen suchen** (fragt jede Adresse im Heimnetz, ein paar
+  Sekunden), bei der Steckdose **Übernehmen**. Sie heißt dann „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer
+  Kennung. Suchen und Übernehmen lesen nur. **Entfernen …** nimmt sie wieder aus der App; die Steckdose selbst bleibt,
+  wie sie ist – an oder aus.
+- **Zuordnen, Messen, Ausgeschaltet:** wie bei der Zigbee-Steckdose – *Räume › Strom und Kosten*, „an der Steckdose“,
+  **Speichern**; dabei stellt die App die Steckdose auf „nach Stromausfall an“. „heute … kWh“ rechnet die App aus dem
+  Zähler der Steckdose (sein Stand bei der ersten Abfrage des Tages steht in `data.json`).
+- **Lesen:** alle 10 Sekunden (`Shelly.GetStatus`); die MAC-Adresse muss passen. Antwortet sie nicht mehr unter ihrer
+  Adresse (der Router kann ihr eine neue geben), sucht die App sie höchstens alle 15 Minuten im Heimnetz und merkt sich
+  die neue Adresse. Antwortet sie eine Minute lang nicht, steht das bei der Steckdose.
+- **Schreiben** nur zwei Dinge: `Switch.Set` mit „an“ (**Steckdose einschalten**) und `Switch.SetConfig` mit
+  `initial_state: on` (beim Speichern). Vorher prüft die App, dass unter der Adresse wirklich diese Steckdose antwortet.
+- **Nur simuliert geprüft:** Die Steckdose spielt `tests/fake_shelly.py` so, wie Shellys Dokumentation sie beschreibt.
+  Wie die echte Plug M Gen3 antwortet, zeigt sich erst am Gerät.
+- **Schnittstelle:** `POST /api/plugs/discover` sucht, `POST /api/plugs` (`{"plug": "<Kennung>"}`) übernimmt,
+  `DELETE /api/plugs/<Kennung>` entfernt (alle drei mit PIN); bei `PUT /api/costs` steht in `plugs` die Kennung
+  (`shellyplugmg3-…`).
+
 ## Verlauf und Kosten
 
 Die Heizungen melden keinen Verbrauch und führen keinen Verlauf – weder im Gerät noch in der Cloud (Thermotecs
@@ -516,14 +590,16 @@ Heizungen werden dafür nicht öfter gefragt.
 - **Strom und Kosten sind eine Schätzung:** Heizdauer × eingetragene Leistung × Strompreis, ohne Grundpreis. Ob die
   Heizung beim Heizen immer die volle Leistung zieht, ist nicht geprüft (die Anleitung nennt als „maximale
   kontinuierliche Wärmeleistung“ teils weniger). Genauer wird es mit einem Zwischenstecker mit Strommessung: einen
-  Tag lang nachmessen und die Leistung anpassen. Eine geänderte Leistung oder ein neuer Preis gilt auch für die
+  Tag lang nachmessen und die Leistung anpassen – ab 0.4.14 auch mit einer Steckdose mit Strommessung
+  ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)), deren Messung die App
+  übernimmt. Eine geänderte Leistung oder ein neuer Preis gilt auch für die
   vergangenen Tage. Thermostate an Wasser-Heizkörpern zählen nur die Heizdauer – die Wärme kommt vom Heizkessel.
 - **Ein Raum** zeigt die Temperatur seiner Fühler, wenn sie gemessen haben, sonst die seiner Heizungen; „geheizt“
   ist die Zeit, in der mindestens eine seiner Heizungen geheizt hat. Zieht eine Heizung um, nimmt sie ihren Verlauf
   mit.
 - **Datenschutz:** Der Verlauf zeigt, wann jemand zu Hause ist. Er bleibt auf dem Pi und kommt nicht in „Protokoll
   speichern“.
-- **Noch nicht da** (geplant für 0.4.14): Woche und Monat als Balken, der Vergleich mit Vorwoche und Vormonat, „Als
+- **Noch nicht da** (geplant für 0.4.15): Woche und Monat als Balken, der Vergleich mit Vorwoche und Vormonat, „Als
   Tabelle speichern“ und das Aufräumen (5-Minuten-Werte 13 Monate, Tagessummen unbegrenzt). Bis dahin bleiben alle
   Dateien liegen.
 - **Schnittstelle:** `GET /api/rooms/<id>/history/JJJJ-MM-TT` und `GET /api/heaters/<id>/history/JJJJ-MM-TT` (ohne
@@ -641,13 +717,17 @@ Zigbee2MQTT vorgibt, und spielt ein Firmware-Update so, wie die Anleitung von Zi
 echte Thermostat verhält, prüfen die Tests nicht. Das Einsammeln der
 Systemprotokolle läuft gegen einen nachgebauten Pi (`FakePi` in `tests/test_logs.py`), dessen Ausgaben erfundene
 Passwörter und Tokens enthalten – geprüft wird, dass keines davon in der Datei landet. Verlauf und Kosten laufen mit
-erfundenen Uhrzeiten und Werten (`tests/test_history.py`), auch über Monatswechsel und Sommer-/Winterzeit.
+erfundenen Uhrzeiten und Werten (`tests/test_history.py`), auch über Monatswechsel und Sommer-/Winterzeit. Die
+Steckdosen spielt `tests/fake_mqtt.py` wie eine SONOFF S60ZBTPF (`tests/test_plug.py`), die WLAN-Steckdosen
+`tests/fake_shelly.py` wie eine Shelly Plug M Gen3 – auch eine mit Passwort und eine Steckdosenleiste
+(`tests/test_wifi_plug.py`); wie oft und wie genau die echten melden, prüfen die Tests nicht.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
-- Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.14).
+- Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
+- Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.
 - Heizungen zusätzlich in Apple Home einbinden.
 
 ## Lizenz

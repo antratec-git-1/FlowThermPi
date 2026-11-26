@@ -29,10 +29,12 @@ let calibForm = null;    // calibration in "Geräte": {id, measured}
 let scan = null;         // network search in "Geräte": {running} | {data} | {error}
 let scanNet = "";        // network typed for "Anderes Netz"
 let sensorSearch = null; // „Fühler suchen“ in "Geräte": {running, waiting, data: {networks, seconds, pills}, error}
+let plugSearch = null;   // „Steckdosen suchen“ in "Geräte": {running, data: {networks, seconds, plugs}, error}
 let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, pill, channel, name, room, placeholder}
 let pillForm = null;     // „Einrichten“ of a Pill: {pill, at: "search"|sensor id, mode}
 const calibHours = {};   // Kalibrierlauf: sensor id -> duration (hours) chosen before „starten“
-let deviceTab = localStorage.getItem("heizung.deviceTab") === "sensors" ? "sensors" : "heaters";  // sub-tab of "Geräte"
+let deviceTab = ["sensors", "plugs"].includes(localStorage.getItem("heizung.deviceTab"))   // sub-tab of "Geräte"
+  ? localStorage.getItem("heizung.deviceTab") : "heaters";
 const pillRestart = {};  // Pill id -> true while it restarts after „Einrichten“
 const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
 let updateCheck = null;  // "Nach Updates suchen" in "Über": {running} | {result} | {error}
@@ -692,6 +694,12 @@ function homeTile(g) {
   const low = g.heaters.filter(h => h.kind === "zigbee" && h.battery_low);
   const battery = !low.length ? "" : `<p class="tile-note">${g.heaters.length === 1 ? "Batterie im Thermostat bald wechseln."
     : "Batterie bald wechseln: " + esc(low.map(h => h.name).join(", ")) + "."}</p>`;
+  // a plug switched off at its button: the heater behind it has no power – one tap switches it on again
+  const unplugged = g.heaters.filter(h => h.plug && h.plug.state === "OFF");
+  const plugText = !unplugged.length ? "" : g.heaters.length === 1 ? "Die Steckdose ist aus – die Heizung hat keinen Strom."
+    : `Steckdose aus – kein Strom für ${unplugged.map(h => h.name).join(", ")}.`;
+  unplugged.slice().reverse().forEach(h => actions.unshift(`<button class="big-btn primary" data-action="plug-on" data-heater="${
+    esc(h.id)}" ${busy.has(key) ? "disabled" : ""}>${unplugged.length === 1 ? "Steckdose einschalten" : `Steckdose für ${esc(h.name)} einschalten`}</button>`));
   const classes = ["tile", glow, isOff ? "is-off" : "", online.length ? "" : "offline", heating && !isOff ? "heating" : "",
                    busy.has(key) ? "busy" : ""].filter(Boolean).join(" ");
   return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
@@ -699,7 +707,8 @@ function homeTile(g) {
     <div class="tile-now"><span class="now-temp">${degBig(felt)}</span>${felt == null ? "" : '<span class="now-label">im Raum</span>'}</div>
     ${setter}
     <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ` <span class="more">${silent
-      ? "Am Thermostat einmal die mittlere Taste drücken." : "Die App versucht es immer wieder."}</span>`}</p>
+      ? "Am Thermostat einmal die mittlere Taste drücken." : plugText ? esc(plugText) : "Die App versucht es immer wieder."}</span>`}</p>
+    ${online.length && plugText ? `<p class="tile-note">${esc(plugText)}</p>` : ""}
     ${battery}
     ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
     ${tileDevicesHTML(g, sensors)}
@@ -735,6 +744,11 @@ function homeReport(g, okText, data) {
 function homeMode(g, mode, okText) {
   if (!g) return;
   act(keyOf(g), async () => homeReport(g, okText, await api("POST", apiBase(g) + "/mode", { mode })));
+}
+
+function plugOn(g, id) {   // „Steckdose einschalten“: the plug of an AeroFlow gives it power again
+  if (!g || !id) return;
+  act(keyOf(g), async () => toast((await api("POST", `api/heaters/${encodeURIComponent(id)}/plug/on`)).message));
 }
 
 async function homeOff(g) {
@@ -1109,10 +1123,39 @@ function hourTableHTML(d) {  // „Stunde für Stunde“: the same day as a tabl
 // „Strom und Kosten“ at the end of „Räume“: one price for the household, the power of every AeroFlow, the switch
 function costValues() {
   if (costForm) return costForm;
-  const c = state.costs || {};
+  const c = state.costs || {}, heaters = state.heaters.filter(h => h.kind !== "zigbee");
   return { price: c.price_ct == null ? "" : ctText(c.price_ct), show: !!c.show,
-           powers: Object.fromEntries(state.heaters.filter(h => h.kind !== "zigbee")
-             .map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])) };
+           powers: Object.fromEntries(heaters.map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])),
+           plugs: Object.fromEntries(heaters.map(h => [h.id, h.plug ? h.plug.id : ""])) };
+}
+
+function wattText(w) { return Math.round(w).toLocaleString("de-DE") + " W"; }
+
+function plugPickHTML(h, f) {   // which plug (Zigbee or WLAN) the heater hangs on – only once there is one
+  const plugs = state.plugs || [], chosen = f.plugs[h.id] ?? "";
+  if (!plugs.length && !h.plug) return "";
+  const owner = id => (state.heaters.find(x => x.id === id) || {}).name;
+  const options = [`<option value="">keine</option>`].concat(plugs.map(p => `<option value="${esc(p.id)}" ${
+      p.id === chosen ? "selected" : ""}>${esc(p.name)}${p.heater && p.heater !== h.id ? ` (bei ${esc(owner(p.heater) || "einer anderen Heizung")})` : ""}</option>`));
+  if (h.plug && !plugs.some(p => p.id === h.plug.id)) options.push(`<option value="${esc(h.plug.id)}" ${
+    chosen === h.plug.id ? "selected" : ""}>${esc(h.plug.name)} (${h.plug.kind === "zigbee" ? "nicht im Zigbee-Netz" : "nicht mehr in der App"})</option>`);
+  return `<label class="plug-pick">an der Steckdose <select data-cplug="${esc(h.id)}" aria-label="Steckdose von ${esc(h.name)}">${
+    options.join("")}</select></label>${plugLineHTML(h)}`;
+}
+
+function plugLineHTML(h) {   // what the plug measures – and „Übernehmen“ for the power it measured while the heater heated
+  const p = h.plug;
+  if (!p) return "";
+  if (!p.found) return `<p class="hint plug-line">${esc(p.kind === "zigbee" ? `${p.name} ist nicht mehr im Zigbee-Netz.`
+    : `${p.name}: ${p.error || "noch keine Antwort – die App fragt alle paar Sekunden."}`)}</p>`;
+  const now = [p.state === "OFF" ? "ist aus" : p.state === "ON" ? (p.power != null ? `jetzt ${wattText(p.power)}` : "ist an") : "",
+               p.energy_today != null ? `heute ${kwhText(p.energy_today)}` : ""].filter(Boolean).join(" · ");
+  const measured = p.measured_w != null
+    ? `Beim Heizen gemessen: etwa ${wattText(p.measured_w)} <button class="small" data-action="cpower-take" data-heater="${
+        esc(h.id)}" data-watts="${p.measured_w}">Übernehmen</button>`
+    : "Die Leistung misst die App, sobald die Heizung heizt.";
+  return `<p class="hint plug-line">${esc(p.name)}${now ? " " + esc(now) : ""}. ${measured}${p.error
+    ? ` <span class="error-text">${esc(p.error)}</span>` : ""}</p>`;
 }
 function editCosts() { if (!costForm) costForm = clone(costValues()); return costForm; }
 
@@ -1120,9 +1163,11 @@ function costsCardHTML() {
   const heaters = state.heaters.filter(h => h.kind !== "zigbee");
   if (!heaters.length) return "";
   const f = costValues(), saving = busy.has("costs");
-  const powers = heaters.map(h => `<label class="power-row"><span class="pname">${deviceIcon(h)}${esc(h.name)}</span>
+  const powers = heaters.map(h => `<div class="power-item"><label class="power-row"><span class="pname">${deviceIcon(h)}${esc(h.name)}</span>
       <span class="unit-input"><input data-cpower="${esc(h.id)}" inputmode="numeric" list="power-values" autocomplete="off"
-        value="${esc(f.powers[h.id] ?? "")}" placeholder="z. B. 1300" aria-label="Leistung von ${esc(h.name)} in Watt"><span>W</span></span></label>`).join("");
+        value="${esc(f.powers[h.id] ?? "")}" placeholder="z. B. 1300" aria-label="Leistung von ${esc(h.name)} in Watt"><span>W</span></span></label>
+      ${plugPickHTML(h, f)}</div>`).join("");
+  const anyPlug = (state.plugs || []).length || heaters.some(h => h.plug);
   return `<article class="card costs-card">
     <div class="card-head"><h2>Strom und Kosten</h2></div>
     <p class="hint">Die Heizungen melden keinen Verbrauch. Die App schätzt ihn: Heizdauer × Leistung × Strompreis.</p>
@@ -1130,8 +1175,12 @@ function costsCardHTML() {
       <label>Strompreis<span class="unit-input"><input data-cfield="price" inputmode="decimal" autocomplete="off"
         value="${esc(f.price)}" placeholder="z. B. 32,5"><span>ct/kWh</span></span></label>
       <fieldset><legend>Leistung der Heizungen</legend>${powers}
-        <p class="hint">Steht auf dem Typenschild, bei der FlexiSmart Pro je nach Größe 650 bis 2450 W. Genauer wird es,
-          wenn du einmal einen Tag lang mit einem Zwischenstecker mit Strommessung nachmisst.</p></fieldset>
+        <p class="hint">Steht auf dem Typenschild, bei der FlexiSmart Pro je nach Größe 650 bis 2450 W. ${anyPlug
+          ? `Hängt eine Heizung an einer Steckdose mit Strommessung, misst die App beim Heizen nach – „Übernehmen“
+          trägt den Wert ein. Die App stellt die Steckdose so ein, dass sie nach einem Stromausfall wieder angeht.`
+          : `Genauer wird es, wenn du einmal einen Tag lang mit einem Zwischenstecker mit Strommessung nachmisst – oder
+          die Heizung an eine Steckdose mit Strommessung hängst (WLAN: unter „Geräte“ › „Steckdosen“${state.app && state.app.zigbee
+          ? ", Zigbee: unter „Zigbee“" : ""}).`}</p></fieldset>
       <datalist id="power-values">${POWER_VALUES.map(w => `<option value="${w}">`).join("")}</datalist>
       <label class="check"><input type="checkbox" data-cfield="show" ${f.show ? "checked" : ""}>
         <span>Strom und Kosten auch auf der Startseite zeigen</span></label>
@@ -1148,9 +1197,9 @@ async function saveCosts() {
   busy.add("costs");
   render();
   try {
-    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers });
+    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers, plugs: f.plugs });
     costForm = null;
-    toast(res.message || "Gespeichert.");
+    toast(res.message || "Gespeichert.", !!res.warning);
   } catch (e) { toast(e.message, true); }
   busy.delete("costs");
   await refresh();
@@ -1831,6 +1880,114 @@ async function runSensorSearch() {  // one sweep of the home network – a Pill 
   await refresh();
 }
 
+// ------------------------------------------------------------------ plugs with power metering („Steckdosen“)
+// Zigbee plugs come from the Zigbee network (anlernen unter „Zigbee“), WLAN plugs (Shelly) from „Steckdosen suchen“.
+function plugFacts(p) {   // "an · 612 W · heute 1,4 kWh"
+  return [p.state === "ON" ? "an" : p.state === "OFF" ? "aus" : "", p.state === "ON" && p.power != null ? wattText(p.power) : "",
+          p.energy_today != null ? `heute ${kwhText(p.energy_today)}` : ""].filter(Boolean).join(" · ");
+}
+
+function plugTileHTML(p) {
+  const owner = p.heater && state.heaters.find(h => h.id === p.heater);
+  const removing = busy.has("plug:" + p.id);
+  const device = p.kind === "zigbee" ? [p.model, "Zigbee"] : [p.model, p.device_name, p.address];
+  return `<div class="device ${removing ? "busy" : ""}" data-plug="${esc(p.id)}">
+    <div class="device-head"><span class="dot ${p.error ? "offline" : p.found ? "ok" : ""}"></span><strong class="dname">${esc(p.name)}</strong>
+      <span class="muted">${esc(plugFacts(p) || (p.found ? "" : "noch kein Messwert"))}</span>
+      ${p.kind === "wifi" ? `<button class="small" data-action="plug-remove" ${removing ? "disabled" : ""}>${removing
+        ? "entferne …" : "Entfernen …"}</button>` : ""}</div>
+    <dl>
+      <dt>Heizung</dt><dd>${owner ? `gehört zu ${esc(owner.name)}`
+        : "gehört noch zu keiner Heizung – zuordnen unter „Räume“ › „Strom und Kosten“"}</dd>
+      <dt>Gerät</dt><dd>${esc(device.filter(Boolean).join(" · ") || "–")}${p.kind === "zigbee"
+        ? ' <span class="muted">(anlernen und entfernen unter „Zigbee“)</span>' : ""}</dd>
+      ${p.error ? `<dt>Zustand</dt><dd><span class="error-text">${esc(p.error)}</span></dd>` : ""}
+    </dl></div>`;
+}
+
+function plugSearchPanelHTML() {
+  const s = plugSearch;
+  if (s.running) {
+    return `<div class="scan"><div class="scan-head"><strong class="searching">Suche läuft …</strong>
+      <span class="muted">Die App fragt jede Adresse im Heimnetz – das dauert ein paar Sekunden.</span></div></div>`;
+  }
+  if (s.error) {
+    return `<div class="scan"><div class="scan-head"><strong>Steckdosen suchen</strong>
+      <button class="small" data-action="plug-close">Schließen</button></div><p class="error-text">${esc(s.error)}</p></div>`;
+  }
+  const d = s.data, known = new Set((state.plugs || []).map(p => p.id));
+  const rows = d.plugs.map(p => {
+    const facts = p.protected ? "mit einem Passwort geschützt – die App kann sie nicht lesen" : p.offline ? "antwortet nicht"
+      : [p.on === true ? "an" : p.on === false ? "aus" : "", p.on && p.power != null ? wattText(p.power) : ""].filter(Boolean).join(" · ");
+    const status = known.has(p.id) ? '<span class="tag">in der App</span>' : p.protected || p.offline ? ""
+      : `<button class="small primary" data-action="plug-adopt" data-plug="${esc(p.id)}" ${busy.has("plug:" + p.id)
+        ? "disabled" : ""}>Übernehmen</button>`;
+    return `<li><span class="dot ${p.protected || p.offline ? "offline" : "ok"}"></span><span class="hname"><b>${esc(p.name)}</b>
+      <span class="muted">${esc([p.model, p.device_name, p.address, facts].filter(Boolean).join(" · "))}</span></span>${status}</li>`;
+  }).join("");
+  const summary = d.plugs.length ? `${d.plugs.length} Steckdose${d.plugs.length === 1 ? "" : "n"} gefunden` : "keine Steckdose gefunden";
+  return `<div class="scan"><div class="scan-head"><strong>Suche im Netz</strong>
+      <span class="muted">${esc(d.networks.join(", "))} · ${String(d.seconds).replace(".", ",")} s · ${summary}</span>
+      <button class="small" data-action="plug-search">Erneut suchen</button>
+      <button class="small" data-action="plug-close">Schließen</button></div>
+    ${rows ? `<ul class="heater-list scan-list">${rows}</ul>` : `<p class="hint">Ist die Steckdose eingesteckt und im WLAN?
+      Eine neue Steckdose zuerst ins WLAN bringen (siehe oben). Läuft die App in Docker oder in einem anderen Netz, findet
+      sie die Steckdose nicht.</p>`}
+  </div>`;
+}
+
+function plugsCardHTML() {
+  const plugs = state.plugs || [];
+  return `<article class="card"><div class="card-head"><h2>Steckdosen mit Strommessung</h2>
+      <button class="small primary" data-action="plug-search" ${plugSearch && plugSearch.running ? "disabled" : ""}>Steckdosen suchen</button></div>
+    <p class="hint">Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen, wie viel Strom sie
+      wirklich zieht. Ist die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten
+      tut die App eine Steckdose nie. Im WLAN passt die <b>Shelly Plug M Gen3</b> (bis 3.000 W).${state.app && state.app.zigbee
+      ? " Zigbee-Steckdosen lernst du unter „Zigbee“ an." : ""}</p>
+    <details class="plug-howto"><summary>So kommt eine neue Shelly-Steckdose ins WLAN</summary>
+      <ol class="zigbee-steps">
+        <li>Die Steckdose einstecken. Eine neue Steckdose öffnet ein eigenes WLAN, dessen Name mit „Shelly“ beginnt. Sonst in
+          der ersten Minute nach dem Einstecken die Taste 5 Sekunden halten, bis sie blau blinkt.</li>
+        <li>Mit dem Handy in dieses WLAN gehen und im Browser 192.168.33.1 öffnen.</li>
+        <li>Dort das Heim-WLAN mit seinem Passwort eintragen.</li>
+        <li>Hier „Steckdosen suchen“ drücken und bei der Steckdose „Übernehmen“. Zu ihrer Heizung gehört sie, sobald du sie
+          unter „Räume“ › „Strom und Kosten“ auswählst.</li>
+      </ol></details>
+    ${plugSearch ? plugSearchPanelHTML() : ""}
+    ${plugs.map(plugTileHTML).join("")}
+    ${plugs.length ? "" : '<p class="empty">Noch keine Steckdose in der App.</p>'}
+  </article>`;
+}
+
+async function runPlugSearch() {  // one sweep of the home network for Shelly plugs – they never sleep
+  const s = plugSearch = { running: true };
+  render();
+  try {
+    s.data = await api("POST", "api/plugs/discover", {});
+  } catch (e) {
+    s.error = e.message;
+  }
+  s.running = false;
+  if (plugSearch !== s) return;
+  invalidate();
+  await refresh();
+}
+
+function adoptPlug(id) {   // „Übernehmen“: the plug from the search becomes a plug of the app
+  act("plug:" + id, async () => toast((await api("POST", "api/plugs", { plug: id })).message));
+}
+
+async function removePlug(id) {   // „Entfernen …“: the app forgets a WLAN plug – the plug itself stays as it is
+  const p = (state.plugs || []).find(x => x.id === id);
+  if (!p) return;
+  const owner = p.heater && state.heaters.find(h => h.id === p.heater);
+  const yes = await ask({ title: "Steckdose entfernen?",
+    text: `Die App liest ${p.name} dann nicht mehr.${owner ? ` Sie gehört dann auch nicht mehr zu ${owner.name}.` : ""} Die ` +
+      "Steckdose selbst bleibt, wie sie ist – an oder aus. Später kannst du sie wieder suchen und übernehmen.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (yes) act("plug:" + id, async () => toast((await api("DELETE", `api/plugs/${encodeURIComponent(id)}`)).message));
+}
+
 function sensorTileHTML(s, roomOptions) {
   const editingThis = sensorForm && sensorForm.mode === "edit" && sensorForm.id === s.id;
   const setupThis = !editingThis && pillForm && pillForm.at === s.id;
@@ -2352,7 +2509,8 @@ function renderDevices(el) {
   const subtab = (id, label, count) => `<button data-subtab="${id}" role="tab" aria-selected="${deviceTab === id}">${label}
       <span class="count">${count}</span></button>`;
   const subtabs = `<div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizung", state.heaters.length)}
-      ${subtab("sensors", "Fühler", (state.sensors || []).length)}</div>`;
+      ${subtab("sensors", "Fühler", (state.sensors || []).length)}${subtab("plugs", "Steckdosen", (state.plugs || []).length)}</div>`;
+  if (deviceTab === "plugs") return setHTML(el, subtabs + plugsCardHTML());
   if (deviceTab === "sensors") {
     return setHTML(el, `${subtabs}<article class="card"><div class="card-head"><h2>Raumfühler</h2>
       <button class="small primary" data-action="sensor-search" ${sensorSearch && sensorSearch.running ? "disabled" : ""}>Fühler suchen</button></div>
@@ -3251,20 +3409,22 @@ async function zigbeeRemoveDevice(ieee, force) {   // null when done, else the e
 async function zigbeeForget(ieee) {
   const d = ((zigbee && zigbee.net && zigbee.net.devices) || []).find(x => x.ieee === ieee);
   if (!d) return;
-  const it = d.thermostat ? "das Thermostat" : "das Gerät";
-  const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : "Gerät entfernen?",
-    text: `Der Pi meldet ${it} im Zigbee-Netz ab. Willst du es später wieder nutzen, lernst du es einfach neu an.`,
+  const it = d.thermostat ? "das Thermostat" : d.plug ? "die Steckdose" : "das Gerät", pron = d.plug ? "sie" : "es";
+  const owner = d.plug && ((state && state.heaters) || []).find(h => h.plug && h.plug.id === ieee);
+  const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : d.plug ? "Steckdose entfernen?" : "Gerät entfernen?",
+    text: `Der Pi meldet ${it} im Zigbee-Netz ab.${owner ? ` Sie gehört dann auch nicht mehr zu ${owner.name}.` : ""} Willst du ${
+      pron} später wieder nutzen, lernst du ${pron} einfach neu an.`,
     buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
-  if (yes) await zigbeeUnpair(ieee, it);
+  if (yes) await zigbeeUnpair(ieee, it, pron);
 }
 
-async function zigbeeUnpair(ieee, it) {   // true when it is gone; it: "das Thermostat" or "das Gerät"
+async function zigbeeUnpair(ieee, it, pron = "es") {   // true when it is gone; it: "das Thermostat", "die Steckdose" or "das Gerät"
   const error = await zigbeeRemoveDevice(ieee, false);
   if (!error) return true;
   if (![502, 504].includes(error.status)) { toast(error.message, true); return false; }   // forcing only helps if the device did not answer
   const force = await ask({ title: "Trotzdem entfernen?",
-    text: `${error.message} Du kannst ${it} trotzdem entfernen: Dann vergisst der Pi es, ohne auf seine Antwort zu warten. ` +
-      "Meldet es sich später noch einmal, erscheint es wieder in der Liste.",
+    text: `${error.message} Du kannst ${it} trotzdem entfernen: Dann vergisst der Pi ${pron}, ohne auf die Antwort zu warten. ` +
+      `Meldet ${pron} sich später noch einmal, erscheint ${pron} wieder in der Liste.`,
     buttons: [{ label: "Abbrechen", value: null }, { label: "Trotzdem entfernen", value: "yes", cls: "danger-solid" }] });
   if (!force) return false;
   const again = await zigbeeRemoveDevice(ieee, true);
@@ -3407,22 +3567,32 @@ function zigbeeSignal(q) { return q == null ? "" : q >= 100 ? "Funk gut" : q >= 
 
 function zigbeeDeviceState(d) {   // [dot, words]
   if (d.interview === "pending" || d.interview === "running") return ["on", "wird angelernt …"];
-  if (d.interview === "failed") return ["offline", "Anlernen hat nicht geklappt – bitte noch einmal suchen und am Thermostat die mittlere Taste 2 Sekunden drücken"];
+  if (d.interview === "failed") return ["offline", "Anlernen hat nicht geklappt – bitte noch einmal suchen und am Gerät wieder die Taste drücken (Thermostat: mittlere Taste 2 Sekunden, Steckdose: 5 Sekunden)"];
   if (!d.supported) return ["offline", "wird von Zigbee2MQTT nicht unterstützt"];
   return ["ok", "bereit"];
 }
 
+function plugName(ieee) { return "Steckdose " + ieee.slice(-4).toUpperCase(); }   // as the server names it
+
 function zigbeeDeviceHTML(d) {
   const [dot, words] = zigbeeDeviceState(d);
-  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : "Unbekanntes Gerät");
-  const named = ((state && state.heaters) || []).find(h => h.id === d.ieee && h.custom_name);   // its name in the app
+  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : "Unbekanntes Gerät");
+  const heaters = (state && state.heaters) || [];
+  const named = heaters.find(h => h.id === d.ieee && h.custom_name);   // its name in the app
   const keep = s => s.replace(/ /g, " ");   // "20,5 °C" and the like stay on one line
-  const facts = [words, d.battery != null ? keep(`Batterie ${Math.round(d.battery)} %`) : "", keep(zigbeeSignal(d.signal)),
+  const plug = d.plug && d.interview === "done" && d.supported;   // a plug that is ready: its switch, power and day's energy
+  const facts = [words, d.battery != null ? keep(`Batterie ${Math.round(d.battery)} %`) : "",
+    plug && d.switch ? (d.switch === "ON" ? "an" : "aus") : "", plug && d.power_w != null ? keep(wattText(d.power_w)) : "",
+    plug && d.energy_today != null ? keep(`heute ${kwhText(d.energy_today)}`) : "", keep(zigbeeSignal(d.signal)),
     d.temperature != null ? keep(deg(d.temperature)) : ""].filter(Boolean).join(" · ");
-  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(named ? named.custom_name
-      : model)}</b>${named ? ` <span class="muted">${esc(model)}</span>` : ""}
+  const owner = plug ? heaters.find(h => h.plug && h.plug.id === d.ieee) : null;
+  const where = !plug ? "" : `<span class="zigbee-owner">${owner ? `gehört zu ${esc(owner.name)}`
+    : "gehört noch zu keiner Heizung – zuordnen unter „Räume“ › „Strom und Kosten“"}</span>`;
+  const title = named ? named.custom_name : d.plug ? plugName(d.ieee) : model;
+  return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(title)}</b>${
+      title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
       ${d.new ? `<span class="tag ok">neu</span>` : ""}
-      <span class="muted zigbee-facts">${esc(facts)}</span>
+      <span class="muted zigbee-facts">${esc(facts)}</span>${where}
       <span class="muted zigbee-ieee">${esc(d.ieee)}</span></span>
     <button class="small" data-action="zigbee-forget" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
       zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button></li>`;
@@ -3434,34 +3604,44 @@ function zigbeeSearchHTML(net) {
     const left = `${Math.floor(s.left / 60)}:${String(s.left % 60).padStart(2, "0")}`;
     return `<div class="wifi-note zigbee-search">
       <p class="searching"><b>Suche läuft – noch ${left}</b></p>
+      <p class="zigbee-kind"><b>Thermostat</b></p>
       <ol class="zigbee-steps">
         <li>Batterien ins Thermostat legen, falls sie noch nicht drin sind.</li>
         <li>Das Drehrad unter 5 °C drehen, bis das Thermostat aus ist.</li>
         <li>Die mittlere Taste 2 Sekunden drücken, bis das Verbindungszeichen blinkt.</li>
         <li>Warten: Nach etwa einer Minute erscheint es unten in der Liste.</li>
       </ol>
-      <p class="hint">Mehrere Thermostate gehen nacheinander in derselben Suche. Klappt es nicht, das Thermostat zum Anlernen
-        näher an den Pi bringen.</p>
+      <p class="zigbee-kind"><b>Steckdose mit Strommessung</b> (zum Beispiel SONOFF S60ZBTPF)</p>
+      <ol class="zigbee-steps">
+        <li>Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.</li>
+        <li>Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.</li>
+        <li>Warten: Nach etwa einer Minute erscheint sie unten in der Liste.</li>
+      </ol>
+      <p class="hint">Mehrere Geräte gehen nacheinander in derselben Suche. Klappt es nicht, das Gerät zum Anlernen näher an
+        den Pi bringen. Eine Steckdose gibt das Funksignal auch weiter – Thermostate weiter weg erreichen den Pi dann besser.</p>
       <button class="small" data-action="zigbee-unsearch" ${zigbeeNetPending ? "disabled" : ""}>${
         zigbeeNetPending === "unsearch" ? "beende …" : "Suche beenden"}</button>
     </div>`;
   }
-  return `<p>„Thermostate suchen“ öffnet das Zigbee-Netz für ${Math.round((s.seconds || 180) / 60)} Minuten, und die App sagt dir,
-      was am Thermostat zu tun ist.</p>
+  return `<p>„Geräte suchen“ öffnet das Zigbee-Netz für ${Math.round((s.seconds || 180) / 60)} Minuten, und die App sagt dir,
+      was am Thermostat oder an der Steckdose zu tun ist.</p>
     <div class="row"><button class="primary" data-action="zigbee-search" ${zigbeeNetPending || zigbeeBusy() ? "disabled" : ""}>${
-      zigbeeNetPending === "search" ? "öffne das Netz …" : "Thermostate suchen"}</button></div>`;
+      zigbeeNetPending === "search" ? "öffne das Netz …" : "Geräte suchen"}</button></div>`;
 }
 
 function zigbeeDevicesHTML(z) {
   const p = z.programs, net = z.net;
   if (!p || !net || !p.complete || !p.service.present || zigbeeRunning()) return "";
   const online = net.bridge === "online", devices = net.devices || [];
-  return `<div class="card zigbee-devices"><div class="card-head"><h2>Thermostate</h2></div>
-    ${online ? zigbeeSearchHTML(net) : `<p class="muted">Thermostate suchen geht, sobald Zigbee2MQTT läuft.</p>`}
+  return `<div class="card zigbee-devices"><div class="card-head"><h2>Thermostate und Steckdosen</h2></div>
+    ${online ? zigbeeSearchHTML(net) : `<p class="muted">Geräte suchen geht, sobald Zigbee2MQTT läuft.</p>`}
     ${devices.length ? `<ul class="net-list zigbee-list">${devices.map(zigbeeDeviceHTML).join("")}</ul>`
-      : online ? `<p class="muted">Noch kein Thermostat angelernt.</p>` : ""}
-    ${devices.length ? `<p class="hint">Namen und Räume gibst du den Thermostaten unter „Geräte“; den Heizplan bekommen sie
-      über ihren Raum.</p>` : ""}
+      : online ? `<p class="muted">Noch kein Gerät angelernt.</p>` : ""}
+    ${devices.some(d => d.thermostat) ? `<p class="hint">Namen und Räume gibst du den Thermostaten unter „Geräte“; den
+      Heizplan bekommen sie über ihren Raum.</p>` : ""}
+    ${devices.some(d => d.plug) ? `<p class="hint">Eine Steckdose ordnest du ihrer Heizung unter „Räume“ › „Strom und Kosten“
+      zu. Die App schaltet eine Steckdose nie aus – ist sie aus, zeigt die Startseite das und schaltet sie mit einem Tipp
+      wieder ein.</p>` : ""}
   </div>`;
 }
 
@@ -3508,6 +3688,7 @@ document.addEventListener("click", e => {
     case "home-off": return homeOff(groupFor(tile));
     case "home-plan": return homeMode(groupFor(tile), "auto", "läuft wieder nach Plan");
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
+    case "plug-on": return plugOn(groupFor(tile), t.dataset.heater);
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
     case "logs-save": return logsBusy ? undefined : logsSave();
@@ -3516,6 +3697,7 @@ document.addEventListener("click", e => {
     case "hist-day": return loadHistory(t.dataset.day);
     case "costs-save": return saveCosts();
     case "costs-cancel": costForm = null; return render();
+    case "cpower-take": editCosts().powers[t.dataset.heater] = t.dataset.watts; return render();   // saved with „Speichern“
   }
   if (t.dataset.subtab) {
     deviceTab = t.dataset.subtab;
@@ -3565,6 +3747,10 @@ document.addEventListener("click", e => {
     case "scan-other": return runScan(scanNet.trim() || null);
     case "scan-close": scan = null; return render();
     case "scan-add": return openDeviceForm(null, { address: t.dataset.address, hostname: t.dataset.hostname });
+    case "plug-search": return plugSearch && plugSearch.running ? undefined : runPlugSearch();
+    case "plug-close": plugSearch = null; return render();
+    case "plug-adopt": return adoptPlug(t.dataset.plug);
+    case "plug-remove": return removePlug(t.closest("[data-plug]").dataset.plug);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-close": sensorSearch = null; if (pillForm && pillForm.at === "search") pillForm = null; return render();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
@@ -3640,6 +3826,7 @@ document.addEventListener("change", e => {
     return;
   }
   if (t.dataset.cfield === "show") { editCosts().show = t.checked; return; }
+  if (t.dataset.cplug) { editCosts().plugs[t.dataset.cplug] = t.value; return render(); }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
   switch (t.dataset.action) {

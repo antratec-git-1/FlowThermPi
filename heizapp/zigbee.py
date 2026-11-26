@@ -1,4 +1,4 @@
-"""Zigbee (Einrichtung › Zigbee): die Zusatzprogramme für die SONOFF-Thermostate, das Zigbee-Netz, Thermostate anlernen.
+"""Zigbee (Einrichtung › Zigbee): die Zusatzprogramme für die SONOFF-Thermostate, das Zigbee-Netz, Geräte anlernen.
 
 Die Thermostate funken mit Zigbee. Dafür braucht der Pi drei Programme: Zigbee2MQTT (spricht über den USB-Stick mit
 den Thermostaten), Mosquitto (reicht die Nachrichten zwischen Zigbee2MQTT und dieser App weiter) und Node.js (darauf
@@ -8,7 +8,7 @@ flowthermpi-zigbee.path startet daraufhin als root „install.py --zigbee“. We
 install.py; jede Datei wird nach dem Laden geprüft. Fortschritt und Ergebnis schreibt es nach zigbee-status.json, am
 Ende immer mit dem Stand der Programme und des Dienstes von Zigbee2MQTT.
 
-Läuft Zigbee2MQTT, redet die App über Mosquitto direkt mit ihm (heizapp.zigbee_net): Thermostate suchen und entfernen.
+Läuft Zigbee2MQTT, redet die App über Mosquitto direkt mit ihm (heizapp.zigbee_net): Geräte suchen und entfernen.
 
 Den Reiter gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_ZIGBEE_DIR.
@@ -195,7 +195,7 @@ class Zigbee:
         return self._quick("start" if on else "stop")
 
     def search(self, on) -> dict:
-        """„Thermostate suchen“: the network is open for new devices for 3 minutes (on=False closes it again)."""
+        """„Geräte suchen“: the network is open for new devices for 3 minutes (on=False closes it again)."""
         self._require()
         if not isinstance(on, bool):
             raise ActionError("Ungültige Anfrage.", 400)
@@ -209,7 +209,8 @@ class Zigbee:
             raise ActionError("Ungültige Anfrage.", 400)
         device = self.net.remove(ieee, force is True)
         return {"zigbee": self.view(),
-                "message": "Das Thermostat ist entfernt." if device["thermostat"] else "Das Gerät ist entfernt."}
+                "message": "Das Thermostat ist entfernt." if device["thermostat"]
+                else "Die Steckdose ist entfernt." if device.get("plug") else "Das Gerät ist entfernt."}
 
     def _quick(self, action: str, params: dict | None = None) -> dict:
         """A request that the root service answers in seconds; the page waits for it."""

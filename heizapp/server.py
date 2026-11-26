@@ -42,6 +42,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", rf"/api/heaters/{h}/setpoint", lambda m, b, r: s.set_setpoint("heater", m[1], b.get("temp")), PUBLIC),
         ("POST", rf"/api/heaters/{h}/mode",
          lambda m, b, r: s.set_mode("heater", m[1], b.get("mode"), b.get("minutes")), PUBLIC),
+        ("POST", rf"/api/heaters/{h}/plug/on", lambda m, b, r: s.plug_on(m[1]), PUBLIC),   # its plug was switched off
         ("GET", rf"/api/rooms/{i}/history/(\d{{4}}-\d{{2}}-\d{{2}})",   # Verlauf of one day
          lambda m, b, r: s.history_view("room", m[1], m[2]), PUBLIC),
         ("GET", rf"/api/heaters/{h}/history/(\d{{4}}-\d{{2}}-\d{{2}})",
@@ -76,6 +77,9 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", rf"/api/sensors/{i}/refresh", lambda m, b, r: s.refresh_sensor(m[1]), SETUP),
         ("POST", rf"/api/pills/{i}/mode", lambda m, b, r: s.set_pill_mode(m[1], b.get("mode")), SETUP),
         ("POST", rf"/api/pills/{i}/restart", lambda m, b, r: s.restart_pill(m[1]), SETUP),
+        ("POST", r"/api/plugs/discover", lambda m, b, r: s.find_plugs(b.get("network")), SETUP),   # WLAN plugs
+        ("POST", r"/api/plugs", lambda m, b, r: s.add_wifi_plug(b), SETUP),
+        ("DELETE", rf"/api/plugs/{i}", lambda m, b, r: s.delete_wifi_plug(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration", lambda m, b, r: s.start_calibration(m[1], b), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/finish", lambda m, b, r: s.finish_calibration(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/apply", lambda m, b, r: s.apply_calibration(m[1], b), SETUP),
@@ -102,7 +106,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", r"/api/zigbee/setup", lambda m, b, r: z.setup(b.get("channel"), b.get("port")), SETUP),
         ("POST", r"/api/zigbee/service", lambda m, b, r: z.service(b.get("on")), SETUP),
         ("POST", r"/api/zigbee/search", lambda m, b, r: z.search(b.get("on")), SETUP),
-        ("POST", r"/api/zigbee/devices/(0x[0-9a-f]{16})/remove",   # a thermostat leaves the app with it
+        ("POST", r"/api/zigbee/devices/(0x[0-9a-f]{16})/remove",   # a thermostat leaves the app, a plug its heater
          lambda m, b, r: s.forget_thermostat(m[1], z.remove_device(m[1], b.get("force"))),
          SETUP),
         ("PUT", r"/api/logs/settings", lambda m, b, r: p.change(b), SETUP),

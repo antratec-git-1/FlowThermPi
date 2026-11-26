@@ -360,6 +360,12 @@ body.sheet-open { overflow: hidden; }
 .costs-form .power-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 14px; }
 .costs-form .pname { display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .costs-form .pname .dico svg { width: 18px; height: 18px; display: block; }
+.costs-form .power-item { display: grid; gap: 4px; }
+.costs-form .power-item + .power-item { padding-top: 8px; border-top: 1px solid var(--line); }
+.costs-form label.plug-pick { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.costs-form .plug-pick select { font-size: 14px; max-width: 11em; }   /* next to its words, also with long options */
+.costs-form .plug-line { margin: 0; text-align: right; }
+.costs-form .plug-line button { margin-left: 4px; }
 .costs-form label.check { display: flex; align-items: flex-start; gap: 8px; color: var(--text); font-size: 14px; }
 .costs-form label.check input { margin-top: 3px; flex: none; }
 .costs-form .row { margin-top: 0; }
@@ -522,7 +528,10 @@ button.danger-solid { background: var(--danger-fill); border-color: var(--danger
 .zigbee-parts li { margin: 4px 0; }
 .zigbee-steps, .zigbee-channels { margin: 8px 0; padding-left: 22px; }
 .zigbee-steps li, .zigbee-channels li { margin: 4px 0; }
+.plug-howto summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--primary); font-size: 16px; }   /* Geräte › Steckdosen: how a new Shelly gets into the WLAN */
 .zigbee-search .hint { margin: 0 0 10px; }
+.zigbee-search .zigbee-kind { margin: 10px 0 0; }
+.zigbee-list .zigbee-owner { display: block; margin: 2px 0 0; font-size: 14px; }
 .zigbee-list .zigbee-facts, .zigbee-list .zigbee-ieee { display: block; margin: 2px 0 0; }
 .zigbee-list .zigbee-ieee { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .zigbee-list .dot { align-self: flex-start; margin-top: 6px; }   /* next to the name, not the middle of the lines */

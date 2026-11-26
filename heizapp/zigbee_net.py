@@ -1,14 +1,16 @@
-"""Das Zigbee-Netz aus Sicht der App: über Mosquitto mit Zigbee2MQTT reden – Thermostate suchen, zeigen, entfernen.
+"""Das Zigbee-Netz aus Sicht der App: über Mosquitto mit Zigbee2MQTT reden – Geräte suchen, zeigen, entfernen.
 
 Beim Installieren legt install.py die Anmeldung der App bei Mosquitto in zigbee-mqtt.json ab (im Datenordner, nur für
 die App lesbar). Damit verbindet sich die App mit Mosquitto (nur auf diesem Pi) und liest, was Zigbee2MQTT meldet: ob
 es läuft (bridge/state), Version und Funkkanal (bridge/info), die angelernten Geräte (bridge/devices), was gerade
-passiert (bridge/event) und die Werte jedes Geräts (zigbee2mqtt/<IEEE-Adresse>). „Thermostate suchen“ öffnet das Netz
+passiert (bridge/event) und die Werte jedes Geräts (zigbee2mqtt/<IEEE-Adresse>). „Geräte suchen“ öffnet das Netz
 für 3 Minuten (bridge/request/permit_join), „Entfernen“ meldet ein Gerät ab (bridge/request/device/remove).
 
-Von jedem Thermostat hält die App alle Werte, die sie braucht (THERMOSTAT_KEYS), und wann es sich zuletzt gemeldet hat.
-Befehle an ein Thermostat gehen als zigbee2mqtt/<IEEE-Adresse>/set hinaus, Nachfragen als …/get; was ein Thermostat
-daraus macht, steht in heizapp.trv.
+Von jedem Thermostat hält die App alle Werte, die sie braucht (THERMOSTAT_KEYS), von jeder Steckdose mit Strommessung
+die ihren (PLUG_KEYS) – und wann sich das Gerät zuletzt gemeldet hat. Befehle an ein Gerät gehen als
+zigbee2mqtt/<IEEE-Adresse>/set hinaus, Nachfragen als …/get; was ein Thermostat daraus macht, steht in heizapp.trv.
+Eine Steckdose gilt als Steckdose, wenn sie einen Schalter (state) und eine Leistungsmessung (power) hat – so wie die
+SONOFF S60ZBTPF; die App ordnet sie einer AeroFlow zu (heizapp.service).
 
 „Firmware einspielen“ bittet Zigbee2MQTT darum (bridge/request/device/ota_update/update). Zigbee2MQTT antwortet erst,
 wenn das Update vorbei ist – nach 10 bis 100 Minuten. Bis dahin meldet das Gerät alle 30 Sekunden, wie weit es ist
@@ -54,6 +56,12 @@ THERMOSTAT_KEYS = frozenset({
     "temperature_accuracy", "update", "last_seen",
     *(f"weekly_schedule_{day}" for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
                                            "sunday"))})
+# … and of a plug with power metering (the names of the SONOFF S60ZBTPF in Zigbee2MQTT; others use the same)
+PLUG_KEYS = frozenset({"state", "power", "current", "voltage", "energy", "energy_today", "energy_yesterday",
+                       "energy_month", "power_on_behavior", "linkquality", "update", "last_seen"})
+KEPT_KEYS = THERMOSTAT_KEYS | PLUG_KEYS
+MAX_POWER = 50000          # W accepted from a plug (the S60ZBTPF takes up to 4000 W)
+MAX_ENERGY = 10 ** 7       # kWh accepted from a plug's meter
 UPDATE_KEYS = ("state", "installed_version", "latest_version", "progress", "remaining")
 OTA = "device/ota_update/update"   # Zigbee2MQTT answers this request only when the firmware update is over
 OTA_START = 10 * 60        # seconds Zigbee2MQTT may take to begin a firmware update before the app gives up on it …
@@ -137,16 +145,29 @@ def _version(side) -> str:
     return str(side.get("software_build_id") or side.get("file_version") or "?")
 
 
+def _measuring_plug(exposes: list) -> bool:
+    """A plug that measures: one switch (state – not state_l1 … of a switch with several outlets) and the power it
+    lets through (power, in W)."""
+    def features(e: dict) -> list:
+        found = e.get("features")
+        return [f for f in found if isinstance(f, dict)] if isinstance(found, list) else []
+    switch = any(e.get("type") == "switch" and any(f.get("property") == "state" for f in features(e))
+                 for e in exposes if isinstance(e, dict))
+    power = any(e.get("type") == "numeric" and e.get("property") == "power" for e in exposes if isinstance(e, dict))
+    return switch and power
+
+
 def _definition(item: dict, device: dict) -> None:
     """Model, maker and what the device can do – from bridge/devices or the event of a finished interview."""
     definition = item.get("definition") if isinstance(item.get("definition"), dict) else None
     if definition is None:
         return
     exposes = definition.get("exposes") if isinstance(definition.get("exposes"), list) else []
+    thermostat = any(isinstance(e, dict) and e.get("type") == "climate" for e in exposes)
     device.update(model=_text(definition.get("model"), 60) or device.get("model"),
                   vendor=_text(definition.get("vendor"), 60) or device.get("vendor"),
                   description=_text(definition.get("description"), 160),
-                  thermostat=any(isinstance(e, dict) and e.get("type") == "climate" for e in exposes))
+                  thermostat=thermostat, plug=not thermostat and _measuring_plug(exposes))
     if isinstance(item.get("supported"), bool):
         device["supported"] = item["supported"]
 
@@ -323,7 +344,7 @@ class ZigbeeNet:
                       "type": item.get("type") if item.get("type") in ("Router", "EndDevice") else None,
                       "model": _text(item.get("model_id"), 60), "vendor": _text(item.get("manufacturer"), 60),
                       "description": None, "supported": item.get("supported") is True, "thermostat": False,
-                      "interview": state, "power": _text(item.get("power_source"), 40),
+                      "plug": False, "interview": state, "power": _text(item.get("power_source"), 40),
                       "firmware": _text(item.get("software_build_id"), 40)}
             _definition(item, device)
             devices[ieee] = device
@@ -347,7 +368,7 @@ class ZigbeeNet:
             if kind in ("device_joined", "device_interview") and device is None and len(self._devices) < MAX_DEVICES:
                 device = self._devices[ieee] = {
                     "ieee": ieee, "name": _text(info.get("friendly_name"), 80) or ieee, "type": None, "model": None,
-                    "vendor": None, "description": None, "supported": False, "thermostat": False,
+                    "vendor": None, "description": None, "supported": False, "thermostat": False, "plug": False,
                     "interview": "pending", "power": None, "firmware": None}
             if kind == "device_joined":
                 self._joined[ieee] = time.time()
@@ -400,10 +421,13 @@ class ZigbeeNet:
             return
         values = {"battery": _number(data.get("battery"), 0, 100), "signal": _number(data.get("linkquality"), 0, 255),
                   "temperature": _number(data.get("local_temperature"), -40, 99),
-                  "last_seen": _text(data.get("last_seen"), 40)}
+                  "last_seen": _text(data.get("last_seen"), 40),
+                  "switch": data.get("state") if data.get("state") in ("ON", "OFF") else None,   # a plug
+                  "power": _number(data.get("power"), 0, MAX_POWER),
+                  "energy_today": _number(data.get("energy_today"), 0, MAX_ENERGY)}
         now = time.time()
         heard = min(_seen(data.get("last_seen")) or now, now)   # a retained message may be old: its last_seen says
-        kept = {k: _plain(v) for k, v in data.items() if k in THERMOSTAT_KEYS}
+        kept = {k: _plain(v) for k, v in data.items() if k in KEPT_KEYS}
         with self._news:
             ieee = name if IEEE.fullmatch(name) else next(
                 (key for key, device in self._devices.items() if device["name"] == name), None)
@@ -427,7 +451,7 @@ class ZigbeeNet:
         self._request("permit_join", {"time": self.search_time if on else 0}, self.answer)
         with self._lock:
             self._permit_end = time.time() + self.search_time if on else None
-        log.info("Zigbee: Suche nach Thermostaten %s", f"für {self.search_time} s gestartet" if on else "beendet")
+        log.info("Zigbee: Suche nach neuen Geräten %s", f"für {self.search_time} s gestartet" if on else "beendet")
 
     def remove(self, ieee: str, force: bool = False) -> dict:
         """Unpair a device. force: forget it without its answer (it is broken, gone or does not wake up)."""
@@ -554,6 +578,28 @@ class ZigbeeNet:
         with self._lock:
             return [ieee for ieee, d in self._devices.items() if d["model"] == model and d["interview"] == "done"]
 
+    # ------------------------------------------------------------------ the plugs (heizapp.service)
+    def plugs(self) -> list[dict]:
+        """The paired plugs that measure (interview done), in the order of pairing: {ieee, model}."""
+        with self._lock:
+            return [{"ieee": ieee, "model": " ".join(filter(None, (d["vendor"], d["model"]))) or None}
+                    for ieee, d in self._devices.items() if d.get("plug") and d["interview"] == "done"]
+
+    def plug(self, ieee: str) -> dict | None:
+        """What a plug reported last: {state: ON | OFF | None, power (W), energy_today (kWh), power_on_behavior,
+        heard, seq} – None if it is not paired as a plug (any more)."""
+        with self._lock:
+            device = self._devices.get(ieee)
+            if not (device and device.get("plug") and device["interview"] == "done"):
+                return None
+            state = self._states.get(ieee) or {"values": {}, "heard": 0.0, "seq": 0}
+            values = state["values"]
+            return {"state": values.get("state") if values.get("state") in ("ON", "OFF") else None,
+                    "power": _number(values.get("power"), 0, MAX_POWER),
+                    "energy_today": _number(values.get("energy_today"), 0, MAX_ENERGY),
+                    "power_on_behavior": _text(values.get("power_on_behavior"), 20),
+                    "heard": state["heard"] or None, "seq": state["seq"]}
+
     def thermostat(self, ieee: str) -> dict | None:
         """What the app knows of a device: {device (None if not paired), values, heard, seq, boost_since}."""
         with self._lock:
@@ -634,7 +680,8 @@ class ZigbeeNet:
                 values, joined = self._values.get(ieee, {}), self._joined.get(ieee)
                 devices.append({**device, "battery": values.get("battery"), "signal": values.get("signal"),
                                 "temperature": values.get("temperature"), "last_seen": values.get("last_seen"),
-                                "new": bool(joined and now - joined < NEW)})
+                                "switch": values.get("switch"), "power_w": values.get("power"),
+                                "energy_today": values.get("energy_today"), "new": bool(joined and now - joined < NEW)})
             return {"broker": self._broker, "problem": self._problem, "bridge": self._bridge, **self._info,
                     "search": {"active": left > 0, "left": left, "seconds": self.search_time}, "devices": devices}
 
@@ -647,6 +694,8 @@ class ZigbeeNet:
         if v["bridge"] != "online":
             return "Zigbee2MQTT läuft nicht"
         thermostats = sum(1 for d in v["devices"] if d["thermostat"])
+        plugs = sum(1 for d in v["devices"] if d["plug"])
         return (f"Zigbee2MQTT {v.get('version') or '?'} läuft · Kanal {v.get('channel') or '?'} · "
                 f"{len(v['devices'])} Gerät(e), davon {thermostats} Thermostat(e)"
+                + (f" und {plugs} Steckdose(n)" if plugs else "")
                 + (f" · Suche läuft noch {v['search']['left']} s" if v["search"]["active"] else ""))
