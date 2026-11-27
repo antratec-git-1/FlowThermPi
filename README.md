@@ -43,6 +43,14 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
 - **Strom heute** (ab 0.4.19, nur wenn in der Einrichtung eingeschaltet – ab Werk aus): unter den Kacheln eine Zeile
   „Strom heute 4,2 kWh · etwa 1,30 € · gemessen an 3 Steckdosen“ – was alle
   [Steckdosen mit Strommessung](#strom-was-jedes-gerät-braucht) heute gezählt haben.
+- **Steckdosen auf den Kacheln** (ab 0.4.20): Unten auf jeder Raum-Kachel stehen ihre Steckdosen mit Strommessung –
+  Name, was daran hängt, und „an“, „aus“ oder „keine Verbindung“. Zum Raum gehört eine Steckdose, wenn ihre Heizung im
+  Raum hängt oder sie dem Raum zugeordnet ist (*Geräte › Steckdosen*). Ein Raum ohne Heizung, aber mit Steckdose (etwa
+  der Keller mit der Waschmaschine) bekommt eine eigene Kachel. Mit dem Schalter „Strom der Steckdosen auch auf der
+  Startseite zeigen“ (ab Werk aus) steht darunter „jetzt 240 W · heute 0,8 kWh“, bei Waschmaschine und Trockner
+  „läuft“ und „seit 23 Min.“.
+- **„Fertig“** (ab 0.4.20): Ist die Waschmaschine oder der Trockner fertig, steht oben „Die Waschmaschine ist fertig –
+  seit 10:42.“ mit **OK** (ohne PIN). Siehe [Wäschen und Trockengänge](#wäschen-und-trockengänge).
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -77,8 +85,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   [Strom: was jedes Gerät braucht](#strom-was-jedes-gerät-braucht).
 - **Strom und Kosten** (ab 0.4.13 im Tab „Räume“, ab 0.4.19 im Tab „Strom“, jeweils ganz unten): einen Strompreis für
   den Haushalt (ct/kWh) und die Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter
-  zeigt Strom und Kosten der Heizungen auch auf der Startseite (ab Werk aus), ab 0.4.19 ein zweiter „Strom heute“ der
-  Steckdosen (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
+  zeigt Strom und Kosten der Heizungen auch auf der Startseite (ab Werk aus), ab 0.4.19 ein zweiter den Strom der
+  Steckdosen (ab Werk aus; „Strom heute“, ab 0.4.20 auch Watt und kWh an den Kacheln). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
   **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Hängt eine AeroFlow an einer Steckdose mit
   Strommessung ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung), ab
   0.4.14), steht hier, was sie misst, und **Übernehmen** trägt die beim Heizen gemessene Leistung ein. Welche
@@ -681,8 +689,11 @@ kostet – aus den [Viertelstunden](#strom-der-steckdosen-in-viertelstunden), di
   Zehntel der Viertelstunden der letzten 7 Tage lag (Durchschnitt der Viertelstunde), erst nach einem Tag Messung.
   Dazu, was das rund um die Uhr im Jahr macht (W × 8,76 kWh, mit Strompreis in €). Nicht bei Heizung, Kühlschrank und
   Gefriergerät – deren niedrigster Wert ist keine Bereitschaft. Die Auflösung ist 0,4 W (0,1 Wh je Viertelstunde).
-- **Strom heute auf der Startseite:** *Strom › Strom und Kosten* › „„Strom heute“ der Steckdosen auch auf der
-  Startseite zeigen“ (ab Werk aus). Die Zeile zählt alle Steckdosen, die heute gemessen haben.
+- **Strom auf der Startseite:** *Strom › Strom und Kosten* › „Strom der Steckdosen auch auf der Startseite zeigen“
+  (ab Werk aus; bis 0.4.19 „„Strom heute“ der Steckdosen …“): die Zeile „Strom heute“, die alle Steckdosen zählt, die
+  heute gemessen haben, und ab 0.4.20 an jeder Raum-Kachel Watt und kWh ihrer Steckdosen. An und aus stehen immer da.
+- **Waschmaschine und Trockner** (ab 0.4.20): ihre Durchgänge – siehe
+  [Wäschen und Trockengänge](#wäschen-und-trockengänge).
 - **Nur simuliert geprüft:** mit erfundenen Zählerständen (`tests/test_power.py`) und in der Demo mit einer
   erfundenen Waschmaschine und einem Trockner (`uebergabe/demo_server.py … strom`). Am echten Gerät noch nicht.
 - **Schnittstelle** (mit PIN): `PUT /api/plugs/<Kennung>/appliance` (`{"appliance": "waschmaschine"}`; `heizung`,
@@ -691,6 +702,46 @@ kostet – aus den [Viertelstunden](#strom-der-steckdosen-in-viertelstunden), di
   `eur`, `before_wh`, `standby_w`, `standby_eur_year`; dazu `total`, `prev`, `next`). `PUT /api/costs` nimmt
   `show_power`; in `GET /api/state` stehen je Steckdose `appliance` und `power_today` (`null`, solange der Schalter aus
   ist).
+
+## Wäschen und Trockengänge
+
+Ab 0.4.20. Hängt an einer Steckdose mit Strommessung eine Waschmaschine oder ein Trockner (**Angeschlossen**, siehe
+[Strom](#strom-was-jedes-gerät-braucht)), erkennt die App an der Leistung, wann das Gerät läuft und wann es fertig
+ist. Gerechnet wird mit dem, was die Steckdose bei jeder Abfrage meldet (alle 10 Sekunden; eine Zigbee-Steckdose
+meldet nur Änderungen).
+
+- **Läuft:** sobald das Gerät eine Minute lang mehr als 15 W zieht – bei der Waschmaschine reicht eine Minute
+  innerhalb von zwei (sie zieht beim Wassereinlass in Stößen). Der Beginn ist da, wo es davor schon mehr als 8 W zog,
+  höchstens 15 Minuten zurück.
+- **Fertig:** die Waschmaschine nach 5 Minuten unter 8 W, der Trockner nach 3 Minuten ohne Dauerlast – die kurzen
+  Stöße des Knitterschutzes (unter einer Minute) zählen nicht. Das Ende ist da, wo die Ruhe begann. Was kürzer als 5
+  Minuten lief (etwa nur Abpumpen), zählt nicht.
+- **„Fertig“ auf der Startseite:** „Die Waschmaschine ist fertig – seit 10:42.“ (vom Vortag „seit gestern 22:10“) mit
+  **OK**, ohne PIN. Bei zwei gleichen Geräten steht der Name der Steckdose dabei. Der Hinweis geht weg mit OK, wenn
+  dasselbe Gerät wieder 5 Minuten läuft, oder nach 12 Stunden – nicht schon bei 0 W, weil viele Maschinen sich nach
+  dem Ende selbst ausschalten. Hängt an der Steckdose etwas anderes (Angeschlossen geändert, Heizung gewählt,
+  Steckdose entfernt), geht er auch.
+- **Im Tab „Strom“:** unter den Geräten je Waschmaschine und Trockner eine Karte „Wäschen“ bzw. „Trockengänge“: wie
+  viele im Zeitraum, kWh, „etwa … €“ und im Schnitt je Durchgang, dazu der Zeitraum davor; während eines Durchgangs
+  „Läuft gerade – seit 13:21 Uhr, bisher 0,52 kWh“. Darunter jeder Durchgang mit Uhrzeit, Dauer, kWh, € und Heizzeit.
+  Ein Tipp öffnet die Leistung Minute für Minute, mit ‹ › zum Durchgang davor und danach. Minuten über 1.000 W sind
+  farbig („heizt“) – dann heizt das Gerät das Wasser oder die Luft; wie warm, weiß die App nicht.
+- **Grenzen:** Läuft ein Gerät länger als 8 Stunden ohne Pause, passt es nicht zu diesen Regeln – der Durchgang endet
+  ohne Hinweis, und ein neuer beginnt erst, wenn es wieder unter 8 W war. Meldet die Steckdose 15 Minuten nichts,
+  endet der Durchgang ohne Hinweis. Ist die App nach einem Update oder Stromausfall binnen 5 Minuten wieder da, läuft
+  der Durchgang weiter; sonst endet er dort, wo sie ihn zuletzt sah, ohne Hinweis. Die Schwellen sind ein Anfang – ob
+  sie zu den echten Geräten passen, muss sich zeigen.
+- **Gespeichert** in `data/geraete/`: `durchgaenge-JJJJ.csv` (`beginn`, `ende` in Sekunden seit 1970, `id`, `art`,
+  `wh`, `w_max`, `heiz_min`), `kurven-JJJJ-MM.json` (Watt je Minute je Durchgang, etwa 2 KB), `laufend.json` (der
+  laufende, jede Minute) und `hinweise.json` (die offenen „fertig“). Ins Protokoll kommt nur, wenn etwas schiefgeht –
+  wann gewaschen wird, geht niemanden etwas an.
+- **Nur simuliert geprüft:** mit erfundenen Leistungskurven einer Waschmaschine und eines Trockners mit Knitterschutz
+  (`tests/test_cycles.py`) und in der Demo (`uebergabe/demo_server.py … strom`: eine Waschmaschine, die gerade läuft,
+  und ein Trockner, der vor 25 Minuten fertig wurde). Am echten Gerät noch nicht.
+- **Schnittstelle:** `GET /api/state` hat `notices` (`[{id, plug, at, text}]`) und je Steckdose `run` (`{since,
+  minutes, wh}` oder `null`); `POST /api/notices/<id>/ok` (ohne PIN); `GET /api/power/…` hat je Gerät `runs`
+  (`count`, `wh`, `eur`, `avg_wh`, `before`, `items`, `running`); `GET /api/plugs/<Kennung>/runs/<beginn>` (mit PIN) –
+  ein Durchgang Minute für Minute, mit `prev` und `next`.
 
 ## Verlauf und Kosten
 
@@ -842,8 +893,11 @@ Steckdosen spielt `tests/fake_mqtt.py` wie eine SONOFF S60ZBTPF (`tests/test_plu
 Viertelstunden prüft `tests/test_energy.py` mit erfundenen Zählerständen – auch Neustart, Lücken, zurückspringende
 Zähler und die Datei für Excel. Den Tab „Strom“ prüft `tests/test_power.py` mit erfundenen Viertelstunden – eine
 laufende Woche mit der Woche davor, ein kürzerer Monat, eine Steckdose, die erst seit gestern misst (kein Vergleich),
-Bereitschaft und „Strom heute“. Wie die Waschmaschine oder der Trockner im echten Haushalt Strom ziehen, prüfen die
-Tests nicht.
+Bereitschaft und „Strom heute“. Die Wäschen und Trockengänge prüft `tests/test_cycles.py` mit erfundenen
+Leistungskurven – eine Wäsche mit Einweichpause, ein Trockner mit Knitterschutz, Bereitschaft und kurze Stöße, eine
+Zigbee-Steckdose, die nur Änderungen meldet, ein Update mitten in der Wäsche, eine Steckdose, die verstummt, ein
+Gerät, das nie ruht, und das „fertig“ mit OK. Wie die Waschmaschine oder der Trockner im echten Haushalt Strom ziehen,
+prüfen die Tests nicht.
 
 ## Ideen für später
 
@@ -851,8 +905,8 @@ Tests nicht.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.
-- Strom, Teil 2: erkennen, wann Waschmaschine oder Trockner fertig sind; ein Wächter für Kühlschrank und
-  Gefriergerät; später die Spülmaschine und der Stromzähler des Hauses.
+- Strom, Teil 3: ein Wächter für Kühlschrank und Gefriergerät; später die Spülmaschine (Durchgänge wie bei
+  Waschmaschine und Trockner) und der Stromzähler des Hauses.
 - Heizungen zusätzlich in Apple Home einbinden.
 
 ## Lizenz

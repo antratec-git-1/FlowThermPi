@@ -43,6 +43,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("POST", rf"/api/heaters/{h}/mode",
          lambda m, b, r: s.set_mode("heater", m[1], b.get("mode"), b.get("minutes")), PUBLIC),
         ("POST", rf"/api/heaters/{h}/plug/on", lambda m, b, r: s.plug_on(m[1]), PUBLIC),   # its plug was switched off
+        ("POST", rf"/api/notices/{i}/ok", lambda m, b, r: s.notice_ok(m[1]), PUBLIC),   # „Die Waschmaschine ist fertig“
         ("GET", rf"/api/rooms/{i}/history/(\d{{4}}-\d{{2}}-\d{{2}})",   # Verlauf of one day
          lambda m, b, r: s.history_view("room", m[1], m[2]), PUBLIC),
         ("GET", rf"/api/heaters/{h}/history/(\d{{4}}-\d{{2}}-\d{{2}})",
@@ -91,6 +92,7 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
          lambda m, b, r: Download(*s.energy_table(m[1], m[2])), SETUP),
         ("GET", r"/api/power/(day|week|month)/(\d{4}-\d{2}-\d{2})",   # Strom: every plug in a day, week, month
          lambda m, b, r: s.power_view(m[1], m[2]), SETUP),
+        ("GET", rf"/api/plugs/{i}/runs/(\d+)", lambda m, b, r: s.run_view(m[1], m[2]), SETUP),   # one wash, minute by minute
         ("POST", rf"/api/sensors/{i}/calibration", lambda m, b, r: s.start_calibration(m[1], b), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/finish", lambda m, b, r: s.finish_calibration(m[1]), SETUP),
         ("POST", rf"/api/sensors/{i}/calibration/apply", lambda m, b, r: s.apply_calibration(m[1], b), SETUP),

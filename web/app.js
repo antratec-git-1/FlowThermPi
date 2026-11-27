@@ -691,6 +691,9 @@ const ICONS = {   // drawn for this app: a radiator (heaters and thermostats) an
   sensor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">' +
     '<path d="M10.5 14.1V5.5a1.5 1.5 0 0 1 3 0v8.6a3.6 3.6 0 1 1-3 0z"/><path d="M12 15.5V8.5"/>' +
     '<circle cx="12" cy="17.4" r="1.7" fill="currentColor" stroke="none"/></svg>',
+  plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
+    'stroke-linejoin="round"><path d="M9 2.8v4.7M15 2.8v4.7"/><path d="M6.5 7.5h11v3.8a5.5 5.5 0 0 1-11 0z"/>' +
+    '<path d="M12 16.8v4.5"/></svg>',
 };
 
 function deviceIcon(h, label = false) {
@@ -723,6 +726,44 @@ function tileDevicesHTML(g, sensors) {
   return `<div class="tile-devices"><span></span><span></span><span class="th">Ist</span><span class="th">Soll</span>${
     rows.map(r => `${r.icon}<span class="dname">${r.name}</span>${r.ist == null ? '<span class="dnone">keine Verbindung</span>'
       : `<span class="dval">${esc(r.ist)}</span><span class="dval">${esc(r.soll)}</span>`}${r.dev}`).join("")}</div>`;
+}
+
+function roomPlugs(g) {   // the plugs of a tile: the room's own and its heaters' – a heater without room: its plug
+  const plugs = state.plugs || [];
+  return g.kind === "room" ? plugs.filter(p => p.room === g.id) : plugs.filter(p => g.heaters.some(h => h.id === p.heater));
+}
+
+function tilePlugsHTML(g) {
+  // the plugs of the room: on or off – with „Strom auf der Startseite“ (Strom › Strom und Kosten) also what they draw
+  // now and today, and since when a washing machine or a dryer runs
+  const plugs = roomPlugs(g);
+  if (!plugs.length) return "";
+  const numbers = !!(state.costs && state.costs.show_power);
+  return `<ul class="tile-plugs">${plugs.map(p => {
+    const kind = applianceText(p.appliance), lost = !p.found || !!p.error;
+    const sub = p.appliance !== "sonstiges" && kind !== p.name ? kind : "";
+    const status = lost ? '<span class="pstate off">keine Verbindung</span>'
+      : numbers && p.run ? '<span class="pstate run">läuft</span>'
+      : p.state === "ON" ? '<span class="pstate">an</span>' : p.state === "OFF" ? '<span class="pstate off">aus</span>'
+      : '<span class="pstate off">–</span>';
+    const values = numbers && !lost ? [p.run ? (p.run.minutes < 1 ? "gerade los" : `seit ${durText(p.run.minutes * 60)}`) : "",
+      p.state === "ON" && p.power != null ? `jetzt ${wattText(p.power)}` : "",
+      p.energy_today != null ? `heute ${powerKwh(p.energy_today * 1000)}` : ""].filter(Boolean)
+      .map(x => x.replace(/ /g, "\u00a0")).join(" · ") : "";   // breaks only between the parts
+    return `<li><span class="dico${lost ? " offline" : p.state === "ON" ? " on" : ""}" role="img" aria-label="Steckdose">${
+      ICONS.plug}</span><span class="dname">${esc(p.name)}${sub ? `<small>${esc(sub)}</small>` : ""}</span>${status}${
+      values ? `<span class="pval">${esc(values)}</span>` : ""}</li>`;
+  }).join("")}</ul>`;
+}
+
+function plugTile(g) {   // a room without heaters, with plugs: its name, a fresh sensor's temperature, its plugs
+  const felt = roomTemp(g);
+  return `<article class="tile cool" data-kind="${g.kind}" data-id="${esc(g.id)}"${felt != null ? ` style="--tint:${
+    tileTint(felt)}"` : ""}>
+    <div class="tile-head"><h2>${esc(g.name)}</h2></div>
+    ${felt == null ? "" : `<div class="tile-now"><span class="now-temp">${degBig(felt)}</span><span class="now-label">im Raum</span></div>`}
+    ${tilePlugsHTML(g)}
+  </article>`;
 }
 
 function homeTile(g) {
@@ -788,6 +829,7 @@ function homeTile(g) {
     ${battery}
     ${boost == null ? "" : `<div class="boost-bar" aria-hidden="true"><span style="width:${Math.round(boost * 100)}%"></span></div>`}
     ${tileDevicesHTML(g, sensors)}
+    ${tilePlugsHTML(g)}
     ${tileHistoryHTML(g)}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
     ${heating && !isOff ? WAVE : ""}
@@ -802,13 +844,17 @@ function renderHome() {
   if (!state) return;
   renderHelp();
   renderLogFoot();
-  const gs = groups().filter(g => g.heaters.length);
+  const gs = groups().filter(g => g.heaters.length || roomPlugs(g).length);   // a room with only plugs: a tile too
   const tiles = document.getElementById("tiles");
-  const html = gs.length ? gs.map(homeTile).join("")
+  const html = gs.length ? gs.map(g => g.heaters.length ? homeTile(g) : plugTile(g)).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>';
   if (html !== tiles._html)   // new tiles: their heat waves go on where the old ones were, instead of starting over
     document.documentElement.style.setProperty("--wave-delay", `-${(performance.now() % 8000 / 1000).toFixed(2)}s`);
   setHTML(tiles, html);
+  const notices = state.notices || [], box = document.getElementById("notices");   // „… ist fertig“ until OK
+  box.hidden = !notices.length;
+  setHTML(box, notices.map(n => `<div class="notice" role="status"><p>${esc(n.text)}</p><button class="big-btn primary"
+    data-action="notice-ok" data-notice="${esc(n.id)}" ${busy.has("notice:" + n.id) ? "disabled" : ""}>OK</button></div>`).join(""));
   const pt = state.power_today, line = document.getElementById("home-power");   // only with its switch
   line.hidden = !(pt && pt.wh != null);
   if (!line.hidden) setHTML(line, `Strom heute <b>${esc(kwhText(pt.wh / 1000))}</b>${pt.eur != null
@@ -825,6 +871,13 @@ function homeReport(g, okText, data) {
 function homeMode(g, mode, okText) {
   if (!g) return;
   act(keyOf(g), async () => homeReport(g, okText, await api("POST", apiBase(g) + "/mode", { mode })));
+}
+
+function noticeOk(id) {   // „OK“ on „Die Waschmaschine ist fertig“ – anyone may tap it, without PIN
+  act("notice:" + id, async () => {
+    try { await api("POST", `api/notices/${encodeURIComponent(id)}/ok`); }
+    catch (e) { if (!/nicht mehr/.test(e.message)) throw e; }   // gone already (someone else tapped it)
+  });
 }
 
 function plugOn(g, id) {   // „Steckdose einschalten“: the plug of an AeroFlow gives it power again
@@ -983,13 +1036,21 @@ function openPlugEnergy(id) {   // „Strom“ of a plug: what flowed through it
   loadHistory();
 }
 
+function openRun(id, start) {   // one wash or drying: the power of every minute
+  if (!state) return;
+  hist = { kind: "run", id, from: "setup", day: String(start), data: null, error: "", loading: true, table: false };
+  histHover = null;
+  renderHistory();
+  loadHistory();
+}
+
 async function loadHistory(day) {
   const h = hist;
   if (!h) return;
   if (day && day !== h.day) { h.day = day; h.loading = true; histHover = null; renderHistory(); }
   try {
     const data = await api("GET", h.kind === "plug" ? `api/plugs/${encodeURIComponent(h.id)}/energy/${h.day}`
-      : `${apiBase(h)}/history/${h.day}`);
+      : h.kind === "run" ? `api/plugs/${encodeURIComponent(h.id)}/runs/${h.day}` : `${apiBase(h)}/history/${h.day}`);
     if (hist !== h || data.day !== h.day) return;   // closed, or another day chosen meanwhile
     h.data = data;
     if (h.kind === "plug") h.first = data.first_day;
@@ -1007,26 +1068,108 @@ function renderHistory() {
   document.body.classList.toggle("sheet-open", !!hist);
   if (!hist || !state) { el.hidden = true; el.innerHTML = ""; el._html = null; return; }
   const h = hist, d = h.data && h.data.day === h.day ? h.data : null;
-  const today = state.now.slice(0, 10), plug = h.kind === "plug";
+  const today = state.now.slice(0, 10), plug = h.kind === "plug", run = h.kind === "run";
   const first = plug ? h.first : state.history && state.history.first_day;
-  const prev = first && h.day > first ? addDays(h.day, -1) : null, next = h.day < today ? addDays(h.day, 1) : null;
-  const g = plug ? (state.plugs || []).find(x => x.id === h.id) : groups().find(x => x.kind === h.kind && x.id === h.id);
+  const prev = run ? d && d.prev : first && h.day > first ? addDays(h.day, -1) : null;
+  const next = run ? d && d.next : h.day < today ? addDays(h.day, 1) : null;   // a run: the one before and after
+  const g = plug || run ? (state.plugs || []).find(x => x.id === h.id) : groups().find(x => x.kind === h.kind && x.id === h.id);
   const name = d ? d.name : g ? g.name : "";
   const step = (to, label, sym) => `<button class="day-step" data-action="hist-day" data-day="${to || ""}" ${
     to && !h.loading ? "" : "disabled"} aria-label="${label}">${sym}</button>`;
+  const kicker = run ? ((RUN_WORDS[d ? d.appliance : g && g.appliance] || [])[0] || "Durchgang") : plug ? "Strom" : "Verlauf";
   setHTML(el, `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="hist-title">
-    <div class="sheet-head"><h2 id="hist-title"><span class="kicker">${plug ? "Strom" : "Verlauf"}</span>${esc(name)}</h2>
+    <div class="sheet-head"><h2 id="hist-title"><span class="kicker">${esc(kicker)}</span>${esc(name)}</h2>
       <button class="sheet-close" data-action="hist-close">Schließen</button></div>
-    <div class="hist-day">${step(prev, "Tag davor", "‹")}<span class="day-label">${
-      esc(d ? d.label : h.loading ? "…" : "")}</span>${step(next, "Tag danach", "›")}</div>
-    ${d ? (plug ? energyBodyHTML(d) : historyBodyHTML(d, h.from))
-      : `<p class="hist-empty">${esc(h.error || (plug ? "Der Strom wird geladen …" : "Der Verlauf wird geladen …"))}</p>`}
+    <div class="hist-day">${step(prev, run ? "Durchgang davor" : "Tag davor", "‹")}<span class="day-label">${
+      esc(d ? d.label : h.loading ? "…" : "")}</span>${step(next, run ? "Durchgang danach" : "Tag danach", "›")}</div>
+    ${d ? (run ? runBodyHTML(d) : plug ? energyBodyHTML(d) : historyBodyHTML(d, h.from))
+      : `<p class="hist-empty">${esc(h.error || (run ? "Der Durchgang wird geladen …" : plug ? "Der Strom wird geladen …"
+        : "Der Verlauf wird geladen …"))}</p>`}
   </div>`);
   el.hidden = false;
   drawSheetChart();
 }
 
-function drawSheetChart() { return hist && hist.kind === "plug" ? drawEnergyChart() : drawHistoryChart(); }
+function drawSheetChart() {
+  return !hist ? undefined : hist.kind === "plug" ? drawEnergyChart() : hist.kind === "run" ? drawRunChart() : drawHistoryChart();
+}
+
+function runBodyHTML(d) {   // one run: how long, how much – and the power of every minute
+  const stats = [["Dauer", durText(d.end - d.start)], ["Strom", powerKwh(d.wh)]];
+  if (d.eur != null) stats.push(["Kosten", "etwa " + euroText(d.eur)]);
+  stats.push(["Höchste Leistung", wattText(d.w_max)]);
+  if (d.heat_min) stats.push(["Heizzeit", `${d.heat_min} Min.`]);
+  const hot = d.minutes.some(v => v > 1000), notes = [];
+  if (!d.minutes.length) notes.push("Für diesen Durchgang gibt es keine Kurve.");
+  notes.push("Jeder Balken ist eine Minute: wie viel Strom das Gerät darin im Schnitt gezogen hat. Über 1.000 W heizt es " +
+    "(das Wasser, die Luft) – wie warm, weiß die App nicht.");
+  if (d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Strom“ › „Strom und Kosten“.");
+  return `<dl class="hist-stats">${stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+    <div class="hist-chart" id="hist-chart"></div>
+    <ul class="hist-legend"><li><span class="key power" aria-hidden="true"></span>Leistung je Minute</li>${
+      hot ? '<li><span class="key heat" aria-hidden="true"></span>heizt (über 1.000 W)</li>' : ""}</ul>
+    <ul class="hist-notes">${notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>`;
+}
+
+function drawRunChart() {   // one bar per minute, as high as the power in it – the minutes it heats in the heat colour
+  const box = document.getElementById("hist-chart");
+  const d = hist && hist.data && hist.data.day === hist.day ? hist.data : null;
+  if (!box || !d || d.kind !== "run") return;
+  if (!d.minutes.length) { box.innerHTML = ""; box._geo = null; return; }
+  const n = v => v.toFixed(1), start = d.start, end = start + d.minutes.length * d.slot;
+  const W = Math.max(280, Math.round(box.clientWidth || 600));
+  const left = 58, right = 12, top = 22, plotH = W < 520 ? 170 : 220, base = top + plotH, axisY = base + 20, H = axisY + 6;
+  const x0 = left, x1 = W - right, X = t => x0 + (t - start) / (end - start) * (x1 - x0);
+  const most = Math.max(0, ...d.minutes);
+  const nice = x => { const e = Math.pow(10, Math.floor(Math.log10(x))); return [1, 2, 5, 10].map(f => f * e).find(v => x <= v); };
+  const step = nice(Math.max(most, 8) / 4), hi = Math.max(step, Math.ceil(most / step) * step);
+  const Y = v => base - Math.min(v, hi) / hi * plotH;
+  const parts = [];
+  for (let v = 0; v <= hi; v += step)
+    parts.push(`<line class="grid" x1="${x0}" x2="${x1}" y1="${n(Y(v))}" y2="${n(Y(v))}"/>` +
+      `<text class="ylab" x="${x0 - 8}" y="${n(Y(v) + 4)}">${esc(wattText(v))}</text>`);
+  const every = end - start <= 3600 ? 900 : end - start <= 4 * 3600 ? 1800 : 3600, room = (end - start) * 0.12;
+  const ticks = [start];
+  for (let t = Math.ceil(start / every) * every; t < end; t += every) if (t - start > room && end - t > room) ticks.push(t);
+  ticks.push(end);
+  for (const t of ticks) {
+    const x = X(t), anchor = t === start ? "start" : t === end ? "end" : "middle";
+    if (t > start && t < end) parts.push(`<line class="grid" x1="${n(x)}" x2="${n(x)}" y1="${top}" y2="${base}"/>`);
+    parts.push(`<text class="xlab" x="${n(x)}" y="${axisY}" text-anchor="${anchor}">${esc(histClock(t, d))}</text>`);
+  }
+  const width = X(start + d.slot) - X(start), gap = width > 4 ? 1 : 0;   // dense bars run into one another
+  d.minutes.forEach((v, i) => {
+    if (!(v > 0)) return;
+    const h = Math.max(1.5, base - Y(v)), x = X(start + i * d.slot) + gap / 2;
+    parts.push(`<rect class="qbar${v > 1000 ? " hot" : ""}" x="${n(x)}" y="${n(base - h)}" width="${n(Math.max(0.5, width - gap))}" height="${n(h)}"/>`);
+  });
+  parts.push(`<line class="lane-base" x1="${x0}" x2="${x1}" y1="${base}" y2="${base}"/>`);
+  parts.push(`<g class="cross" visibility="hidden"><line y1="${top}" y2="${base}"/></g>`);
+  box.innerHTML = `<svg class="hist-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${
+    esc(`Leistung je Minute, ${d.label}`)}">${parts.join("")}</svg><div class="hist-tip" hidden></div>`;
+  box._geo = { d: Object.assign({}, d, { end }), m: { until: end }, X, x0, x1, top, W };
+  box.onpointermove = box.onpointerdown = ev => {
+    const t = histSlotAt(ev);
+    if (t !== histHover) { histHover = t; showRunHover(); }
+  };
+  box.onpointerleave = ev => { if (ev.pointerType === "mouse") { histHover = null; showRunHover(); } };
+  showRunHover();
+}
+
+function showRunHover() {   // a line through the minute at histHover and the power in it
+  const box = document.getElementById("hist-chart"), g = box && box._geo;
+  if (!g) return;
+  const cross = box.querySelector(".cross"), tip = box.querySelector(".hist-tip"), t = histHover, d = g.d;
+  if (t == null || t < d.start || t >= g.m.until) { cross.setAttribute("visibility", "hidden"); tip.hidden = true; return; }
+  const v = d.minutes[Math.round((t - d.start) / d.slot)], x = g.X(t + d.slot / 2), line = cross.querySelector("line");
+  line.setAttribute("x1", x);
+  line.setAttribute("x2", x);
+  cross.setAttribute("visibility", "visible");
+  tip.innerHTML = `<span><b>${esc(histClock(t, d))} Uhr</b></span><span>${v == null ? "keine Werte" : esc(wattText(v))}</span>`;
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  tip.style.left = `${Math.round(x + 14 + w <= g.W ? x + 14 : Math.max(0, x - 14 - w))}px`;
+}
 
 function historyBodyHTML(d, from) {
   const costs = costsShown(from), setup = from === "setup", m = histModel(d);
@@ -1405,7 +1548,9 @@ function costsCardHTML() {
       <label class="check"><input type="checkbox" data-cfield="show" ${f.show ? "checked" : ""}>
         <span>Strom und Kosten der Heizungen auch auf der Startseite zeigen</span></label>` : ""}
       ${plugs.length ? `<label class="check"><input type="checkbox" data-cfield="show_power" ${f.show_power ? "checked" : ""}>
-        <span>„Strom heute“ der Steckdosen auch auf der Startseite zeigen</span></label>` : ""}
+        <span>Strom der Steckdosen auch auf der Startseite zeigen<small>„Strom heute“ unter den Räumen, an jedem Raum
+          Watt und kWh seiner Steckdosen und seit wann Waschmaschine oder Trockner laufen. An und aus und „fertig“ stehen
+          immer da.</small></span></label>` : ""}
       <div class="row">
         <button class="primary" data-action="costs-save" ${saving ? "disabled" : ""}>${saving ? "speichere …" : "Speichern"}</button>
         ${costForm ? '<button data-action="costs-cancel">Verwerfen</button>' : ""}
@@ -1541,6 +1686,47 @@ function standbyCardHTML() {   // „Bereitschaft“: what a device draws while 
     <ul class="standby-list">${rows}</ul></article>`;
 }
 
+const RUN_WORDS = { waschmaschine: ["Wäsche", "Wäschen", "keine Wäsche"],
+                    trockner: ["Trockengang", "Trockengänge", "kein Trockengang"] };
+
+function runCount(n, kind) {   // „1 Wäsche“, „5 Wäschen“, „keine Wäsche“
+  const w = RUN_WORDS[kind] || ["Durchgang", "Durchgänge", "kein Durchgang"];
+  return n ? `${n} ${n === 1 ? w[0] : w[1]}` : w[2];
+}
+
+function runWhen(r, d) {   // „Do., 26.11., 10:12–11:58 Uhr“ – within a day only the times
+  const clock = `${histClock(r.start, d)}–${histClock(r.end, d)} Uhr`, opt = { weekday: "short", day: "2-digit", month: "2-digit" };
+  if (d.span === "day") return clock;
+  try { return new Date(r.start * 1000).toLocaleDateString("de-DE", d.tz ? Object.assign({ timeZone: d.tz }, opt) : opt) + ", " + clock; }
+  catch (_) { return new Date(r.start * 1000).toLocaleDateString("de-DE", opt) + ", " + clock; }
+}
+
+function runsCardHTML(x, d) {   // a washing machine or a dryer: its runs in the period – how many, what they took, each one
+  const r = x.runs;
+  if (!r || (!x.known && !r.count)) return "";
+  const words = RUN_WORDS[x.appliance] || ["Durchgang", "Durchgänge", "kein Durchgang"];
+  const now = r.running ? `<p class="run-now">Läuft gerade – seit ${esc(r.running.since.slice(11, 16))} Uhr, bisher ${
+    esc(powerKwh(r.running.wh))}.</p>` : "";
+  const sum = r.count ? `${esc(d.label)}: <b>${esc(runCount(r.count, x.appliance))}</b> · ${esc(powerKwh(r.wh))}${
+    esc(powerEur(r.eur, r.wh))}${r.count > 1 ? ` · im Schnitt ${esc(powerKwh(r.avg_wh))}` : ""}`
+    : `${esc(d.label)}: ${esc(runCount(0, x.appliance))}${d.running ? " bisher" : ""}.`;
+  const before = r.before ? `<p class="hint">${esc(d.before.label)}: ${esc(runCount(r.before.count, x.appliance))}${
+    r.before.count > 1 ? ` · im Schnitt ${esc(powerKwh(r.before.avg_wh))}` : r.before.count ? ` · ${esc(powerKwh(r.before.avg_wh))}` : ""}</p>` : "";
+  const items = r.items.map(i => `<li><button class="power-row" data-action="run-open" data-plug="${esc(x.id)}"
+    data-start="${i.start}" aria-label="${esc(runWhen(i, d))}: Verlauf ansehen"><span class="power-name"><b>${esc(runWhen(i, d))}</b>
+    <span class="muted">${esc(durText(i.end - i.start))}${i.heat_min ? ` · Heizzeit ${i.heat_min} Min.` : ""}</span></span>
+    <span class="power-value"><b>${esc(powerKwh(i.wh))}</b><span class="muted">${esc(powerEur(i.eur, i.wh))}</span></span></button></li>`).join("");
+  const rule = x.appliance === "trockner" ? "nach 3 Minuten ohne Dauerlast – die kurzen Stöße des Knitterschutzes zählen nicht"
+    : "nach 5 Minuten fast ohne Strom";
+  return `<article class="card"><div class="card-head"><h2>${esc(words[1])} – ${esc(x.name)}</h2></div>
+    ${now}<p class="run-sum">${sum}</p>${before}
+    ${items ? `<ul class="power-list">${items}</ul>` : ""}
+    <p class="hint">Die App erkennt das an der Leistung: Es läuft, sobald das Gerät eine Minute lang mehr als 15 W zieht,
+      und ist fertig ${esc(rule)}. Auf der Startseite steht dann „fertig“, bis jemand OK tippt. Antippen zeigt die Leistung
+      Minute für Minute.</p>
+  </article>`;
+}
+
 function renderPower(el) {
   el.className = "tab single";
   const plugs = state.plugs || [], d = power && power.data;
@@ -1549,7 +1735,9 @@ function renderPower(el) {
   const none = `<article class="card"><div class="card-head"><h2>Strom der Geräte</h2></div><p class="hint">Noch keine
     Steckdose mit Strommessung in der App. Unter „Geräte“ kommt eine mit „+ Gerät hinzufügen“ dazu – dann zeigt die App
     hier, was jedes Gerät braucht und kostet.</p></article>`;
-  setHTML(el, (plugs.length || (d && d.devices.length) ? spans + powerCardHTML() + standbyCardHTML() : none) + costsCardHTML());
+  const runs = d ? d.devices.map(x => runsCardHTML(x, d)).join("") : "";   // washing machines and dryers
+  setHTML(el, (plugs.length || (d && d.devices.length) ? spans + powerCardHTML() + runs + standbyCardHTML() : none)
+    + costsCardHTML());
 }
 
 // ------------------------------------------------------------------ dialog (confirmations and PIN)
@@ -4435,6 +4623,7 @@ document.addEventListener("click", e => {
     case "home-plan": return homeMode(groupFor(tile), "auto", "läuft wieder nach Plan");
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
     case "plug-on": return plugOn(groupFor(tile), t.dataset.heater);
+    case "notice-ok": return noticeOk(t.dataset.notice);
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
     case "logs-save": return logsBusy ? undefined : logsSave();
@@ -4443,6 +4632,7 @@ document.addEventListener("click", e => {
     case "hist-day": return loadHistory(t.dataset.day);
     case "power-day": return t.dataset.day ? loadPower(t.dataset.day) : undefined;
     case "power-plug": return openPlugEnergy(t.dataset.plug);
+    case "run-open": return openRun(t.dataset.plug, t.dataset.start);
     case "costs-save": return saveCosts();
     case "costs-cancel": costForm = null; return render();
     case "cpower-take": editCosts().powers[t.dataset.heater] = t.dataset.watts; return render();   // saved with „Speichern“

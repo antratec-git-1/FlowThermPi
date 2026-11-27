@@ -10,12 +10,12 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Callable
 
-from . import coap, discovery, energy, history, plans, shelly, trv
+from . import coap, cycles, discovery, energy, history, plans, shelly, trv
 from .device import FAST_FIELDS, IDENTITY_FIELDS, MODES, SLOW_FIELDS, TIME_FORMAT, DeviceError, Heater
 from .store import DataStore, HeaterConfig, load_config, new_id
 
@@ -198,6 +198,9 @@ class Service:
         # Strom der Steckdosen: quarter hours of every plug in energy/ next to data.json (heizapp.energy)
         self.energy = energy.PlugEnergy(os.path.join(os.path.dirname(os.path.abspath(data_path)), "energy"), self.tz)
         self._energy_failed = False
+        # Durchgänge: when a washing machine or a dryer runs and is done, in geraete/ next to data.json (heizapp.cycles)
+        self.cycles = cycles.Runs(os.path.join(os.path.dirname(os.path.abspath(data_path)), "geraete"), self.tz)
+        self._cycles_failed = False
         self._stop = threading.Event()
         self._entries_lock = threading.Lock()  # guards changes of the heater list / heizungen.conf
         self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="heizung")
@@ -259,6 +262,7 @@ class Service:
         self._stop.set()
         self.history.flush()   # the finished entries of the last minutes
         self.energy.flush()
+        self.cycles.flush()    # a run going on goes on after the restart
 
     def _run(self) -> None:
         self.poll_all(full=True)
@@ -354,6 +358,7 @@ class Service:
                 (d.get("plug_rooms") or {}).pop(ieee, None)
                 (d.get("plug_names") or {}).pop(ieee, None)
                 (d.get("plug_appliances") or {}).pop(ieee, None)
+        self.cycles.forget(ieee)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
@@ -1871,12 +1876,14 @@ class Service:
                 log.exception("Verlauf: Aufzeichnen fehlgeschlagen")
 
     def _record_energy(self, now: float | None = None) -> None:
-        """What every plug reported last, for its quarter hours (heizapp.energy) – only with a clock that is right."""
+        """What every plug reported last, for its quarter hours (heizapp.energy) and for the runs of a washing machine
+        or a dryer (heizapp.cycles) – only with a clock that is right."""
         if not self.clock_trusted():
             return
+        now = time.time() if now is None else now
+        data = self.store.snapshot()
+        readings = []
         try:   # the recording must never hold up the rest of the loop
-            data = self.store.snapshot()
-            readings = []
             for pid in data.get("plugs") or {}:   # WLAN plugs: read this round – or earlier (counted once)
                 r = self._wifi_plugs.get(pid) or {}
                 if not r.get("protected") and r.get("heard"):
@@ -1887,12 +1894,23 @@ class Service:
                     readings.append({"id": p["ieee"], "at": v["heard"], "wh": v.get("energy_wh"), "w": v.get("power")})
             for r in readings:
                 r.update(self._plug_place(r["id"], data))
-            self.energy.sample(time.time() if now is None else now, readings)
+            self.energy.sample(now, readings)
             self._energy_failed = False
         except Exception:
             if not self._energy_failed:
                 self._energy_failed = True
                 log.exception("Strom der Steckdosen: Aufzeichnen fehlgeschlagen")
+        try:   # nor the runs: every plug with a washing machine or a dryer, also one not heard yet
+            heard = {r["id"]: r for r in readings}
+            ids = list(data.get("plugs") or {}) + [p["ieee"] for p in (self.zigbee.plugs() if self.zigbee else [])]
+            self.cycles.sample(now, [{"id": pid, "art": art, "at": heard.get(pid, {}).get("at"),
+                                      "w": heard.get(pid, {}).get("w")}
+                                     for pid in ids if (art := self._appliance(pid, data)) in cycles.KINDS])
+            self._cycles_failed = False
+        except Exception:
+            if not self._cycles_failed:
+                self._cycles_failed = True
+                log.exception("Durchgänge: Auswerten fehlgeschlagen")
 
     @staticmethod
     def _costs(data: dict) -> dict:
@@ -2100,6 +2118,7 @@ class Service:
         """Every plug the app knows, for Strom und Kosten and Geräte › Steckdosen: the Zigbee ones in the network, the
         WLAN ones taken over from the search – with what they report and which heater each one belongs to."""
         owners = {meta["plug"]: hid for hid, meta in data["heaters"].items() if meta.get("plug")}
+        now = time.time()
         known = [(p["ieee"], "zigbee", p["model"], None, None) for p in (self.zigbee.plugs() if self.zigbee else [])]
         known += [(pid, "wifi", meta.get("model"), meta.get("host"), meta.get("device_name"))
                   for pid, meta in (data.get("plugs") or {}).items()]
@@ -2110,6 +2129,7 @@ class Service:
                         "found": kind == "zigbee" or bool(v), "state": v.get("state"), "power": v.get("power"),
                         "energy_today": v.get("energy_today"), "address": address, "device_name": device_name,
                         "room": self._plug_place(pid, data)["raum"], "appliance": self._appliance(pid, data),
+                        "run": self._run_now(pid, now),   # a washing machine or a dryer that runs: since when
                         "error": None if kind == "zigbee" else self._wifi_plug_error(pid)})
         return out
 
@@ -2245,6 +2265,8 @@ class Service:
                 (d.get("plug_rooms") or {}).pop(plug_id, None)   # it is in the heater's room now
             if e is not None or owners:   # chosen at „Heizung“: a heater hangs on it – also after „– keine –“
                 d.setdefault("plug_appliances", {})[plug_id] = "heizung"
+        if e is not None or owners:
+            self.cycles.forget(plug_id)   # no washing machine or dryer on it any more
         who = {x.id: self._who(x) for x in self.entries}
         for hid in owners:   # what a heater measured belongs to the plug it had
             if e is None or hid != e.id:
@@ -2301,11 +2323,14 @@ class Service:
         if kind != "heizung" and self._plug_place(plug_id, data)["heizung"]:
             raise ActionError(f"An {name} hängt eine AeroFlow-Heizung. Für ein anderes Gerät zuerst bei „Heizung“ "
                               "„– keine –“ wählen.", 409)
+        before = self._appliance(plug_id, data)
         with self.store.edit() as d:
             if kind == "sonstiges":
                 (d.get("plug_appliances") or {}).pop(plug_id, None)
             else:
                 d.setdefault("plug_appliances", {})[plug_id] = kind
+        if kind != before:
+            self.cycles.forget(plug_id)   # a run going on and „fertig“ were of the device before
         log.info("%s: angeschlossen ist jetzt %s", name, self.APPLIANCES[kind])
         return {"message": f"{name}: angeschlossen ist jetzt „{self.APPLIANCES[kind]}“."}
 
@@ -2529,6 +2554,7 @@ class Service:
             self._plug_samples.pop(hid, None)
         self._wifi_plugs.pop(pid, None)
         self._plug_names_read.pop(pid, None)
+        self.cycles.forget(pid)
         log.info("%s aus der App entfernt%s", name,
                  "".join(f" – {self._who(e)} hängt an keiner Steckdose mehr" for e in self.entries if e.id in owners))
         return {"message": "Die Steckdose ist aus der App entfernt. Sie selbst bleibt, wie sie ist – an oder aus."}
@@ -2679,6 +2705,9 @@ class Service:
         plugs = {p["id"] for p in self._plug_list(data)}
         price = self._costs(data)["price_ct"]
         compare = span != "day"
+        runs = {}   # plug id -> its runs that began in the period (and the one before)
+        for r in self.cycles.between(before_start if compare else start, cut):
+            runs.setdefault(r["id"], []).append(r)
         quarters, before_quarters = _quarters(start, cut), _quarters(before_start, before_cut)
         devices, all_compared = [], True
         for pid in sorted(plugs | set(rows)):
@@ -2699,7 +2728,10 @@ class Service:
                 "heater": self._heater_title(place["heizung"], data),
                 "wh": round(wh, 1) if n else None, "eur": self._eur(wh, price) if n else None,
                 "before_wh": round(before_wh, 1) if compared else None,
-                "standby_w": standby, "standby_eur_year": None if standby is None else self._eur(standby * 8760, price)})
+                "standby_w": standby, "standby_eur_year": None if standby is None else self._eur(standby * 8760, price),
+                "runs": self._runs_view(runs.get(pid, []), (start, cut), (before_start, before_cut) if compared else None,
+                                        price, pid if running else None, now)
+                if appliance in cycles.KINDS or pid in runs else None})
         devices.sort(key=lambda x: (x["wh"] is None, -(x["wh"] or 0), x["name"].lower()))
         measured = [x for x in devices if x["wh"] is not None]
         total = sum(x["wh"] for x in measured)
@@ -2725,6 +2757,76 @@ class Service:
         if len(powers) < self.STANDBY_MIN:
             return None
         return round(powers[int(len(powers) * self.STANDBY_SHARE)], 1)
+
+    def _runs_view(self, runs: list[dict], span: tuple[float, float], before: tuple[float, float] | None,
+                   price: float | None, live: str | None, now: float) -> dict:
+        """Strom: the runs of a washing machine or a dryer that began in the period – how many, what they took, each
+        one (the newest first); `before`: the time before to compare with (None: no comparison); `live`: the plug whose
+        run going on is shown too."""
+        mine = [r for r in runs if span[0] <= r["beginn"] < span[1]]
+        earlier = [r for r in runs if before[0] <= r["beginn"] < before[1]] if before else None
+        wh = sum(r["wh"] for r in mine)
+        return {"count": len(mine), "wh": round(wh, 1), "eur": self._eur(wh, price) if mine else None,
+                "avg_wh": round(wh / len(mine), 1) if mine else None,
+                "before": None if earlier is None else {
+                    "count": len(earlier),
+                    "avg_wh": round(sum(r["wh"] for r in earlier) / len(earlier), 1) if earlier else None},
+                "items": [{"start": r["beginn"], "end": r["ende"], "wh": r["wh"], "eur": self._eur(r["wh"], price),
+                           "w_max": r["w_max"], "heat_min": r["heiz_min"]} for r in reversed(mine)],
+                "running": self._run_now(live, now) if live else None}
+
+    def _run_now(self, pid: str, now: float) -> dict | None:   # the run going on: since when (local time), how long
+        run = self.cycles.running(pid, now)
+        return None if run is None else {"since": self._iso(run["since"]), "minutes": run["minutes"], "wh": run["wh"]}
+
+    def run_view(self, plug_id: str, start_text: str) -> dict:
+        """Strom: one run of a washing machine or a dryer – its power minute by minute (heizapp.cycles) – and the runs
+        before and after it."""
+        runs = self.cycles.of(plug_id)
+        run = next((r for r in runs if str(r["beginn"]) == start_text), None)
+        if run is None:
+            raise ActionError("Diesen Durchgang gibt es nicht (mehr).", 404)
+        i = runs.index(run)
+        data = self.store.snapshot()
+        price = self._costs(data)["price_ct"]
+        a, b = (datetime.fromtimestamp(t, self.tz) for t in (run["beginn"], run["ende"]))
+        return {"kind": "run", "id": plug_id, "day": start_text, "name": self._plug_name(plug_id, data),
+                "appliance": run["art"], "start": run["beginn"], "end": run["ende"], "slot": 60,
+                "label": f"{self.history.label(a.date(), self.now().date())}, {a:%H:%M}–{b:%H:%M} Uhr",
+                "tz": getattr(self.tz, "key", None), "minutes": self.cycles.curve(plug_id, run["beginn"]) or [],
+                "wh": run["wh"], "eur": self._eur(run["wh"], price), "price_ct": price, "w_max": run["w_max"],
+                "heat_min": run["heiz_min"], "prev": str(runs[i - 1]["beginn"]) if i else None,
+                "next": str(runs[i + 1]["beginn"]) if i + 1 < len(runs) else None}
+
+    RUN_WHO = {"waschmaschine": "Die Waschmaschine", "trockner": "Der Trockner"}
+
+    def _notice_views(self, data: dict, plugs: list[dict]) -> list[dict]:
+        """The notices for the start page, „Die Waschmaschine ist fertig – seit 10:42.“ (heizapp.cycles) – only of
+        plugs that still have that device on them."""
+        kinds = {p["id"]: p["appliance"] for p in plugs}
+        alike = Counter(kinds.values())
+        out = []
+        for n in self.cycles.notices(time.time()):
+            if kinds.get(n["plug"]) != n["art"]:
+                continue
+            who = self.RUN_WHO.get(n["art"], "Das Gerät")
+            if alike[n["art"]] > 1:   # two washing machines: which one
+                who += f" ({self._plug_name(n['plug'], data)})"
+            out.append({"id": n["id"], "plug": n["plug"], "at": self._iso(n["at"]),
+                        "text": f"{who} ist fertig – seit {self._since_text(n['at'])}."})
+        return out
+
+    def _since_text(self, t: float) -> str:   # „10:42“, „gestern 22:10“, „24.11. 22:10“
+        local, today = datetime.fromtimestamp(t, self.tz), self.now().date()
+        if local.date() == today:
+            return f"{local:%H:%M}"
+        return f"gestern {local:%H:%M}" if local.date() == today - timedelta(days=1) else f"{local:%d.%m. %H:%M}"
+
+    def notice_ok(self, notice_id: str) -> dict:
+        """„OK“ on a notice of the start page – anyone may tap it, without PIN."""
+        if not self.cycles.ok(notice_id):
+            raise ActionError("Diesen Hinweis gibt es nicht mehr.", 404)
+        return {}
 
     def _stamp(self, local: datetime) -> float:   # seconds since 1970 of a local wall-clock time
         return local.replace(tzinfo=self.tz).timestamp()
@@ -2791,6 +2893,7 @@ class Service:
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
                 "costs": self._costs(data), "plugs": plugs, "power_today": self._power_today(data, plugs),
+                "notices": self._notice_views(data, plugs),
                 "history": {"recording": self.history.active,
                             "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,
