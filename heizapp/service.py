@@ -52,6 +52,11 @@ PLUG_ANSWER = 10.0      # seconds a plug has to confirm „Einschalten“
 LIGHT_ANSWER = 6.0      # seconds the lamps have to confirm a command, all together (a lamp with power answers at once)
 LIGHT_STEP = 10         # per cent „heller“ and „dunkler“ change the brightness …
 LIGHT_MIN = 10          # … down to this: „dunkler“ never switches the light off
+LIGHT_ASK = 60.0        # seconds before the app asks a lamp again for what it has not said (twice as long each time)
+NOT_SAID = "Die Lampe hat ihre Helligkeit noch nicht gemeldet – bitte gleich noch einmal versuchen."
+# what data.json keeps of a plug or a lamp, by its IEEE address – forgotten when it leaves the Zigbee network
+LAMP_AND_PLUG_KEYS = ("plug_rooms", "plug_names", "plug_appliances", "light_names", "light_rooms", "light_colors",
+                      "light_levels")
 
 
 def host_clock_synced() -> bool:
@@ -224,6 +229,8 @@ class Service:
         self._plug_names_read: dict[str, float] = {}   # WLAN plug id -> when its name was read last (monotonic)
         self._wifi_failed = False
         self._light_lost: dict[str, int] = {}   # lamp -> number of its last message when it did not answer
+        self._light_asked: dict[str, tuple[int, float]] = {}   # lamp -> (times asked, when last: monotonic)
+        self._light_hue: dict[str, str] = {}   # lamp -> the colour (LIGHT_HUES) the app gave it last
         self._restore_lock = threading.Lock()
         self._last_daily_sync = None
         self._clock_trusted = False
@@ -353,8 +360,7 @@ class Service:
         heaters = self.store.data["heaters"]
         thermostat = bool(heaters.get(ieee, {}).get("zigbee"))
         owners = [hid for hid, meta in heaters.items() if meta.get("plug") == ieee]
-        placed = any(ieee in (self.store.data.get(key) or {}) for key in ("plug_rooms", "plug_names", "plug_appliances",
-                                                                          "light_names", "light_rooms", "light_colors"))
+        placed = any(ieee in (self.store.data.get(key) or {}) for key in LAMP_AND_PLUG_KEYS)
         plug_name = self._plug_name(ieee)
         if thermostat or owners or placed:
             with self.store.edit() as d:
@@ -362,10 +368,11 @@ class Service:
                     d["heaters"].pop(ieee, None)
                 for hid in owners:
                     d["heaters"].get(hid, {}).pop("plug", None)
-                for key in ("plug_rooms", "plug_names", "plug_appliances", "light_names", "light_rooms", "light_colors"):
+                for key in LAMP_AND_PLUG_KEYS:
                     (d.get(key) or {}).pop(ieee, None)
         self.cycles.forget(ieee)
-        self._light_lost.pop(ieee, None)
+        for memory in (self._light_lost, self._light_asked, self._light_hue):
+            memory.pop(ieee, None)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
@@ -2606,12 +2613,16 @@ class Service:
 
     # ------------------------------------------------------------------ lamps (Zigbee)
     # Every lamp paired in the Zigbee network (heizapp.zigbee_net: Hue, IKEA, Innr …) is a lamp of the app. Geräte › Licht
-    # gives it a name (data.json "light_names"), a room ("light_rooms") and – if it can – a colour of its light
-    # ("light_colors"; the app sets it whenever it switches the lamp on). On the start page the lamps of a room go on and
-    # off together and get brighter or darker together; with several lamps in the room each one also on its own. Anyone
-    # may do that, without PIN. When someone switches the light is none of the protocol's business, only what fails:
-    # the server logs these requests only in the detailed log (heizapp.server.QUIET).
-    LIGHT_COLORS = {"warm": ("warmweiß", 370), "neutral": ("neutralweiß", 250), "kalt": ("kaltweiß", 200)}   # mired
+    # gives it a name (data.json "light_names"), a room ("light_rooms") and what the app sets whenever it switches it on:
+    # a colour of its light ("light_colors") and a brightness ("light_levels"). On the start page the lamps of a room go
+    # on and off together and get brighter or darker together; „Einstellen ›“ sets each one on its own – brightness,
+    # colour of light, colour: as far as the lamp can. Anyone may do that, without PIN. When someone switches the light
+    # is none of the protocol's business, only what fails: the server logs these requests only in the detailed log
+    # (heizapp.server.QUIET). A lamp that has not said its brightness (IKEA lamps say it only when asked) is asked.
+    LIGHT_COLORS = {"kerze": ("Kerzenlicht", 455), "warm": ("warmweiß", 370), "neutral": ("neutralweiß", 250),
+                    "kalt": ("kaltweiß", 200), "tag": ("Tageslicht", 154)}   # mired: 2200, 2700, 4000, 5000, 6500 K
+    LIGHT_HUES = {"rot": ("Rot", 0), "orange": ("Orange", 30), "gelb": ("Gelb", 55), "gruen": ("Grün", 120),
+                  "tuerkis": ("Türkis", 175), "blau": ("Blau", 230), "lila": ("Lila", 275), "pink": ("Pink", 320)}   # hue
 
     @staticmethod
     def _light_default_name(lid: str) -> str:
@@ -2637,9 +2648,25 @@ class Service:
     def _level(percent: int) -> int:     # … and back
         return max(1, min(254, round(percent * 254 / 100)))
 
-    def _light_list(self, data: dict) -> list[dict]:
-        """Every lamp in the Zigbee network, for the start page and Geräte › Licht: what it reports, its room, its
-        colour – and lost: it did not answer the last command and has not reported since."""
+    @staticmethod
+    def _kelvin(mired) -> int | None:    # a colour temperature as people say it: in kelvin, to the hundred
+        return None if not mired else int(round(1_000_000 / mired, -2))
+
+    @staticmethod
+    def _next_level(now: float, step: int) -> int | None:
+        """„heller“ / „dunkler“ from now (per cent): the next step (LIGHT_STEP) at least half a step away – as far up as
+        down: 55 % to 60 % or 50 % –, LIGHT_MIN to 100 %. None: no further that way."""
+        half = LIGHT_STEP / 2
+        near = math.ceil((now + half) / LIGHT_STEP) if step > 0 else math.floor((now - half) / LIGHT_STEP)
+        target = min(100, max(LIGHT_MIN, near * LIGHT_STEP))
+        return target if (target > now if step > 0 else target < now) else None
+
+    def _light_list(self, data: dict, ask: bool = False) -> list[dict]:
+        """Every lamp in the Zigbee network, for the start page and Geräte › Licht: what it reports (brightness in
+        per cent, colour temperature in kelvin – None while it shows a colour), what it can (dim, kelvins: its range,
+        colors: the colours of light in it, hues: colours), its room, what the app sets when it switches it on (color,
+        level) – and lost: it did not answer the last command and has not reported since. ask: ask the lamps for what
+        they have not said."""
         out = []
         for item in self.zigbee.lights() if self.zigbee else []:
             lid = item["ieee"]
@@ -2648,16 +2675,42 @@ class Service:
             colors = self._light_colors(caps)
             room = (data.get("light_rooms") or {}).get(lid)
             color = (data.get("light_colors") or {}).get(lid)
+            level = (data.get("light_levels") or {}).get(lid)
             lost = self._light_lost.get(lid)
             if lost is not None and (v.get("seq") or 0) > lost:   # it has reported since: it is back
                 self._light_lost.pop(lid, None)
                 lost = None
+            if ask:
+                self._ask_light(lid, v, caps, lost is not None)
+            temp, colored = caps.get("temp"), caps.get("color") and v.get("mode") in ("xy", "hs")
             out.append({"id": lid, "name": self._light_name(lid, data), "model": item["model"],
                         "room": room if room in data["rooms"] else None, "state": v.get("state"),
                         "brightness": self._percent(v.get("brightness")) if caps.get("dim") else None,
-                        "dim": bool(caps.get("dim")), "colors": colors, "color": color if color in colors else None,
+                        "kelvin": self._kelvin(v.get("color_temp")) if temp and not colored else None,
+                        "hue": self._light_hue.get(lid) if colored else None,
+                        "dim": bool(caps.get("dim")), "kelvins": [self._kelvin(temp[1]), self._kelvin(temp[0])]
+                        if temp else None, "colors": colors, "hues": bool(caps.get("color")),
+                        "color": color if color in colors else None,
+                        "level": level if caps.get("dim") and isinstance(level, int) else None,
                         "lost": lost is not None, "heard": self._iso(v.get("heard"))})
         return out
+
+    def _ask_light(self, lid: str, v: dict, caps: dict, lost: bool) -> None:
+        """Ask a lamp for what it has not said – its state, brightness, colour temperature (IKEA lamps say their
+        brightness only when asked) – and one that did not answer whether it is back: at once, then after LIGHT_ASK
+        seconds, twice as long each time it still does not say it, at most half an hour."""
+        want = {key: "" for key, missing in (("state", lost or v.get("state") is None),
+                                             ("brightness", caps.get("dim") and v.get("brightness") is None),
+                                             ("color_temp", caps.get("temp") and v.get("color_temp") is None)) if missing}
+        if not want:
+            self._light_asked.pop(lid, None)
+            return
+        times, last = self._light_asked.get(lid, (0, 0.0))
+        now = time.monotonic()
+        if times and now - last < LIGHT_ASK * 2 ** min(times - 1, 5):
+            return
+        if self.zigbee.send(lid, want, "get") is not None:
+            self._light_asked[lid] = (times + 1, now)
 
     def _find_light(self, lid: str, data: dict) -> dict:
         lamp = next((x for x in self._light_list(data) if x["id"] == lid), None)
@@ -2669,10 +2722,13 @@ class Service:
         low, high = ((self.zigbee.light(lid) or {}).get("caps") or {}).get("temp") or (153, 500)
         return min(max(self.LIGHT_COLORS[color][1], low), high)
 
-    def _light_switch(self, lamp: dict, on: bool) -> dict:   # the command: switched on, with its colour if it has one
+    def _light_switch(self, lamp: dict, on: bool) -> dict:
+        """The command: switched on – with the colour of light and the brightness of „Beim Einschalten“, if set."""
         payload = {"state": "ON" if on else "OFF"}
         if on and lamp["color"]:
             payload["color_temp"] = self._mired(lamp["id"], lamp["color"])
+        if on and lamp["level"]:
+            payload["brightness"] = self._level(lamp["level"])
         return payload
 
     def _send_lights(self, wanted: dict[str, dict]) -> list[str]:
@@ -2751,13 +2807,14 @@ class Service:
                  if x["state"] == "ON" and x["dim"] and not x["lost"]]
         if not lamps:
             raise ActionError("Das Licht ist aus – zuerst „Licht an“ drücken.", 409)
-        now = statistics.mean(x["brightness"] or 0 for x in lamps)
-        half = LIGHT_STEP / 2   # to the next step at least half a step away – as far up as down: 55 % to 60 % or 50 %
-        near = math.ceil((now + half) / LIGHT_STEP) if step > 0 else math.floor((now - half) / LIGHT_STEP)
-        target = min(100, max(LIGHT_MIN, near * LIGHT_STEP))
-        if all(x["brightness"] == target for x in lamps):
+        said = [x["brightness"] for x in lamps if x["brightness"] is not None]
+        if not said:
+            raise ActionError(NOT_SAID, 409)
+        now = statistics.mean(said)
+        target = self._next_level(now, step)
+        if target is None:
             return {"message": "Heller geht es nicht." if step > 0 else "Dunkler geht es nicht – ganz aus mit „Licht aus“.",
-                    "brightness": target}
+                    "brightness": round(now)}
         missed = self._send_lights({x["id"]: {"brightness": self._level(target)} for x in lamps})
         return {**self._light_result(lamps, missed, f"Helligkeit {target} %."), "brightness": target}
 
@@ -2767,6 +2824,65 @@ class Service:
         lamp = self._find_light(light_id, self.store.snapshot())
         missed = self._send_lights({light_id: self._light_switch(lamp, on)})
         return self._light_result([lamp], missed, f"„{lamp['name']}“ ist {'an' if on else 'aus'}.")
+
+    def set_light(self, light_id: str, body: dict) -> dict:
+        """„Einstellen“ (start page) and Geräte › Licht: one lamp – as far as it can – with one of brightness (per cent,
+        1–100), step (1 or -1: „heller“ / „dunkler“), kelvin (its colour temperature), white (a colour of LIGHT_COLORS)
+        or hue (a colour of LIGHT_HUES). A lamp that is off goes on with it."""
+        given = [key for key in ("brightness", "step", "kelvin", "white", "hue") if body.get(key) is not None]
+        if len(given) != 1:
+            raise ValueError("genau eins von brightness, step, kelvin, white oder hue")
+        key, value = given[0], body[given[0]]
+        if key in ("brightness", "step", "kelvin") and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError(f"{key} muss eine Zahl sein")
+        lamp = self._find_light(light_id, self.store.snapshot())
+        if key in ("brightness", "step"):
+            if not lamp["dim"]:
+                raise ActionError("Diese Lampe lässt sich nicht dimmen.")
+            if key == "step":
+                if value not in (1, -1):
+                    raise ValueError("step muss 1 oder -1 sein")
+                if lamp["state"] != "ON":
+                    raise ActionError("Die Lampe ist aus – zuerst einschalten.", 409)
+                if lamp["brightness"] is None:
+                    raise ActionError(NOT_SAID, 409)
+                percent = self._next_level(lamp["brightness"], value)
+                if percent is None:
+                    return {"message": "Heller geht es nicht." if value > 0
+                            else "Dunkler geht es nicht – ganz aus mit „Ausschalten“.", "brightness": lamp["brightness"]}
+            elif value != int(value) or not 1 <= value <= 100:
+                raise ValueError("brightness muss 1 bis 100 sein")
+            else:
+                percent = int(value)
+            payload, done, result = {"brightness": self._level(percent)}, f"{percent} %", {"brightness": percent}
+        elif key in ("kelvin", "white"):
+            if not lamp["kelvins"]:
+                raise ActionError("Diese Lampe hat nur eine Lichtfarbe.")
+            if key == "white":
+                if not isinstance(value, str) or value not in lamp["colors"]:
+                    raise ActionError("Diese Lichtfarbe kann die Lampe nicht.")
+                mired, done = self._mired(light_id, value), self.LIGHT_COLORS[value][0]
+            elif not 1000 <= value <= 10000:
+                raise ValueError("kelvin muss 1000 bis 10000 sein")
+            else:
+                low, high = ((self.zigbee.light(light_id) or {}).get("caps") or {}).get("temp") or (153, 500)
+                mired = min(max(round(1_000_000 / value), low), high)
+                done = f"{self._kelvin(mired)} K"
+            payload, result = {"color_temp": mired}, {"kelvin": self._kelvin(mired)}
+        else:
+            if not lamp["hues"]:
+                raise ActionError("Diese Lampe kann keine Farben.")
+            if not isinstance(value, str) or value not in self.LIGHT_HUES:
+                raise ValueError("Diese Farbe gibt es nicht.")
+            word, angle = self.LIGHT_HUES[value]
+            payload, done, result = {"color": {"hue": angle, "saturation": 100}}, word, {"hue": value}
+        if lamp["state"] != "ON":
+            payload = {"state": "ON", **payload}
+        missed = self._send_lights({light_id: payload})
+        answer = self._light_result([lamp], missed, f"„{lamp['name']}“: {done}.")   # it did not answer: an error
+        if key == "hue":
+            self._light_hue[light_id] = value
+        return {**answer, **result}
 
     def rename_light(self, light_id: str, body: dict) -> dict:
         """Geräte › Licht „Name ändern“: the name stays in the app (its name in Zigbee2MQTT stays as it is). Empty: as
@@ -2809,8 +2925,8 @@ class Service:
         return {"message": f"„{lamp['name']}“ ist jetzt im Raum „{room}“."}
 
     def set_light_color(self, light_id: str, body: dict) -> dict:
-        """Geräte › Licht „Lichtfarbe“: the colour the app gives the lamp whenever it switches it on (color "" or None:
-        as the lamp had it last). A lamp that is on gets it at once."""
+        """Geräte › Licht „Beim Einschalten“ › Lichtfarbe: the colour the app gives the lamp whenever it switches it on
+        (color "" or None: as the lamp had it last). The light that is on now stays as it is – „Lichtfarbe“ sets that."""
         color = body.get("color") or None
         data = self.store.snapshot()
         lamp = self._find_light(light_id, data)
@@ -2822,11 +2938,26 @@ class Service:
             else:
                 d.setdefault("light_colors", {})[light_id] = color
         word = self.LIGHT_COLORS[color][0] if color else "wie zuletzt"
-        log.info("%s: Lichtfarbe %s", lamp["name"], word)
-        if color and lamp["state"] == "ON" and self._send_lights({light_id: {"color_temp": self._mired(light_id, color)}}):
-            return {"message": f"Gespeichert. „{lamp['name']}“ hat gerade nicht geantwortet – sie bekommt die Farbe beim "
-                               "nächsten Einschalten.", "warning": True}
-        return {"message": f"„{lamp['name']}“: Lichtfarbe {word}."}
+        log.info("%s: Lichtfarbe beim Einschalten %s", lamp["name"], word)
+        return {"message": f"„{lamp['name']}“: Lichtfarbe beim Einschalten {word}."}
+
+    def set_light_level(self, light_id: str, body: dict) -> dict:
+        """Geräte › Licht „Beim Einschalten“ › Helligkeit: the brightness (per cent) the app gives the lamp whenever it
+        switches it on (level None: as it was last)."""
+        level = body.get("level")
+        if level is not None and (isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= 100):
+            raise ValueError("level muss 1 bis 100 sein")
+        lamp = self._find_light(light_id, self.store.snapshot())
+        if level is not None and not lamp["dim"]:
+            raise ActionError("Diese Lampe lässt sich nicht dimmen.")
+        with self.store.edit() as d:
+            if level is None:
+                (d.get("light_levels") or {}).pop(light_id, None)
+            else:
+                d.setdefault("light_levels", {})[light_id] = level
+        word = f"{level} %" if level else "wie zuletzt"
+        log.info("%s: Helligkeit beim Einschalten %s", lamp["name"], word)
+        return {"message": f"„{lamp['name']}“: Helligkeit beim Einschalten {word}."}
 
     def history_view(self, kind: str, ident: str, day_text: str) -> dict:
         """Verlauf of a room (or of a heater without one) on one day: the points of the chart and what it cost."""
@@ -3125,7 +3256,7 @@ class Service:
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
                 "costs": self._costs(data), "plugs": plugs, "power_today": self._power_today(data, plugs),
-                "notices": self._notice_views(data, plugs), "lights": self._light_list(data),
+                "notices": self._notice_views(data, plugs), "lights": self._light_list(data, ask=True),
                 "history": {"recording": self.history.active,
                             "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,

@@ -255,6 +255,7 @@ function setBanner(text, info = false) {  // info: blue note instead of a red wa
 
 function showView(name) {
   closeHistory();   // a Verlauf from the setup shows the costs: it does not stay open on the home page
+  closeLightSheet();
   view = name;
   if (name === "setup") sessionStorage.setItem("heizung.view", "setup");
   else sessionStorage.removeItem("heizung.view");
@@ -353,7 +354,7 @@ function render() {
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
-  if (el.contains(focus) && focus.matches("input, select")) return;  // never disturb typing
+  if (lampDrag || (el.contains(focus) && focus.matches("input, select"))) return;  // never disturb typing or a slider
   if (tab === "rooms") renderRooms(el);
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
   else if (tab === "about") renderAbout(el);
@@ -775,9 +776,11 @@ function tileLightsHTML(g) {
   const lost = lamps.filter(l => l.lost);
   const say = on.length ? `an${level != null && lamps.length === 1 ? ` · ${level} %` : ""}`
     : lost.length === lamps.length ? "keine Verbindung" : "aus";
+  const tune = lamps.some(l => l.dim || l.kelvins || l.hues)   // each lamp on its own: brightness, colour of light, colour
+    ? '<button class="light-tune" data-action="light-sheet">Einstellen ›</button>' : "";
   const head = `<div class="light-head"><span class="dico${on.length ? " on" : lost.length === lamps.length ? " offline"
     : ""}" aria-hidden="true">${ICONS.light}</span><span class="light-title">Licht</span><span class="pstate${on.length
-    ? "" : " off"}">${say}</span></div>`;
+    ? "" : " off"}">${say}</span>${tune}</div>`;
   const toggle = `<button class="big-btn${on.length ? "" : " primary"}" data-action="light-room" data-on="${on.length ? 0 : 1}"
     ${sending ? "disabled" : ""}>${sending ? "wird gesendet …" : on.length ? "Licht ausschalten" : "Licht einschalten"}</button>`;
   const dimmer = !dim.length ? "" : `<div class="tile-set light-set">
@@ -906,6 +909,7 @@ function renderHome() {
   if (!line.hidden) setHTML(line, `Strom heute <b>${esc(kwhText(pt.wh / 1000))}</b>${pt.eur != null
     ? ` · etwa ${esc(euroText(pt.eur))}` : ""}<span class="muted"> · gemessen an ${pt.plugs === 1 ? "einer Steckdose"
     : `${pt.plugs} Steckdosen`}</span>`);
+  renderLightSheet();
 }
 
 function homeReport(g, okText, data) {
@@ -948,6 +952,96 @@ function lightOne(id, on) {   // one lamp on its own – on the tile (several la
     const res = await api("POST", `api/lights/${encodeURIComponent(id)}/switch`, { on });
     toast(res.message, !!res.warning);
   });
+}
+
+function lampSet(id, body) {   // „Einstellen“: the lamp's new value shows at the lamp – a note only if something is up
+  if (!id) return;
+  act("lamp:" + id, async () => {
+    const res = await api("POST", `api/lights/${encodeURIComponent(id)}/set`, body);
+    if (res.warning || /geht es nicht/.test(res.message)) toast(res.message, !!res.warning);
+  });
+}
+
+function openLightSheet(g) {   // „Einstellen ›“ at the light of a room: each of its lamps on its own – anyone may
+  if (!g) return;
+  lightSheet = { room: g.id };
+  renderLightSheet();
+  const close = document.querySelector("#lightsheet .sheet-close");
+  if (close) close.focus();
+}
+
+function closeLightSheet() {
+  if (!lightSheet) return;
+  lightSheet = null;
+  lampDrag = false;
+  renderLightSheet();
+}
+
+function renderLightSheet() {
+  const el = document.getElementById("lightsheet");
+  const g = lightSheet && state ? groups().find(x => x.kind === "room" && x.id === lightSheet.room) : null;
+  const lamps = g ? roomLights(g) : [];
+  if (lightSheet && !lamps.length) lightSheet = null;   // the room has no lamp (any more)
+  document.body.classList.toggle("sheet-open", !!hist || !!lightSheet);
+  if (!lightSheet) { el.hidden = true; el.innerHTML = ""; el._html = null; return; }
+  const active = document.activeElement;
+  if (lampDrag || (el.contains(active) && active.type === "range")) return;   // never redraw under the finger
+  setHTML(el, `<div class="sheet light-sheet" role="dialog" aria-modal="true" aria-labelledby="ls-title">
+    <div class="sheet-head"><h2 id="ls-title"><span class="kicker">Licht</span>${esc(g.name)}</h2>
+      <button class="sheet-close" data-action="ls-close">Schließen</button></div>
+    ${lamps.map(lampPanelHTML).join("")}
+  </div>`);
+  el.hidden = false;
+}
+
+function lampPanelHTML(l) {   // one lamp in „Einstellen“: on and off, then what it can
+  const sending = busy.has("lamp:" + l.id), isOn = l.state === "ON" && !l.lost;
+  return `<section class="lamp-panel" data-light="${esc(l.id)}">
+    <div class="lamp-head"><span class="dico${isOn ? " on" : l.lost ? " offline" : ""}" aria-hidden="true">${ICONS.light}</span>
+      <h3 class="dname">${esc(l.name)}<small>${esc(sending ? "wird gesendet …" : lightFacts(l) || "–")}</small></h3>
+      <button class="big-btn${isOn ? "" : " primary"}" data-action="light-one" data-on="${isOn ? 0 : 1}" ${sending
+        ? "disabled" : ""}>${isOn ? "Ausschalten" : "Einschalten"}</button></div>
+    ${l.dim ? `<div class="lamp-row"><span class="lamp-label">Helligkeit</span>${lampBrightnessHTML(l)}</div>` : ""}
+    ${l.kelvins ? `<div class="lamp-row"><span class="lamp-label">Lichtfarbe</span>${lampWhiteHTML(l)}</div>` : ""}
+    ${l.hues ? `<div class="lamp-row"><span class="lamp-label">Farbe</span>${lampHueHTML(l)}</div>` : ""}
+    ${l.lost ? '<p class="tile-note">Die Lampe antwortet nicht. Ist der Lichtschalter an der Wand an?</p>' : ""}
+  </section>`;
+}
+
+function lampBrightnessHTML(l) {   // „dunkler“ and „heller“ in steps of 10 %, the slider for anything in between
+  const dis = busy.has("lamp:" + l.id) ? "disabled" : "", b = l.brightness;
+  const steps = !dis && l.state === "ON" && !l.lost && b != null ? "" : "disabled";   // the slider also switches on
+  return `<div class="lamp-control">
+    <div class="tile-set light-set">
+      <button class="step" data-action="lamp-step" data-step="-1" ${steps} aria-label="Dunkler"><span class="sym">−</span><span class="word">dunkler</span></button>
+      <div class="set-val"><span class="set-temp" data-lval="brightness">${b != null ? `${b} %` : "–"}</span></div>
+      <button class="step" data-action="lamp-step" data-step="1" ${steps} aria-label="Heller"><span class="sym">+</span><span class="word">heller</span></button>
+    </div>
+    <input type="range" class="lamp-range" data-action="lamp-range" data-what="brightness" min="1" max="100" step="1"
+      value="${b ?? 100}" ${dis} aria-label="Helligkeit von ${esc(l.name)} in Prozent">
+  </div>`;
+}
+
+function lampWhiteHTML(l) {   // the colours of light with a name, the slider from warm to cool for everything it can
+  const dis = busy.has("lamp:" + l.id) ? "disabled" : "", [k0, k1] = l.kelvins;
+  const near = c => l.kelvin != null && Math.abs(Math.min(Math.max(LIGHT_KELVIN[c], k0), k1) - l.kelvin) <= 60;
+  return `<div class="lamp-control">
+    <div class="chip-row" role="group" aria-label="Lichtfarbe von ${esc(l.name)}">${l.colors.map(c => `<button class="lamp-chip${
+      near(c) ? " active" : ""}" data-action="lamp-white" data-white="${c}" aria-pressed="${near(c)}" ${dis}>${
+      LIGHT_COLOR_WORDS[c]}</button>`).join("")}</div>
+    <div class="range-ends"><span>warm</span><input type="range" class="lamp-range kelvin" data-action="lamp-range"
+      data-what="kelvin" min="${k0}" max="${k1}" step="100" value="${l.kelvin ?? Math.round((k0 + k1) / 200) * 100}" ${dis}
+      aria-label="Lichtfarbe von ${esc(l.name)} in Kelvin, links warm, rechts kühl"><span>kühl</span></div>
+    <span class="lamp-value muted" data-lval="kelvin">${l.kelvin != null ? `${l.kelvin} K` : l.hue
+      ? "zeigt gerade eine Farbe" : ""}</span>
+  </div>`;
+}
+
+function lampHueHTML(l) {   // a lamp with colours: eight of them, each by its name
+  const dis = busy.has("lamp:" + l.id) ? "disabled" : "";
+  return `<div class="chip-row" role="group" aria-label="Farbe von ${esc(l.name)}">${LIGHT_HUES.map(([key, word, h]) =>
+    `<button class="lamp-chip${l.hue === key ? " active" : ""}" data-action="lamp-hue" data-hue="${key}" aria-pressed="${
+      l.hue === key}" ${dis}><span class="swatch" style="--hue:${h}" aria-hidden="true"></span>${word}</button>`).join("")}</div>`;
 }
 
 function plugOn(g, id) {   // „Steckdose einschalten“: the plug of an AeroFlow gives it power again
@@ -1033,6 +1127,8 @@ async function helpDo(url) {
 
 // ------------------------------------------------------------------ Verlauf und Kosten (a room's day, Strom und Kosten)
 let hist = null;       // the open „Verlauf“: {kind, id, from: "home"|"setup", day, data, error, loading, table}
+let lightSheet = null; // the open „Einstellen ›“ of a room's light on the start page: {room}
+let lampDrag = false;  // a finger or the mouse on a slider of a lamp: nothing is redrawn under it
 let histHover = null;  // start (s) of the five minutes under the finger or the mouse
 let histResize = 0;
 let costForm = null;   // „Strom und Kosten“ while it is being typed in: {price, show, show_power, powers: {heater id: text}}
@@ -1135,7 +1231,7 @@ async function loadHistory(day) {
 
 function renderHistory() {
   const el = document.getElementById("history");
-  document.body.classList.toggle("sheet-open", !!hist);
+  document.body.classList.toggle("sheet-open", !!hist || !!lightSheet);
   if (!hist || !state) { el.hidden = true; el.innerHTML = ""; el._html = null; return; }
   const h = hist, d = h.data && h.data.day === h.day ? h.data : null;
   const today = state.now.slice(0, 10), plug = h.kind === "plug", run = h.kind === "run";
@@ -2765,7 +2861,11 @@ async function removePlug(id) {   // „Entfernen …“: a WLAN plug the app fo
 }
 
 // ------------------------------------------------------------------ Geräte › Licht
-const LIGHT_COLOR_WORDS = { warm: "warmweiß", neutral: "neutralweiß", kalt: "kaltweiß" };   // Service.LIGHT_COLORS
+const LIGHT_COLOR_WORDS = { kerze: "Kerzenlicht", warm: "warmweiß", neutral: "neutralweiß", kalt: "kaltweiß",
+  tag: "Tageslicht" };   // Service.LIGHT_COLORS …
+const LIGHT_KELVIN = { kerze: 2200, warm: 2700, neutral: 4000, kalt: 5000, tag: 6500 };   // … in kelvin
+const LIGHT_HUES = [["rot", "Rot", 0], ["orange", "Orange", 30], ["gelb", "Gelb", 55], ["gruen", "Grün", 120],
+  ["tuerkis", "Türkis", 175], ["blau", "Blau", 230], ["lila", "Lila", 275], ["pink", "Pink", 320]];   // Service.LIGHT_HUES
 
 function lightFacts(l) {   // "an · 70 %"
   return l.lost ? "keine Verbindung" : l.state === "ON" ? `an${l.brightness != null ? ` · ${l.brightness} %` : ""}`
@@ -2779,14 +2879,19 @@ function lightSwitchHTML(l) {   // on and off – as on the start page
   return l.lost ? `${on} ${off}` : l.state === "ON" ? `an ${off}` : l.state === "OFF" ? `aus ${on}` : `${on} ${off}`;
 }
 
-function lightColorHTML(l) {   // the colour the app gives the lamp whenever it switches it on – or as it had it last
-  if (!l.colors.length) return '<span class="muted">Diese Lampe hat nur eine Lichtfarbe.</span>';
-  const sending = busy.has("lightcolor:" + l.id);
-  const button = (value, label) => `<button class="${(l.color || "") === value ? "active" : ""}" data-action="light-color"
-    data-color="${value}" aria-pressed="${(l.color || "") === value}" ${sending ? "disabled" : ""}>${label}</button>`;
-  return `<div class="segmented chips" role="group" aria-label="Lichtfarbe von ${esc(l.name)}">${button("", "wie zuletzt")}${
-    l.colors.map(c => button(c, LIGHT_COLOR_WORDS[c])).join("")}</div><div class="segmented-text muted">${sending
-    ? "wird gesendet …" : l.color ? "Die App stellt sie bei jedem Einschalten ein." : "Die Lampe bleibt, wie sie zuletzt war."}</div>`;
+function lampDefaultsHTML(l) {   // what the app sets whenever it switches the lamp on – or as it was last
+  const levels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+  if (l.level != null && !levels.includes(l.level)) levels.push(l.level), levels.sort((a, b) => a - b);
+  const level = !l.dim ? "" : `<label class="lamp-default">Helligkeit <select data-action="light-level-set" ${
+    busy.has("lightlevel:" + l.id) ? "disabled" : ""}><option value="">wie zuletzt</option>${levels.map(v =>
+    `<option value="${v}" ${l.level === v ? "selected" : ""}>${v} %</option>`).join("")}</select></label>`;
+  const color = !l.colors.length ? "" : `<label class="lamp-default">Lichtfarbe <select data-action="light-color-set" ${
+    busy.has("lightcolor:" + l.id) ? "disabled" : ""}><option value="">wie zuletzt</option>${l.colors.map(c =>
+    `<option value="${c}" ${l.color === c ? "selected" : ""}>${LIGHT_COLOR_WORDS[c]} (${LIGHT_KELVIN[c]} K)</option>`)
+    .join("")}</select></label>`;
+  if (!level && !color) return '<span class="muted">–</span>';
+  return `${level}${color}<div class="segmented-text muted">Stellt die App ein, wenn sie die Lampe einschaltet – nicht
+    beim Lichtschalter an der Wand.</div>`;
 }
 
 function lightTileHTML(l) {
@@ -2801,7 +2906,10 @@ function lightTileHTML(l) {
         busy.has("lightroom:" + l.id) ? "disabled" : ""}>${plugRoomOptions(l.room)}</select>${l.room ? ""
         : ' <span class="muted">– ohne Raum nicht auf der Startseite</span>'}</dd>
       <dt>Schalten</dt><dd>${lightSwitchHTML(l)}</dd>
-      <dt>Lichtfarbe</dt><dd>${lightColorHTML(l)}</dd>
+      ${l.dim ? `<dt>Helligkeit</dt><dd>${lampBrightnessHTML(l)}</dd>` : ""}
+      ${l.kelvins ? `<dt>Lichtfarbe</dt><dd>${lampWhiteHTML(l)}</dd>` : ""}
+      ${l.hues ? `<dt>Farbe</dt><dd>${lampHueHTML(l)}</dd>` : ""}
+      <dt>Beim Einschalten</dt><dd>${lampDefaultsHTML(l)}</dd>
       <dt>Gerät</dt><dd>${esc([l.model, z && zigbeeSignal(z.signal)].filter(Boolean).join(" · ") || "–")}</dd>
       <dt>Zigbee-Adresse</dt><dd>${esc(l.id)}</dd>
       ${l.lost ? '<dt>Zustand</dt><dd><span class="error-text">Hat beim letzten Schalten nicht geantwortet. Ist der ' +
@@ -2813,8 +2921,9 @@ function lightsCardHTML() {
   const lamps = state.lights || [];
   return `<article class="card"><div class="card-head"><h2>Licht</h2></div>
     <p class="hint">Lampen mit Zigbee – Hue, IKEA, Innr und andere – hängen direkt am Pi, ohne Bridge. Wähle für jede
-      Lampe ihren Raum: Auf der Startseite schalten die Bewohner dann das Licht des Raums ein und aus, heller und dunkler.
-      Damit die Lampen immer Strom haben, bleibt der Lichtschalter an der Wand an.</p>
+      Lampe ihren Raum: Auf der Startseite schalten die Bewohner dann das Licht des Raums ein und aus, heller und dunkler
+      – und mit „Einstellen ›“ jede Lampe für sich. Damit die Lampen immer Strom haben, bleibt der Lichtschalter an der
+      Wand an.</p>
     ${lamps.map(lightTileHTML).join("")}
     ${lamps.length ? "" : '<p class="empty">Noch keine Lampe in der App. Eine neue lernst du mit „+ Gerät hinzufügen“ an.</p>'}
   </article>`;
@@ -2841,11 +2950,13 @@ async function setLightRoom(id, room, quiet = false) {   // the room of a lamp �
   return ok;
 }
 
-function setLightColor(id, color) {   // „Lichtfarbe“: a lamp that is on gets it at once
-  act("lightcolor:" + id, async () => {
-    const res = await api("PUT", `api/lights/${encodeURIComponent(id)}/color`, { color });
-    toast(res.message, !!res.warning);
-  });
+function setLightColor(id, color) {   // „Beim Einschalten“ › Lichtfarbe – the light that is on stays as it is
+  act("lightcolor:" + id, async () => toast((await api("PUT", `api/lights/${encodeURIComponent(id)}/color`, { color })).message));
+}
+
+function setLightLevel(id, level) {   // „Beim Einschalten“ › Helligkeit
+  act("lightlevel:" + id, async () => toast((await api("PUT", `api/lights/${encodeURIComponent(id)}/level`,
+    { level: level ? Number(level) : null })).message));
 }
 
 async function renameLight(id, quiet = false, name = null) {   // „Ändern …“ at the name – it stays in the app
@@ -4837,6 +4948,7 @@ function dayOf(t) { return t.closest(".day").dataset.day; }
 document.addEventListener("click", e => {
   if (e.target.id === "dialog") return closeDialog(null);   // tap next to the dialog = cancel
   if (e.target.id === "history") return closeHistory();     // tap next to the Verlauf = close
+  if (e.target.id === "lightsheet") return closeLightSheet();   // … next to „Einstellen“ too
   const t = e.target.closest("button");
   if (!t || t.disabled) return;
   if (t.dataset.dialogButton !== undefined) return dialogButton(Number(t.dataset.dialogButton));
@@ -4854,6 +4966,11 @@ document.addEventListener("click", e => {
     case "light-room": return lightRoom(groupFor(tile), t.dataset.on === "1");
     case "light-dim": return lightDim(groupFor(tile), Number(t.dataset.step));
     case "light-one": return lightOne(t.closest("[data-light]").dataset.light, t.dataset.on === "1");
+    case "light-sheet": return openLightSheet(groupFor(tile));
+    case "ls-close": return closeLightSheet();
+    case "lamp-step": return lampSet(t.closest("[data-light]").dataset.light, { step: Number(t.dataset.step) });
+    case "lamp-white": return lampSet(t.closest("[data-light]").dataset.light, { white: t.dataset.white });
+    case "lamp-hue": return lampSet(t.closest("[data-light]").dataset.light, { hue: t.dataset.hue });
     case "notice-ok": return noticeOk(t.dataset.notice);
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
@@ -4941,7 +5058,6 @@ document.addEventListener("click", e => {
     case "plug-switch": return switchPlug(t.closest("[data-plug]").dataset.plug, t.dataset.on === "1");
     case "plug-energy": return openPlugEnergy(t.closest("[data-plug]").dataset.plug);
     case "light-rename": return renameLight(t.closest("[data-light]").dataset.light);
-    case "light-color": return t.classList.contains("active") ? undefined : setLightColor(t.closest("[data-light]").dataset.light, t.dataset.color);
     case "light-remove": return removeLight(t.closest("[data-light]").dataset.light);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
@@ -5033,6 +5149,12 @@ document.addEventListener("change", e => {
     case "plug-room": return setPlugRoom(t.closest("[data-plug]").dataset.plug, t.value);
     case "plug-appliance": return setPlugAppliance(t.closest("[data-plug]").dataset.plug, t.value);
     case "light-room-set": return setLightRoom(t.closest("[data-light]").dataset.light, t.value);
+    case "light-color-set": t.blur(); return setLightColor(t.closest("[data-light]").dataset.light, t.value);
+    case "light-level-set": t.blur(); return setLightLevel(t.closest("[data-light]").dataset.light, t.value);
+    case "lamp-range":   // let go of a slider: now the lamp gets the value
+      lampDrag = false;
+      t.blur();
+      return lampSet(t.closest("[data-light]").dataset.light, { [t.dataset.what]: Number(t.value) });
     case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });
@@ -5051,6 +5173,11 @@ function updateRoomForm(t) {
 }
 
 document.addEventListener("input", e => {
+  if (e.target.dataset.action === "lamp-range") {   // the number follows the slider; the lamp gets it when it is let go
+    const out = e.target.closest(".lamp-control").querySelector(`[data-lval="${e.target.dataset.what}"]`);
+    if (out) out.textContent = `${e.target.value} ${e.target.dataset.what === "kelvin" ? "K" : "%"}`;
+    return;
+  }
   if (editing && e.target.id === "plan-name") editing.name = e.target.value;
   if (calibForm && e.target.closest(".calib-form")) {
     calibForm.measured = e.target.value;
@@ -5080,6 +5207,7 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (hist && e.key === "Escape") return closeHistory();
+  if (lightSheet && e.key === "Escape") return closeLightSheet();
   if (e.key === "Enter" && (e.target.dataset.cfield === "price" || e.target.dataset.cpower)) { e.target.blur(); return saveCosts(); }
   if (e.key === "Enter" && calibForm && e.target.closest(".calib-form")) return saveCalib(null);
   if (e.key === "Enter" && wifiForm && e.target.closest(".wifi-form")) return connectWifi();
@@ -5107,3 +5235,8 @@ setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 setInterval(() => {   // today's Verlauf goes on every minute while it is open
   if (hist && !document.hidden && state && hist.day === state.now.slice(0, 10)) loadHistory();
 }, 60000);
+
+// a finger or the mouse on a slider of a lamp: the page is not redrawn under it (the refresh every few seconds)
+document.addEventListener("pointerdown", e => { if (e.target.closest && e.target.closest(".lamp-range")) lampDrag = true; });
+document.addEventListener("pointerup", () => { lampDrag = false; });
+document.addEventListener("pointercancel", () => { lampDrag = false; });

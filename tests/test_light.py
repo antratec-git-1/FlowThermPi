@@ -45,6 +45,7 @@ def until(check, seconds=5.0):
 
 class Base(unittest.TestCase):
     """Three lamps, a plug and a thermostat in a simulated Zigbee2MQTT; a Flur and a Wohnzimmer, no AeroFlow."""
+    UNREPORTED: dict = {}   # lamp -> values it has not said yet (until the app asks)
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
@@ -53,6 +54,7 @@ class Base(unittest.TestCase):
         self.addCleanup(self.broker.close)
         self.z2m = FakeZ2M(self.broker, channel=25, join_after=0.2, interview=0.2)
         self.z2m.delay = 0.01
+        self.z2m.unreported = {lamp: set(keys) for lamp, keys in self.UNREPORTED.items()}
         self.z2m.states[FLOALT] = light_state(on=True, brightness=120, color_temp=300)
         self.z2m.states[INNR] = light_state(on=False)
         self.z2m.states[HUE] = light_state(on=False)
@@ -89,8 +91,8 @@ class RecognitionTest(Base):
         self.assertEqual({k: lamps[FLOALT][k] for k in ("name", "model", "room", "state", "brightness", "dim", "colors",
                                                          "color", "lost")},
                          {"name": "Lampe 00F1", "model": "IKEA L1529", "room": None, "state": "ON", "brightness": 47,
-                          "dim": True, "colors": ["warm", "neutral"], "color": None, "lost": False})
-        self.assertEqual(lamps[INNR]["colors"], ["warm", "neutral", "kalt"])
+                          "dim": True, "colors": ["kerze", "warm", "neutral"], "color": None, "lost": False})
+        self.assertEqual(lamps[INNR]["colors"], ["kerze", "warm", "neutral", "kalt"])
         self.assertEqual((lamps[INNR]["state"], lamps[HUE]["model"]), ("OFF", "Philips 9290012573A"))
         self.assertEqual([p["id"] for p in self.service.state()["plugs"]], [PLUG])
         self.assertEqual(self.net.summary(), "Zigbee2MQTT 2.14.3 läuft · Kanal 25 · 5 Gerät(e), davon 1 Thermostat(e), "
@@ -144,15 +146,15 @@ class SwitchTest(Base):
         self.place(FLOALT, self.wohn)
         self.place(INNR, self.wohn)
         self.service.switch_room_light(self.wohn, {"on": False})
-        self.assertEqual(self.service.set_light_color(INNR, {"color": "kalt"}), {"message": "„Lampe 00F2“: Lichtfarbe "
-                                                                                           "kaltweiß."})
+        self.assertEqual(self.service.set_light_color(INNR, {"color": "kalt"}),
+                         {"message": "„Lampe 00F2“: Lichtfarbe beim Einschalten kaltweiß."})
         self.assertEqual(self.sets(INNR)[-1], {"state": "OFF"})   # switched off: nothing sent, it waits for „an“
         self.service.switch_room_light(self.wohn, {"on": True})
         self.assertEqual(self.sets(INNR)[-1], {"state": "ON", "color_temp": 200})
         self.assertEqual(self.sets(FLOALT)[-1], {"state": "ON"})   # without a colour: as it had it last
         self.assertEqual(self.z2m.states[INNR]["color_temp"], 200)
-        self.service.set_light_color(FLOALT, {"color": "warm"})   # on: it gets the colour at once
-        self.assertEqual(self.sets(FLOALT)[-1], {"color_temp": 370})
+        self.service.set_light_color(FLOALT, {"color": "warm"})   # on: it stays as it is until it is switched on again
+        self.assertEqual(self.sets(FLOALT)[-1], {"state": "ON"})
         with self.assertRaises(ActionError) as caught:
             self.service.set_light_color(FLOALT, {"color": "kalt"})   # FLOALT goes down to 250 mired (4000 K) only
         self.assertEqual(str(caught.exception), "Diese Lichtfarbe kann die Lampe nicht.")
@@ -197,6 +199,7 @@ class SwitchTest(Base):
             self.service.switch_light(PLUG, {"on": True})   # a plug is no lamp
         self.assertEqual(caught.exception.status, 404)
 
+    @mock.patch("heizapp.service.LIGHT_ASK", 0.05)   # it asks again at once, not after a minute
     def test_a_lamp_without_power(self):
         self.place(FLOALT, self.wohn)
         self.place(HUE, self.wohn)
@@ -209,12 +212,12 @@ class SwitchTest(Base):
             self.service.switch_room_light(self.wohn, {"on": False})
         self.assertEqual((str(caught.exception), caught.exception.status),
                          ("Die Lampen haben nicht geantwortet. Ist der Lichtschalter an der Wand an?", 504))
-        self.z2m.asleep.clear()
-        self.z2m.report(HUE, state="ON")   # it has power again and reports
+        self.z2m.asleep.discard(HUE)   # it has power again: the app asks it, it answers
         until(lambda: not self.lamps()[HUE]["lost"])
-        self.assertTrue(self.lamps()[FLOALT]["lost"])
-        self.z2m.report(FLOALT, state="ON")
+        self.assertTrue(self.lamps()[FLOALT]["lost"])   # still without power: it hears the question, but says nothing
+        self.z2m.asleep.discard(FLOALT)
         until(lambda: not self.lamps()[FLOALT]["lost"])
+        self.service.switch_room_light(self.wohn, {"on": True})
         self.z2m.asleep.add(HUE)
         with mock.patch("heizapp.service.LIGHT_ANSWER", 1.0), self.assertRaises(ActionError):
             self.service.switch_light(HUE, {"on": False})   # no power: still „on“ as last heard, but lost
@@ -230,6 +233,99 @@ class SwitchTest(Base):
         with self.assertRaises(ActionError) as caught:
             self.service.switch_room_light(self.wohn, {"on": True})
         self.assertEqual((str(caught.exception), caught.exception.status), ("Zigbee2MQTT läuft gerade nicht.", 503))
+
+
+class SettingsTest(Base):
+    """„Einstellen“: each lamp as far as it can – brightness, colour of light, colour – and „Beim Einschalten“: what
+    the app sets whenever it switches a lamp on."""
+
+    def test_what_each_lamp_can(self):
+        lamps = self.lamps()
+
+        def pick(lamp):
+            return {k: lamps[lamp][k] for k in ("kelvins", "colors", "hues", "kelvin", "hue", "level")}
+        self.assertEqual(pick(FLOALT), {"kelvins": [2200, 4000], "colors": ["kerze", "warm", "neutral"], "hues": False,
+                                        "kelvin": 3300, "hue": None, "level": None})
+        self.assertEqual((pick(INNR)["kelvins"], pick(INNR)["colors"]), ([2200, 5000], ["kerze", "warm", "neutral", "kalt"]))
+        self.assertEqual((pick(HUE)["kelvins"], pick(HUE)["colors"][-1], pick(HUE)["hues"]), ([2000, 6500], "tag", True))
+
+    def test_brightness_of_one_lamp(self):
+        self.assertEqual(self.service.set_light(FLOALT, {"brightness": 60}),
+                         {"message": "„Lampe 00F1“: 60 %.", "brightness": 60})
+        self.assertEqual(self.sets(FLOALT)[-1], {"brightness": 152})
+        self.assertEqual(self.service.set_light(FLOALT, {"step": 1})["brightness"], 70)
+        self.assertEqual(self.service.set_light(FLOALT, {"step": -1})["brightness"], 60)
+        self.service.set_light(FLOALT, {"brightness": 5})   # the slider goes lower than „dunkler“
+        self.assertEqual(self.service.set_light(FLOALT, {"step": -1}),
+                         {"message": "Dunkler geht es nicht – ganz aus mit „Ausschalten“.", "brightness": 5})
+        self.service.set_light(INNR, {"brightness": 30})   # off: it goes on with it
+        self.assertEqual(self.sets(INNR)[-1], {"state": "ON", "brightness": 76})
+        self.assertEqual((self.lamps()[INNR]["state"], self.lamps()[INNR]["brightness"]), ("ON", 30))
+        with self.assertRaises(ActionError) as caught:
+            self.service.set_light(HUE, {"step": 1})   # off: „heller“ has nothing to start from
+        self.assertEqual(caught.exception.status, 409)
+        for wrong in ({}, {"brightness": 0}, {"brightness": 101}, {"brightness": 50.5}, {"brightness": True},
+                      {"brightness": "60"}, {"brightness": 50, "kelvin": 3000}, {"step": 2}):
+            with self.assertRaises(ValueError, msg=wrong):
+                self.service.set_light(FLOALT, wrong)
+
+    def test_colour_of_light_and_colours(self):
+        self.assertEqual(self.service.set_light(FLOALT, {"white": "kerze"}),
+                         {"message": "„Lampe 00F1“: Kerzenlicht.", "kelvin": 2200})
+        self.assertEqual(self.sets(FLOALT)[-1], {"color_temp": 454})   # as warm as it goes
+        self.assertEqual(self.service.set_light(FLOALT, {"kelvin": 3000})["kelvin"], 3000)
+        self.assertEqual(self.sets(FLOALT)[-1], {"color_temp": 333})
+        self.assertEqual(self.service.set_light(FLOALT, {"kelvin": 6500})["kelvin"], 4000)   # as cold as it goes
+        self.assertEqual(self.lamps()[FLOALT]["kelvin"], 4000)
+        with self.assertRaises(ActionError) as caught:
+            self.service.set_light(FLOALT, {"white": "tag"})
+        self.assertEqual(str(caught.exception), "Diese Lichtfarbe kann die Lampe nicht.")
+        with self.assertRaises(ActionError) as caught:
+            self.service.set_light(FLOALT, {"hue": "blau"})
+        self.assertEqual(str(caught.exception), "Diese Lampe kann keine Farben.")
+        self.assertEqual(self.service.set_light(HUE, {"hue": "blau"}), {"message": "„Lampe 00F3“: Blau.", "hue": "blau"})
+        self.assertEqual(self.sets(HUE)[-1], {"state": "ON", "color": {"hue": 230, "saturation": 100}})   # off: on, blue
+        self.assertEqual({k: self.lamps()[HUE][k] for k in ("state", "hue", "kelvin")},
+                         {"state": "ON", "hue": "blau", "kelvin": None})
+        self.service.set_light(HUE, {"white": "tag"})   # white again
+        self.assertEqual({k: self.lamps()[HUE][k] for k in ("hue", "kelvin")}, {"hue": None, "kelvin": 6500})
+        for wrong in ({"hue": "himmelblau"}, {"hue": ["rot"]}, {"kelvin": 500}, {"kelvin": "warm"}):
+            with self.assertRaises(ValueError, msg=wrong):
+                self.service.set_light(HUE, wrong)
+
+    def test_what_the_app_sets_when_it_switches_on(self):
+        self.place(INNR, self.flur)
+        self.assertEqual(self.service.set_light_level(INNR, {"level": 40}),
+                         {"message": "„Lampe 00F2“: Helligkeit beim Einschalten 40 %."})
+        self.service.set_light_color(INNR, {"color": "kerze"})
+        self.service.switch_room_light(self.flur, {"on": True})
+        self.assertEqual(self.sets(INNR)[-1], {"state": "ON", "color_temp": 454, "brightness": 102})
+        self.assertEqual([self.lamps()[INNR][k] for k in ("brightness", "kelvin", "level", "color")], [40, 2200, 40, "kerze"])
+        self.service.set_light_color(INNR, {"color": "warm"})   # on: it stays as it is until it is switched on again
+        self.assertEqual(len(self.sets(INNR)), 1)
+        self.service.set_light_level(INNR, {"level": None})
+        self.service.switch_light(INNR, {"on": True})
+        self.assertEqual(self.sets(INNR)[-1], {"state": "ON", "color_temp": 370})
+        for wrong in (0, 101, True, "40", 40.5):
+            with self.assertRaises(ValueError, msg=wrong):
+                self.service.set_light_level(INNR, {"level": wrong})
+
+
+class AskTest(Base):
+    """A real IKEA FLOALT said its brightness only when asked: the app asks a lamp for what it has not said."""
+    UNREPORTED = {FLOALT: {"brightness", "color_temp"}}
+
+    def test_the_app_asks_for_what_a_lamp_has_not_said(self):
+        self.place(FLOALT, self.wohn)
+        with self.assertRaises(ActionError) as caught:
+            self.service.dim_room_light(self.wohn, {"step": 1})   # it is on – but how bright?
+        self.assertEqual((str(caught.exception), caught.exception.status),
+                         ("Die Lampe hat ihre Helligkeit noch nicht gemeldet – bitte gleich noch einmal versuchen.", 409))
+        until(lambda: self.lamps()[FLOALT]["brightness"] == 47)   # the start page asks for the state: the app asks the lamp
+        self.assertEqual(self.lamps()[FLOALT]["kelvin"], 3300)
+        self.assertEqual([body for lamp, kind, body in self.z2m.commands if lamp == FLOALT and kind == "get"],
+                         [{"brightness": "", "color_temp": ""}])   # once: it answered
+        self.assertEqual(self.service.dim_room_light(self.wohn, {"step": 1})["brightness"], 60)
 
 
 class SetupTest(Base):
@@ -252,17 +348,18 @@ class SetupTest(Base):
         self.service.rename_light(INNR, {"name": "Flur"})
         self.place(INNR, self.flur)
         self.service.set_light_color(INNR, {"color": "warm"})
+        self.service.set_light_level(INNR, {"level": 40})
         self.net.remove(INNR)
         self.service.forget_thermostat(INNR)
         data = self.service.store.data
-        self.assertEqual([INNR in (data.get(k) or {}) for k in ("light_names", "light_rooms", "light_colors")],
-                         [False] * 3)
+        self.assertEqual([INNR in (data.get(k) or {}) for k in ("light_names", "light_rooms", "light_colors",
+                                                                "light_levels")], [False] * 4)
         self.assertNotIn(INNR, self.lamps())
 
 
 class ApiTest(Base):
-    """Over the web API: the residents switch without PIN, name, room and colour need the setup – and the protocol
-    does not learn when someone switches the light."""
+    """Over the web API: the residents switch and set the lamps without PIN, name, room and „Beim Einschalten“ need
+    the setup – and the protocol does not learn when someone switches the light."""
 
     def setUp(self):
         super().setUp()
@@ -292,16 +389,19 @@ class ApiTest(Base):
         self.call("PUT", "/api/setup/pin", {"pin": "1234"})
         self.assertTrue(self.call("PUT", f"/api/lights/{INNR}/name", {"name": "Flur"}, expect=403)["pin_required"])
         self.call("PUT", f"/api/lights/{INNR}/color", {"color": "warm"}, expect=403)
+        self.call("PUT", f"/api/lights/{INNR}/level", {"level": 50}, expect=403)
         self.call("PUT", f"/api/lights/{INNR}/room", {"room": ""}, expect=403)
         with self.assertLogs("heizapp.server", level=logging.DEBUG) as said:
             self.assertEqual(self.call("POST", f"/api/rooms/{self.flur}/light", {"on": True}),
                              {"message": "Das Licht ist an."})
             self.assertEqual(self.call("POST", f"/api/rooms/{self.flur}/light/dim", {"step": -1})["brightness"], 70)
+            self.assertEqual(self.call("POST", f"/api/lights/{INNR}/set", {"kelvin": 4000})["kelvin"], 4000)
             self.call("POST", f"/api/lights/{INNR}/switch", {"on": False})
             self.call("POST", f"/api/rooms/{self.flur}/light/dim", {"step": 1}, expect=409)   # off: an INFO line
         levels = [(r.levelname, r.getMessage().split(" →")[0]) for r in said.records]
         self.assertEqual(levels, [("DEBUG", f"POST /api/rooms/{self.flur}/light"),
                                   ("DEBUG", f"POST /api/rooms/{self.flur}/light/dim"),
+                                  ("DEBUG", f"POST /api/lights/{INNR}/set"),
                                   ("DEBUG", f"POST /api/lights/{INNR}/switch"),
                                   ("INFO", f"POST /api/rooms/{self.flur}/light/dim")])
         lamp = next(x for x in self.call("GET", "/api/state")["lights"] if x["id"] == INNR)

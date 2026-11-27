@@ -646,8 +646,8 @@ class ZigbeeNet:
                     for ieee, d in self._devices.items() if d.get("light") and d["interview"] == "done"]
 
     def light(self, ieee: str) -> dict | None:
-        """What a lamp reported last: {state: ON | OFF | None, brightness (1–254), color_temp (mired), caps, heard,
-        seq} – None if it is not paired as a lamp (any more)."""
+        """What a lamp reported last: {state: ON | OFF | None, brightness (1–254), color_temp (mired), mode (what it
+        shows: color_temp, or a colour – xy, hs), caps, heard, seq} – None if it is not paired as a lamp (any more)."""
         with self._lock:
             device = self._devices.get(ieee)
             if not (device and device.get("light") and device["interview"] == "done"):
@@ -656,7 +656,9 @@ class ZigbeeNet:
             values = state["values"]
             return {"state": values.get("state") if values.get("state") in ("ON", "OFF") else None,
                     "brightness": _number(values.get("brightness"), 0, 254),
-                    "color_temp": _number(values.get("color_temp"), *MIRED), "caps": dict(device["light_caps"]),
+                    "color_temp": _number(values.get("color_temp"), *MIRED),
+                    "mode": values.get("color_mode") if values.get("color_mode") in ("color_temp", "xy", "hs") else None,
+                    "caps": dict(device["light_caps"]),
                     "heard": state["heard"] or None, "seq": state["seq"]}
 
     def thermostat(self, ieee: str) -> dict | None:

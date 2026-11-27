@@ -57,6 +57,9 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   ganz aus geht nur mit „Licht ausschalten“. Bei mehreren Lampen steht jede darunter mit „an · 60 %“ oder „aus“ und
   ihrem eigenen Knopf. Ein Raum ohne Heizung, aber mit Lampe (etwa der Flur) bekommt eine eigene Kachel. Antwortet
   eine Lampe nicht, steht dort „… antwortet nicht. Ist der Lichtschalter an der Wand an?“. Alles ohne PIN.
+  **Einstellen ›** (ab 0.4.22) öffnet ein Fenster mit jeder Lampe des Raums für sich: an und aus, **Helligkeit**,
+  **Lichtfarbe** von Kerzenlicht bis Tageslicht und bei Farblampen **Farbe** – nur, was die Lampe kann. Siehe
+  [Einstellen je Lampe](#licht-zigbee-lampen).
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -751,8 +754,9 @@ meldet nur Änderungen).
 
 ## Licht: Zigbee-Lampen
 
-Ab 0.4.21. Zigbee-Lampen – Philips Hue, IKEA, Innr und andere – hängen direkt am Zigbee-Stick des Pi, ohne Hue-Bridge
-und ohne Cloud. Die Lampen brauchen immer Strom: Der Lichtschalter an der Wand bleibt an, geschaltet wird in der App.
+Ab 0.4.21, Einstellungen je Lampe ab 0.4.22. Zigbee-Lampen – Philips Hue, IKEA, Innr und andere – hängen direkt am
+Zigbee-Stick des Pi, ohne Hue-Bridge und ohne Cloud. Die Lampen brauchen immer Strom: Der Lichtschalter an der Wand
+bleibt an, geschaltet wird in der App.
 
 - **Welche:** gebaut für IKEA FLOALT und JETSTRÖM, Innr und Philips Hue. Andere gehen auch, wenn Zigbee2MQTT sie als
   Licht mit an/aus kennt; ein Gerät mit mehreren Lichtern, die es einzeln schaltet, nicht.
@@ -760,11 +764,24 @@ und ohne Cloud. Die Lampen brauchen immer Strom: Der Lichtschalter an der Wand b
   Lampe zurücksetzt, damit sie ein neues Netz sucht – Hue: in der Hue-App löschen, ohne Hue-App 5-mal 2 Sekunden aus
   und 8 Sekunden an; FLOALT: 6-mal kurz aus und wieder an; JETSTRÖM: die Reset-Taste am Netzteil; Innr: nach der
   Anleitung von Innr. Im letzten Schritt „Wohin?“ bekommt die Lampe ihren Namen und ihren Raum.
-- **Einrichtung:** *Geräte › Licht* – je Lampe Name, Raum, Schalten (zum Testen), **Lichtfarbe** und **Entfernen …**.
-  Die Lichtfarbe – warmweiß (2.700 K), neutralweiß (4.000 K) oder kaltweiß (5.000 K), nur was die Lampe kann – stellt
-  die App bei jedem Einschalten ein; „wie zuletzt“ lässt die Lampe, wie sie war. Name, Raum und Lichtfarbe stehen nur
-  in der App (`data.json`: `light_names`, `light_rooms`, `light_colors`); wird die Lampe im Zigbee-Netz entfernt,
-  vergisst die App sie.
+- **Einrichtung:** *Geräte › Licht* – je Lampe Name, Raum, Schalten, Helligkeit, Lichtfarbe und Farbe (wie unter
+  „Einstellen ›“, zum Ausprobieren), **Beim Einschalten** und **Entfernen …**. Unter „Beim Einschalten“ stehen die
+  Helligkeit (10 bis 100 %) und die Lichtfarbe, die die App bei jedem Einschalten einstellt; „wie zuletzt“ lässt die
+  Lampe, wie sie war. Das gilt nur, wenn die App einschaltet – nicht beim Lichtschalter an der Wand; eine Lampe, die
+  gerade an ist, bleibt, wie sie ist. Name, Raum und „Beim Einschalten“ stehen nur in der App (`data.json`:
+  `light_names`, `light_rooms`, `light_colors`, `light_levels`); wird die Lampe im Zigbee-Netz entfernt, vergisst die
+  App sie.
+- **Einstellen ›** (ab 0.4.22): Auf der Startseite öffnet „Einstellen ›“ am Licht eines Raums ein Fenster mit jeder
+  Lampe für sich, ohne PIN. **Helligkeit:** dunkler und heller in Schritten von 10 % und ein Schieberegler von 1 bis
+  100 %. **Lichtfarbe:** Knöpfe für Kerzenlicht (2.200 K), warmweiß (2.700 K), neutralweiß (4.000 K), kaltweiß
+  (5.000 K) und Tageslicht (6.500 K) – nur, was die Lampe kann – und ein Regler von warm bis kühl über ihren ganzen
+  Bereich. **Farbe** (nur Farblampen, etwa Hue White and Color Ambiance): Rot, Orange, Gelb, Grün, Türkis, Blau, Lila
+  und Pink. Ist die Lampe aus, schalten Regler und Knöpfe sie mit ein; dunkler und heller gehen nur, wenn sie an ist.
+  Den Wert vom Regler bekommt die Lampe, wenn man ihn loslässt.
+- **Nachfragen** (ab 0.4.22): IKEA-Lampen sagen ihre Helligkeit erst, wenn man sie fragt. Fehlt der App ein Wert –
+  an oder aus, Helligkeit, Lichtfarbe –, fragt sie die Lampe: sofort, nach einer Minute und danach jedes Mal doppelt so
+  lange, höchstens etwa alle halbe Stunde. Bis die Antwort da ist, steht bei der Helligkeit „–“, und „heller“ und
+  „dunkler“ fehlen. So findet die App auch eine Lampe wieder, die keinen Strom hatte.
 - **Schalten:** „Licht einschalten“ schickt allen Lampen des Raums den Befehl zugleich und wartet bis zu 6 Sekunden
   auf ihre Antwort. **heller** und **dunkler** stellen alle eingeschalteten Lampen des Raums auf dieselbe Helligkeit:
   von der Anzeige (dem Mittel der Lampen) auf die nächste Zehnerstufe, die mindestens 5 % entfernt ist – von 55 % also
@@ -773,18 +790,21 @@ und ohne Cloud. Die Lampen brauchen immer Strom: Der Lichtschalter an der Wand b
   das, und die Lampe steht auf „keine Verbindung“, bis sie sich wieder meldet; „heller“ und „dunkler“ lassen sie so
   lange aus. Antwortet keine Lampe des Raums, kommt eine Fehlermeldung.
 - **Noch nicht:** Die Lampen eines Raums als Zigbee-Gruppe und die Schalter (Hue Smart Button, Hue Dimmschalter)
-  kommen mit 0.4.22, der Bewegungsmelder und das Licht im Flur danach. Farben wie Rot oder Grün stellt die App nicht
-  ein.
+  kommen mit 0.4.23, der Bewegungsmelder und das Licht im Flur mit 0.4.24.
 - **Protokoll:** Wann jemand das Licht schaltet, steht nur im
   [ausführlichen Protokoll](#protokoll-wenn-etwas-schiefgeht); wenn eine Lampe nicht antwortet, steht es immer drin.
 - **Nur simuliert geprüft:** mit nachgebauten Lampen in `tests/fake_mqtt.py` (`tests/test_light.py`) und in der Demo
   (`uebergabe/demo_server.py … licht`). Mit echten Lampen noch nicht.
 - **Schnittstelle:** ohne PIN `POST /api/rooms/<Raum>/light` (`{"on": true}` oder `false`), `POST
-  /api/rooms/<Raum>/light/dim` (`{"step": 1}` oder `-1`) und `POST /api/lights/<IEEE-Adresse>/switch` (`{"on": …}`);
-  mit PIN `PUT /api/lights/<IEEE-Adresse>/name` (`{"name": "…"}`, leer für keinen), `…/room` (`{"room": "<Raum>"}`,
-  `null` für keinen) und `…/color` (`{"color": "warm"}`, `"neutral"`, `"kalt"` oder `""` für wie zuletzt). In
-  `GET /api/state` steht `lights`: je Lampe `id`, `name`, `model`, `room`, `state`, `brightness` (in %), `dim`,
-  `colors`, `color`, `lost` und `heard`.
+  /api/rooms/<Raum>/light/dim` (`{"step": 1}` oder `-1`), `POST /api/lights/<IEEE-Adresse>/switch` (`{"on": …}`) und
+  `POST /api/lights/<IEEE-Adresse>/set` mit genau einem von `{"brightness": 1–100}`, `{"step": 1}` oder `-1`,
+  `{"kelvin": 2700}`, `{"white": "kerze"}` (`"warm"`, `"neutral"`, `"kalt"`, `"tag"`) und `{"hue": "blau"}`
+  (`"rot"`, `"orange"`, `"gelb"`, `"gruen"`, `"tuerkis"`, `"lila"`, `"pink"`); mit PIN `PUT
+  /api/lights/<IEEE-Adresse>/name` (`{"name": "…"}`, leer für keinen), `…/room` (`{"room": "<Raum>"}`, `null` für
+  keinen), `…/color` (`{"color": "warm"}`, die Namen wie bei `white`, oder `""` für wie zuletzt) und `…/level`
+  (`{"level": 40}` oder `null` für wie zuletzt). In `GET /api/state` steht `lights`: je Lampe `id`, `name`, `model`,
+  `room`, `state`, `brightness` (in %), `kelvin` (`null`, solange sie eine Farbe zeigt), `hue`, `dim`, `kelvins`
+  (ihr Bereich), `colors`, `hues` (kann Farben), `color`, `level`, `lost` und `heard`.
 
 ## Verlauf und Kosten
 
@@ -941,14 +961,15 @@ Leistungskurven – eine Wäsche mit Einweichpause, ein Trockner mit Knitterschu
 Zigbee-Steckdose, die nur Änderungen meldet, ein Update mitten in der Wäsche, eine Steckdose, die verstummt, ein
 Gerät, das nie ruht, und das „fertig“ mit OK. Wie die Waschmaschine oder der Trockner im echten Haushalt Strom ziehen,
 prüfen die Tests nicht. Das Licht prüft `tests/test_light.py` mit Lampen, die `tests/fake_mqtt.py` wie eine IKEA
-FLOALT, eine Innr und eine Hue nachbaut (ihre Farbbereiche sind erfunden) – auch eine Lampe ohne Strom und das
-Protokoll; wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht.
+FLOALT, eine Innr und eine Hue nachbaut (ihre Farbbereiche sind erfunden) – auch eine Lampe ohne Strom, eine, die ihre
+Helligkeit erst auf Nachfrage sagt, Helligkeit, Lichtfarbe und Farben je Lampe, „Beim Einschalten“ und das Protokoll;
+wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
-- Licht, Teil 2 (0.4.22): die Lampen eines Raums als Zigbee-Gruppe, die Schalter (Hue Smart Button, Hue
-  Dimmschalter); danach der Bewegungsmelder und das Licht im Flur mit einstellbaren Zeiten und Helligkeit.
+- Licht, Teil 2 (0.4.23): die Lampen eines Raums als Zigbee-Gruppe, die Schalter (Hue Smart Button, Hue
+  Dimmschalter); danach (0.4.24) der Bewegungsmelder und das Licht im Flur mit einstellbaren Zeiten und Helligkeit.
 - Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.

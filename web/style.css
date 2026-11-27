@@ -84,10 +84,6 @@ input[type="number"] { width: 72px; }
 .segmented button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .segmented button.active:disabled { opacity: 1; }
 .segmented-text { font-size: 13px; margin-top: 4px; }
-@media (max-width: 560px) {   /* the four light colours do not fit side by side on a phone: there they wrap, each its own button */
-  .segmented.chips { display: flex; flex-wrap: wrap; gap: 6px; border: 0; border-radius: 0; overflow: visible; }
-  .segmented.chips button, .segmented.chips button + button { border: 1px solid var(--line); border-radius: 10px; }
-}
 
 .plan-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
 .plan-row select { flex: 1; min-width: 140px; }
@@ -274,6 +270,46 @@ dd { margin: 0; word-break: break-word; }
 .tile-lights button { min-height: 44px; font-size: 16px; border-radius: 99px; border: 1.5px solid var(--pill-line);
                       padding: 6px 14px; touch-action: manipulation; }
 .light-set .step { color: var(--text); }
+.light-tune { flex: none; min-height: 44px; padding: 6px 14px; border-radius: 99px; border: 1.5px solid var(--pill-line);
+              background: var(--pill); font-size: 17px; white-space: nowrap; touch-action: manipulation; }
+/* „Einstellen ›“: each lamp of the room on its own – brightness, colour of light, colour */
+.light-sheet { max-width: 640px; }
+.lamp-panel { display: grid; gap: 14px; padding-top: 14px; border-top: 1.5px solid var(--line); }
+.lamp-head { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.lamp-head .dico svg { width: 26px; height: 26px; }
+.lamp-head .dname { margin: 0; font-size: 20px; font-weight: 500; overflow-wrap: anywhere; hyphens: auto; }
+.lamp-head .dname small { display: block; font-size: 15px; font-weight: 400; color: var(--muted); }
+.lamp-head .big-btn { flex: none; min-width: 150px; }
+.lamp-panel .dico.on { color: var(--lamp); }
+.lamp-panel .dico.on svg { fill: color-mix(in srgb, var(--lamp) 30%, transparent); }
+.lamp-row { display: grid; gap: 8px; }
+.lamp-label { font-size: 17px; color: var(--muted); }
+.lamp-control { display: grid; gap: 10px; }
+.lamp-range { width: 100%; height: 44px; margin: 0; padding: 0; border: 0; background: none; accent-color: var(--lamp);
+              cursor: pointer; }
+.range-ends { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center;
+              font-size: 15px; color: var(--muted); }
+.lamp-value { font-size: 15px; min-height: 1.2em; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.lamp-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 14px; border-radius: 99px;
+             border: 1.5px solid var(--pill-line); background: var(--pill); font-size: 17px; touch-action: manipulation; }
+.lamp-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.swatch { flex: none; width: 18px; height: 18px; border-radius: 50%; background: hsl(var(--hue) 90% 50%);
+          border: 1px solid rgba(0, 0, 0, .25); }
+.lamp-default { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+/* the same controls in Einrichtung › Geräte › Licht: smaller, like the rest of the setup */
+.device .lamp-control { gap: 6px; max-width: 420px; }
+.device .tile-set { grid-template-columns: auto auto auto; justify-content: start; gap: 8px; }
+.device .step { min-height: 40px; padding: 4px 12px; border-radius: 99px; }
+.device .step .sym { font-size: 20px; }
+.device .step .word { font-size: 14px; }
+.device .set-val { min-width: 64px; }
+.device .set-temp { font-size: 18px; }
+.device .lamp-range { height: 32px; }
+.device .range-ends, .device .lamp-value { font-size: 13px; }
+.device .chip-row { gap: 6px; }
+.device .lamp-chip { min-height: 34px; padding: 4px 12px; font-size: 14px; border-width: 1px; }
+.device .swatch { width: 14px; height: 14px; }
 .maker-steps { margin: 6px 0 0; padding-left: 18px; }
 .maker-steps li { margin: 3px 0; }
 .tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }

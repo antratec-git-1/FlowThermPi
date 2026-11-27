@@ -407,6 +407,8 @@ class FakeZ2M:
         self.plans: dict[str, dict] = {}    # ieee -> {group: {day: schedule}} – all three plans of the thermostat
         self.delay = 0.05                   # seconds until a command has reached the thermostat (real: about 2)
         self.asleep: set[str] = set()       # thermostats that answer nothing
+        self.unreported: dict[str, set[str]] = {}   # device -> values it has not said yet (an IKEA lamp its
+                                                    # brightness): left out of its state until a …/get asks for them
         self.commands: list[tuple[str, str, dict]] = []   # (ieee, "set" | "get", payload) as they came
         self.refused: list[str] = []        # why a command was refused (Zigbee2MQTT only logs it)
         self.requests: list[tuple[str, dict]] = []   # (what, body) of every bridge/request/<what> from the app
@@ -470,12 +472,15 @@ class FakeZ2M:
     def _is_plug(self, ieee: str) -> bool:
         return self._model(ieee) == PLUG_MODEL
 
-    def _values(self, ieee: str) -> None:
-        """The device's whole state, retained – as after every message from it."""
+    def _values(self, ieee: str, asked=()) -> None:
+        """The device's whole state, retained – as after every message from it; what it has not said yet (unreported)
+        only once a …/get asked for it."""
         with self.lock:
             state = self.states.setdefault(ieee, self._fresh(ieee))
             state["last_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
-            payload = dict(state)
+            hidden = self.unreported.get(ieee, set())
+            hidden.difference_update(asked)
+            payload = {k: v for k, v in state.items() if k not in hidden}
         self.broker.publish(f"{self.BASE}/{ieee}", payload, retain=True)
 
     def report(self, ieee: str, **values) -> None:
@@ -506,7 +511,7 @@ class FakeZ2M:
             return
         if ieee in self.asleep:
             return
-        later(self.delay, lambda: self._apply(ieee, body) if kind == "set" else self._values(ieee))
+        later(self.delay, lambda: self._apply(ieee, body) if kind == "set" else self._values(ieee, asked=body))
 
     def _apply_plug(self, ieee: str, body: dict) -> None:
         """What the S60ZBTPF's converters do with a set: state and power_on_behavior; switched off it measures 0 W."""
@@ -530,9 +535,12 @@ class FakeZ2M:
         self._values(ieee)
 
     def _apply_light(self, ieee: str, body: dict, device: dict) -> None:
-        """What the light converters do with a set: state, brightness (switches on; 0 off), brightness_step and
-        color_temp (within the lamp's range); transition is taken and ignored. Then the lamp's new state comes back."""
-        temp = next(f for f in device["definition"]["exposes"][0]["features"] if f["property"] == "color_temp")
+        """What the light converters do with a set: state, brightness (switches on; 0 off), brightness_step,
+        color_temp (within the lamp's range) and – a lamp with colours – color as hue and saturation; transition is
+        taken and ignored. Then the lamp's new state comes back, with what the set said."""
+        features = device["definition"]["exposes"][0]["features"]
+        temp = next(f for f in features if f["property"] == "color_temp")
+        colors = any(f["property"] == "color" for f in features)
         number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
         with self.lock:
             state = self.states.setdefault(ieee, light_state())
@@ -549,14 +557,18 @@ class FakeZ2M:
                 elif key == "color_temp" and number(value):
                     new["color_temp"] = min(max(round(value), temp["value_min"]), temp["value_max"])
                     new["color_mode"] = "color_temp"
+                elif key == "color" and colors and isinstance(value, dict) and number(value.get("hue")) \
+                        and number(value.get("saturation")):
+                    new["color"] = {"hue": value["hue"] % 360, "saturation": min(max(value["saturation"], 0), 100)}
+                    new["color_mode"] = "hs"
                 elif key != "transition":
                     self.refused.append(f"No converter available for '{key}'" if key not in
-                                        ("state", "brightness", "brightness_step", "color_temp")
-                                        else f"Invalid value {value} for {key}")
+                                        ("state", "brightness", "brightness_step", "color_temp", "color") or
+                                        (key == "color" and not colors) else f"Invalid value {value} for {key}")
                     return
             state.clear()
             state.update(new)
-        self._values(ieee)
+        self._values(ieee, asked=body)   # what it was told, Zigbee2MQTT knows
 
     def _apply(self, ieee: str, body: dict) -> None:
         """What the TRV-ZBT's converters do with a set: check each value, write it, then publish the state."""
