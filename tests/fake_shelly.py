@@ -4,8 +4,9 @@ FakeShelly answers "/shelly" and "/rpc/Shelly.GetStatus" – by default as a She
 longer lists. FakePill is a Shelly „The Pill“: it also answers "Pill.GetConfig" and "Shelly.GetComponents" and
 takes "Pill.SetConfig" and "Shelly.Reboot" as JSON-RPC frames on "POST /rpc". FakePlug is a plug with power metering
 (by default a Shelly Plug M Gen3), as Shelly's documentation describes it: "switch:0" in Shelly.GetStatus,
-"Switch.GetConfig", and "Switch.Set" / "Switch.SetConfig" on "POST /rpc". Every request is recorded in .requests as
-(method, path), every POST /rpc call in .calls as (method, params).
+"Switch.GetConfig", and "Switch.Set" / "Switch.SetConfig" / "Sys.SetConfig" (its name, which "/shelly" then reports)
+on "POST /rpc". Every request is recorded in .requests as (method, path), every POST /rpc call in .calls as
+(method, params).
 """
 from __future__ import annotations
 
@@ -222,6 +223,13 @@ class FakePlug(FakeShelly):
                 if state not in (None, "off", "on", "restore_last", "match_input"):
                     return 200, {**reply, "error": {"code": -103, "message": "Invalid argument 'initial_state'!"}}
                 self.initial_state = state or self.initial_state
+                return 200, {**reply, "result": {"restart_required": False}}
+            if name == "Sys.SetConfig":
+                device = (params.get("config") or {}).get("device")
+                if not isinstance(device, dict) or not isinstance(device.get("name", ""), (str, type(None))):
+                    return 200, {**reply, "error": {"code": -103, "message": "Invalid argument 'config'!"}}
+                if "name" in device:
+                    self.info["name"] = device["name"]
                 return 200, {**reply, "result": {"restart_required": False}}
             return 200, {**reply, "error": {"code": 404, "message": f"No handler for {name}"}}
         return super().answer(method, path, body)

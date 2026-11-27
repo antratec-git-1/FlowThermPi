@@ -43,7 +43,8 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
-  keinen Strom.“ **Steckdose einschalten** schaltet sie wieder ein (ohne PIN). Ausschalten kann die App sie nicht.
+  keinen Strom.“ **Steckdose einschalten** schaltet sie wieder ein (ohne PIN). Ausschalten lässt sie sich nur in der
+  Einrichtung (ab 0.4.18, *Geräte › Steckdosen* › **Schalten**, zum Testen).
 - **Fernhilfe erlauben** (ganz unten, wenn die [Fernwartung](#fernwartung-tailscale) eingerichtet ist): Dann lässt
   sich die App zwei Stunden lang aus der Ferne öffnen, oben steht „Fernhilfe ist an – bis 16:30 Uhr“ mit **Beenden**.
 - **Protokoll speichern** (ganz unten, klein, ohne PIN): Klappt etwas nicht, speichern die Bewohner damit eine Datei
@@ -90,7 +91,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
 - **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt und
   „heute … kWh“; an jeder Steckdose wählt man ihre Heizung (ab 0.4.15) oder – ohne Heizung – ihren Raum (ab 0.4.17)
-  und kann sie entfernen. **Viertelstunden ansehen** zeigt ihren Strom je Viertelstunde, auch als Tabelle für Excel
+  und kann sie entfernen. Ab 0.4.18 benennt **Ändern …** beim Namen sie um, und **Schalten** schaltet sie zum Testen
+  ein und aus. **Viertelstunden ansehen** zeigt ihren Strom je Viertelstunde, auch als Tabelle für Excel
   (ab 0.4.17, siehe [Strom der Steckdosen](#strom-der-steckdosen-in-viertelstunden)). Siehe
   [WLAN-Steckdosen](#wlan-steckdosen-mit-strommessung) und [Zigbee-Steckdosen](#zigbee-steckdosen-mit-strommessung).
 - **Gerät hinzufügen** (Tab „Geräte“, ab 0.4.15): ein Knopf **+ Gerät hinzufügen** für Heizung, Thermostat, Raumfühler
@@ -557,7 +559,11 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
   Ausreißer zählen nicht; zu sehen unter *Räume › Strom und Kosten*). **Übernehmen** trägt ihn als Leistung ein;
   gespeichert ist er erst mit **Speichern**.
 - **Ausgeschaltet:** Die Taste der Steckdose schaltet sie aus – dann hat die Heizung keinen Strom. Die Startseite
-  sagt das und hat **Steckdose einschalten** (ohne PIN). Die App selbst schaltet eine Steckdose nie aus.
+  sagt das und hat **Steckdose einschalten** (ohne PIN). Ausschalten kann man sie in der App nur unter *Geräte ›
+  Steckdosen* › **Schalten** (ab 0.4.18, zum Testen); gehört sie zu einer Heizung, fragt die App vorher nach.
+- **Name** (ab 0.4.18): *Geräte › Steckdosen* › Name › **Ändern …**. Der Name einer Zigbee-Steckdose steht nur in der
+  App (`data.json`, `plug_names`); ihr Name in Zigbee2MQTT bleibt, wie er ist. Leer gelassen heißt sie wieder
+  „Steckdose“ mit den letzten vier Zeichen ihrer Adresse. Wird sie im Zigbee-Netz entfernt, vergisst die App den Namen.
 - **Funk:** Eine Steckdose am Strom gibt das Zigbee-Signal weiter; Thermostate weiter weg erreichen den Pi dann
   besser.
 - **Bekannt** (Zigbee2MQTT, Stand 25.11.2026): Bei der S60ZBTPF kann der Leistungswert minutenlang hängen bleiben,
@@ -566,7 +572,9 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
 - **Schnittstelle:** `PUT /api/plugs/<Kennung>/heater` (`{"heater": "<Heizung>"}`, `null` für keine; mit PIN, ab
   0.4.15) ordnet eine Steckdose zu; `PUT /api/costs` nimmt dafür weiterhin auch `plugs`
   (`{"<Heizung>": "<IEEE-Adresse>"}`, `""` für keine); `POST /api/heaters/<id>/plug/on` schaltet die Steckdose einer Heizung ein (ohne PIN); in `GET /api/state` stehen
-  `plugs` und je Heizung `plug` (mit `id` und `kind`: `zigbee` oder `wifi`).
+  `plugs` und je Heizung `plug` (mit `id` und `kind`: `zigbee` oder `wifi`). Ab 0.4.18, beide mit PIN und für Zigbee-
+  wie WLAN-Steckdosen: `POST /api/plugs/<Kennung>/switch` (`{"on": true}` oder `false`) schaltet,
+  `PUT /api/plugs/<Kennung>/name` (`{"name": "…"}`, leer für keinen) benennt um.
 
 ## WLAN-Steckdosen mit Strommessung
 
@@ -591,19 +599,26 @@ Shelly-Steckdose im WLAN. Die App fragt sie direkt im Heimnetz (wie die Pill) �
   Namen aus der Shelly-App übernimmt die App beim nächsten Suchen, sonst nach höchstens 10 Minuten (`/shelly`, das
   auch eine Steckdose mit Passwort beantwortet). Suchen und Übernehmen lesen nur. **Entfernen …** nimmt sie wieder aus der App; die Steckdose selbst bleibt,
   wie sie ist – an oder aus.
+- **Name** (ab 0.4.18): *Geräte › Steckdosen* › Name › **Ändern …** schreibt den Namen in die Steckdose
+  (`Sys.SetConfig`) – die Shelly-App zeigt ihn dann auch. Leer gelassen löscht ihn dort; dann heißt sie wieder
+  „WLAN-Steckdose“ mit den letzten vier Zeichen ihrer Kennung.
 - **Zuordnen, Messen, Ausgeschaltet:** wie bei der Zigbee-Steckdose – die Heizung an der Steckdose wählen (*Geräte ›
   Steckdosen*); dabei stellt die App die Steckdose auf „nach Stromausfall an“. „heute … kWh“ rechnet die App aus dem
   Zähler der Steckdose (sein Stand bei der ersten Abfrage des Tages steht in `data.json`).
 - **Lesen:** alle 10 Sekunden (`Shelly.GetStatus`); die MAC-Adresse muss passen. Antwortet sie nicht mehr unter ihrer
   Adresse (der Router kann ihr eine neue geben), sucht die App sie höchstens alle 15 Minuten im Heimnetz und merkt sich
   die neue Adresse. Antwortet sie eine Minute lang nicht, steht das bei der Steckdose.
-- **Schreiben** nur zwei Dinge: `Switch.Set` mit „an“ (**Steckdose einschalten**) und `Switch.SetConfig` mit
-  `initial_state: on` (beim Speichern). Vorher prüft die App, dass unter der Adresse wirklich diese Steckdose antwortet.
+- **Schreiben** nur drei Dinge: `Switch.Set` (**Steckdose einschalten** auf der Startseite; ab 0.4.18 an und aus
+  unter *Geräte › Steckdosen* › **Schalten**), `Switch.SetConfig` mit `initial_state: on` (beim Speichern) und ab
+  0.4.18 `Sys.SetConfig` mit dem Namen. Vorher prüft die App, dass unter der Adresse wirklich diese Steckdose
+  antwortet.
 - **Nur simuliert geprüft:** Die Steckdose spielt `tests/fake_shelly.py` so, wie Shellys Dokumentation sie beschreibt.
-  Wie die echte Plug M Gen3 antwortet, zeigt sich erst am Gerät.
+  Wie die echte Plug M Gen3 antwortet, zeigt sich erst am Gerät. Umbenennen und Ausschalten (ab 0.4.18) sind am
+  echten Gerät noch nicht ausprobiert.
 - **Schnittstelle:** `POST /api/plugs/discover` sucht, `POST /api/plugs` (`{"plug": "<Kennung>"}`) übernimmt,
-  `DELETE /api/plugs/<Kennung>` entfernt, `PUT /api/plugs/<Kennung>/heater` ordnet zu (alle vier mit PIN); die
-  Kennung ist hier `shellyplugmg3-…`.
+  `DELETE /api/plugs/<Kennung>` entfernt, `PUT /api/plugs/<Kennung>/heater` ordnet zu, ab 0.4.18
+  `POST /api/plugs/<Kennung>/switch` schaltet und `PUT /api/plugs/<Kennung>/name` benennt um (alle sechs mit PIN);
+  die Kennung ist hier `shellyplugmg3-…`.
 
 ## Strom der Steckdosen in Viertelstunden
 

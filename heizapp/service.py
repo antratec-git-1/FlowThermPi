@@ -339,11 +339,12 @@ class Service:
 
     def forget_thermostat(self, ieee: str, result: dict | None = None) -> dict:
         """After „Entfernen“ in the Zigbee network: the app forgets the thermostat's name and room too – and a plug no
-        longer belongs to its heater or its room."""
+        longer belongs to its heater or its room and loses the name it was given."""
         heaters = self.store.data["heaters"]
         thermostat = bool(heaters.get(ieee, {}).get("zigbee"))
         owners = [hid for hid, meta in heaters.items() if meta.get("plug") == ieee]
-        placed = ieee in (self.store.data.get("plug_rooms") or {})
+        placed = any(ieee in (self.store.data.get(key) or {}) for key in ("plug_rooms", "plug_names"))
+        plug_name = self._plug_name(ieee)
         if thermostat or owners or placed:
             with self.store.edit() as d:
                 if thermostat:
@@ -351,11 +352,12 @@ class Service:
                 for hid in owners:
                     d["heaters"].get(hid, {}).pop("plug", None)
                 (d.get("plug_rooms") or {}).pop(ieee, None)
+                (d.get("plug_names") or {}).pop(ieee, None)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
             self._plug_samples.pop(hid, None)
-            log.info("%s (%s) gehört zu keiner Heizung mehr", self._plug_name(ieee), ieee)
+            log.info("%s (%s) gehört zu keiner Heizung mehr", plug_name, ieee)
         with self._restore_lock:
             self._restore.pop(ieee, None)
         self._sync_thermostats()
@@ -1968,10 +1970,11 @@ class Service:
     # plug (Shelly, e.g. Plug M Gen3, heizapp.shelly). The plug's tile in Geräte assigns it (set_plug_heater; Strom und
     # Kosten could until 0.4.14, PUT /api/costs still takes "plugs"). While the heater heats, the app notes
     # what the plug lets through – the typical value is the heater's measured power. If the plug is switched off (its
-    # button), the heater has no power: the tile says so and switches it on again. The app never switches a plug off.
-    # A plug's id is the IEEE address of a Zigbee plug („0x…“) or Shelly's device id of a WLAN plug („shellyplug…“).
-    # The WLAN plugs taken over from „Steckdosen suchen“ are in data.json under "plugs" (address, model, MAC and where
-    # its energy counter stood at the first reading of the day).
+    # button), the heater has no power: the tile says so and switches it on again. Off only from Geräte › Steckdosen,
+    # to test (switch_plug). A plug's id is the IEEE address of a Zigbee plug („0x…“) or Shelly's device id of a WLAN
+    # plug („shellyplug…“). The WLAN plugs taken over from „Steckdosen suchen“ are in data.json under "plugs" (address,
+    # model, MAC, its name in the Shelly app and where its energy counter stood at the first reading of the day); the
+    # names given to Zigbee plugs under "plug_names" (rename_plug).
     WIFI_PLUG_FRESH = 60.0   # seconds a WLAN plug's reading counts as current (the app reads it every round)
     PLUG_ERRORS = {"overtemp": "Die Steckdose ist zu heiß geworden und hat abgeschaltet.",
                    "overpower": "Die Steckdose hat abgeschaltet: Es floss mehr Strom, als sie erlaubt.",
@@ -1987,9 +1990,12 @@ class Service:
         return f"{'Steckdose' if cls._zigbee_plug_id(pid) else 'WLAN-Steckdose'} {pid[-4:].upper()}"
 
     def _plug_name(self, pid: str, data: dict | None = None) -> str:
-        """What the app calls a plug: a WLAN plug by its name in the Shelly app – without one (and a Zigbee plug)
-        „WLAN-Steckdose“ or „Steckdose“ with the last four characters of its id."""
-        meta = ((data if data is not None else self.store.data).get("plugs") or {}).get(pid) or {}
+        """What the app calls a plug: a WLAN plug by its name in the Shelly app, a Zigbee plug by the name given to it
+        in Geräte › Steckdosen – without one „WLAN-Steckdose“ or „Steckdose“ with the last four characters of its id."""
+        d = data if data is not None else self.store.data
+        if self._zigbee_plug_id(pid):
+            return _device_title((d.get("plug_names") or {}).get(pid)) or self._plug_default_name(pid)
+        meta = (d.get("plugs") or {}).get(pid) or {}
         return _device_title(meta.get("device_name")) or self._plug_default_name(pid)
 
     def _note_plug_name(self, pid: str, name) -> None:
@@ -2083,25 +2089,80 @@ class Service:
         return out
 
     def plug_on(self, heater_id: str) -> dict:
-        """„Einschalten“ on the tile: the plug gives the heater power again. The app never switches a plug off."""
+        """„Einschalten“ on the tile: the plug gives the heater power again. The start page never switches a plug off."""
         e = self._entry(heater_id)
-        pid, plug = self._assigned_plug(e)
+        pid, _ = self._assigned_plug(e)
         if pid is None:
             raise ActionError("Diese Heizung hängt an keiner Steckdose der App.", 409)
-        if self._zigbee_plug_id(pid):
-            if plug is None:
-                raise ActionError("Die Steckdose ist nicht (mehr) im Zigbee-Netz.", 409)
-            after = self.zigbee.send(pid, {"state": "ON"})
-            if after is None:
-                raise ActionError(self.zigbee.problem() or "Die Nachricht an die Steckdose ging nicht hinaus.", 503)
-            if self.zigbee.wait(pid, after, lambda v: v.get("state") == "ON", PLUG_ANSWER) is None:
-                raise ActionError("Die Steckdose hat nicht geantwortet. Bitte noch einmal versuchen – oder an der "
-                                  "Steckdose die Taste einmal drücken.", 504)
-        else:
-            self._wifi_switch_on(pid)
+        self._switch(pid, True)
         log.info("%s eingeschaltet – %s hat wieder Strom", self._plug_name(pid), self._who(e))
         return {"message": "Die Steckdose ist wieder an. Bis sich die Heizung meldet, kann es ein, zwei Minuten "
                            "dauern."}
+
+    def switch_plug(self, plug_id: str, body: dict) -> dict:
+        """Geräte › Steckdosen „Einschalten“ / „Ausschalten“ – to test a plug. Switched off, the AeroFlow behind it has no
+        power until the plug is on again: here, on the start page („Steckdose einschalten“) or at its button."""
+        on = body.get("on")
+        if not isinstance(on, bool):
+            raise ValueError("on muss true oder false sein")
+        data = self.store.snapshot()
+        if plug_id not in {p["id"] for p in self._plug_list(data)}:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        self._switch(plug_id, on)
+        name, heater = self._plug_name(plug_id), self._plug_place(plug_id, data)["heizung"]
+        e = next((x for x in self.entries if x.id == heater), None) if heater else None
+        log.info("%s in der Einrichtung %sgeschaltet%s", name, "ein" if on else "aus",
+                 f" – {self._who(e)} hat {'Strom' if on else 'keinen Strom'}" if e else "")
+        if on:
+            return {"message": f"{name} ist an."}
+        return {"message": f"{name} ist aus." + (f" {self._name(e)} hat jetzt keinen Strom, bis die Steckdose wieder "
+                                                 "an ist." if e else "")}
+
+    def _switch(self, pid: str, on: bool) -> None:
+        """Switch a plug on or off and wait until it reports it (ActionError if it does not)."""
+        if not self._zigbee_plug_id(pid):
+            self._wifi_switch(pid, on)
+            return
+        if (self.zigbee.plug(pid) if self.zigbee else None) is None:
+            raise ActionError("Die Steckdose ist nicht (mehr) im Zigbee-Netz.", 409)
+        want = "ON" if on else "OFF"
+        after = self.zigbee.send(pid, {"state": want})
+        if after is None:
+            raise ActionError(self.zigbee.problem() or "Die Nachricht an die Steckdose ging nicht hinaus.", 503)
+        if self.zigbee.wait(pid, after, lambda v: v.get("state") == want, PLUG_ANSWER) is None:
+            raise ActionError("Die Steckdose hat nicht geantwortet. Bitte noch einmal versuchen – oder an der "
+                              "Steckdose die Taste einmal drücken.", 504)
+
+    def rename_plug(self, plug_id: str, body: dict) -> dict:
+        """Geräte › Steckdosen „Name ändern“. A WLAN plug keeps its name itself – the one the Shelly app shows: the app
+        writes it there (Sys.SetConfig) and reads it back. A Zigbee plug's name stays in the app (data.json
+        "plug_names"); its name in Zigbee2MQTT stays as it is. Empty: the plug is called as without a name again
+        („Steckdose 00CC“)."""
+        raw = body.get("name")
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError("name muss Text sein")
+        name = _device_title(raw)
+        data = self.store.snapshot()
+        if plug_id not in {p["id"] for p in self._plug_list(data)}:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        if self._zigbee_plug_id(plug_id):
+            before = self._plug_name(plug_id, data)
+            with self.store.edit() as d:
+                if name:
+                    d.setdefault("plug_names", {})[plug_id] = name
+                else:
+                    (d.get("plug_names") or {}).pop(plug_id, None)
+            if self._plug_name(plug_id) != before:
+                log.info("%s heißt jetzt „%s“", before, self._plug_name(plug_id))
+        else:
+            host, port = self._wifi_address(plug_id)
+            try:
+                shelly.set_name(host, port, name)
+            except shelly.ShellyError as exc:
+                raise ActionError(str(exc), exc.status) from None
+            info = shelly.probe(host, port, timeout=2.0, kinds=("plug",))   # what the plug really keeps
+            self._note_plug_name(plug_id, info.get("name") if info and str(info.get("id")) == plug_id else name)
+        return {"message": f"Die Steckdose heißt jetzt „{self._plug_name(plug_id)}“."}
 
     def _plugs_from(self, body: dict) -> dict[str, str | None]:
         """The plugs of PUT /api/costs ({heater: plug id or ""}), checked: only AeroFlow heaters, only plugs the app
@@ -2435,16 +2496,16 @@ class Service:
                               "WLAN?", 504)
         return host, port
 
-    def _wifi_switch_on(self, pid: str) -> None:
+    def _wifi_switch(self, pid: str, on: bool) -> None:
         host, port = self._wifi_address(pid)
         try:
-            shelly.switch_on(host, port)
+            shelly.switch(host, port, on)
         except shelly.ShellyError as exc:
             raise ActionError(str(exc), exc.status) from None
         r = shelly.plug_reading(host, port, timeout=2.0)
-        if r.get("on") is not True:
-            raise ActionError("Die Steckdose hat nicht eingeschaltet. Bitte noch einmal versuchen – oder an der "
-                              "Steckdose die Taste einmal drücken.", 504)
+        if r.get("on") is not on:
+            raise ActionError(f"Die Steckdose hat nicht {'ein' if on else 'aus'}geschaltet. Bitte noch einmal versuchen "
+                              "– oder an der Steckdose die Taste einmal drücken.", 504)
         self._note_wifi_plug(pid, {**r, "address": host if port == shelly.PORT else f"{host}:{port}"})
 
     def _wifi_on_after_outage(self, pid: str) -> bool:

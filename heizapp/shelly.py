@@ -15,8 +15,9 @@ Shelly's documentation was the source (11/2026); no real plug has been tried yet
 Search and reading only send GET requests: "GET /shelly" (Shelly's identification, never password protected) to
 every address of the home network, then "Shelly.GetStatus", "Pill.GetConfig" and "Shelly.GetComponents" to each
 Pill, "Shelly.GetStatus" and "Switch.GetConfig" to each plug. Only set_mode() and restart() write to a Pill
-("Pill.SetConfig", "Shelly.Reboot"), only switch_on() and set_on_after_outage() to a plug ("Switch.Set" on – never
-off –, "Switch.SetConfig" initial_state „on“) – and only when someone asks for it in the app.
+("Pill.SetConfig", "Shelly.Reboot"), only switch(), set_on_after_outage() and set_name() to a plug ("Switch.Set" –
+off only from Geräte › Steckdosen, to test –, "Switch.SetConfig" initial_state „on“, "Sys.SetConfig" its name) – and
+only when someone asks for it in the app.
 Standard library only.
 """
 from __future__ import annotations
@@ -38,7 +39,8 @@ PLUG_MODELS = {"S3PL-30110EU": "Shelly Plug M Gen3", "S3PL-00112EU": "Shelly Plu
 PLUG_PREFIXES = ("SNPL-", "S3PL-", "S4PL-")   # Plus, Gen3, Gen4 plugs; Gen1 ("SHPLG-") speaks another language
 # what the words of an error say, per device
 WORDS = {"pill": ("Die Pill", "Ist sie am Netzteil und im WLAN?", "einrichten"),
-         "plug": ("Die Steckdose", "Ist sie eingesteckt und im WLAN?", "schalten")}
+         "plug": ("Die Steckdose", "Ist sie eingesteckt und im WLAN?", "schalten"),
+         "plug-name": ("Die Steckdose", "Ist sie eingesteckt und im WLAN?", "umbenennen")}
 
 
 class ShellyError(Exception):
@@ -253,9 +255,16 @@ def restart(host: str, port: int, timeout: float = 5.0) -> None:
     _rpc(host, port, "Shelly.Reboot", None, timeout)
 
 
-def switch_on(host: str, port: int, timeout: float = 5.0) -> None:
-    """The plug lets the power through again. (The app never switches a plug off.)"""
-    _rpc(host, port, "Switch.Set", {"id": 0, "on": True}, timeout, device="plug")
+def switch(host: str, port: int, on: bool, timeout: float = 5.0) -> None:
+    """The plug lets the power through (on) or not. Off only from Geräte › Steckdosen, to test – the start page only
+    switches a plug on again."""
+    _rpc(host, port, "Switch.Set", {"id": 0, "on": bool(on)}, timeout, device="plug")
+
+
+def set_name(host: str, port: int, name: str | None, timeout: float = 5.0) -> None:
+    """The plug's own name – the one the Shelly app shows and Shelly's identification ("/shelly") reports. None: no
+    name (the app then calls it „WLAN-Steckdose“ with the end of its id)."""
+    _rpc(host, port, "Sys.SetConfig", {"config": {"device": {"name": name}}}, timeout, device="plug-name")
 
 
 def after_outage(host: str, port: int, timeout: float = 3.0) -> str | None:

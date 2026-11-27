@@ -1,6 +1,6 @@
 """Tests for the WLAN plugs with power metering (Shelly, e.g. Plug M Gen3): found by the search, taken over, assigned
 to an AeroFlow at the plug (Geräte › Steckdosen; until 0.4.14 under Strom und Kosten, which PUT /api/costs still takes),
-measuring while it heats, switched on again from the tile.
+measuring while it heats, switched on again from the tile, switched on and off and renamed in Geräte › Steckdosen.
 
 The plugs are played by tests/fake_shelly.py – as Shelly's documentation describes them –, the heaters by
 tests/fake_heater.py; nothing real is reached. How the real plug reports is to be checked on the device.
@@ -296,7 +296,73 @@ class ApiTest(Base):
         self.assertTrue(self.plug.on)
         h = next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == AERO)
         self.assertEqual(h["plug"]["state"], "ON")   # at once, not only after the next round
-        self.assertNotIn(("Switch.Set", {"id": 0, "on": False}), self.plug.calls)   # the app never switches off
+        self.assertNotIn(("Switch.Set", {"id": 0, "on": False}), self.plug.calls)   # the tile never switches off
+
+    def test_switching_a_wifi_plug_off_and_on_in_the_setup(self):
+        self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
+        self.call("POST", "/api/plugs", {"plug": PLUG})
+        self.call("PUT", f"/api/plugs/{PLUG}/heater", {"heater": AERO})
+        answer = self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False})
+        self.assertEqual(answer["message"], "Küche ist aus. Heat4U-911001 hat jetzt keinen Strom, bis die Steckdose "
+                                            "wieder an ist.")
+        self.assertEqual(self.plug.calls[-1], ("Switch.Set", {"id": 0, "on": False}))
+        self.assertFalse(self.plug.on)
+        h = next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == AERO)
+        self.assertEqual(h["plug"]["state"], "OFF")   # at once: the start page offers „Steckdose einschalten“
+        self.assertEqual(self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": True})["message"], "Küche ist an.")
+        self.assertEqual(self.plug.calls[-1], ("Switch.Set", {"id": 0, "on": True}))
+        self.assertTrue(self.plug.on)
+        self.call("PUT", f"/api/plugs/{PLUG}/heater", {"heater": None})
+        self.assertEqual(self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False})["message"], "Küche ist aus.")
+        self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": "aus"}, expect=400)
+        self.call("POST", f"/api/plugs/{SPARE}/switch", {"on": False}, expect=404)   # found, but not taken over
+        self.assertEqual(self.spare.calls, [])
+        self.call("PUT", "/api/setup/pin", {"pin": "1234"})
+        for method, path in [("POST", f"/api/plugs/{PLUG}/switch"), ("PUT", f"/api/plugs/{PLUG}/name")]:
+            self.assertTrue(self.call(method, path, {"on": True, "name": "x"}, expect=403)["pin_required"])
+        self.assertFalse(self.plug.on)
+
+    def test_a_wifi_plug_that_does_not_switch(self):
+        self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
+        self.call("POST", "/api/plugs", {"plug": PLUG})
+        with mock.patch("heizapp.service.shelly.switch"):   # the plug takes the command, but stays on
+            answer = self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False}, expect=504)
+        self.assertEqual(answer["error"], "Die Steckdose hat nicht ausgeschaltet. Bitte noch einmal versuchen – oder an "
+                                          "der Steckdose die Taste einmal drücken.")
+        self.plug.close()
+        self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False}, expect=504)
+
+    def test_renaming_a_wifi_plug(self):
+        self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
+        self.call("POST", "/api/plugs", {"plug": PLUG})
+        answer = self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": "  Werkstatt\n hinten "})
+        self.assertEqual(answer["message"], "Die Steckdose heißt jetzt „Werkstatt hinten“.")
+        self.assertEqual(self.plug.calls[-1], ("Sys.SetConfig", {"config": {"device": {"name": "Werkstatt hinten"}}}))
+        self.assertEqual(self.plug.info["name"], "Werkstatt hinten")   # in the plug: the Shelly app shows it too
+        self.assertEqual(self.saved()[PLUG]["device_name"], "Werkstatt hinten")
+        self.assertEqual([p["name"] for p in self.call("GET", "/api/state")["plugs"]], ["Werkstatt hinten"])
+        self.service._plug_names_read.clear()
+        self.service.poll_all()   # the name read back from the plug every ten minutes: the same
+        self.assertEqual(self.saved()[PLUG]["device_name"], "Werkstatt hinten")
+        answer = self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": ""})   # no name: as without one
+        self.assertEqual(answer["message"], "Die Steckdose heißt jetzt „WLAN-Steckdose 0001“.")
+        self.assertEqual(self.plug.calls[-1], ("Sys.SetConfig", {"config": {"device": {"name": None}}}))
+        self.assertIsNone(self.plug.info["name"])
+        self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": 7}, expect=400)
+        self.call("PUT", f"/api/plugs/{SPARE}/name", {"name": "Keller"}, expect=404)   # found, but not taken over
+        self.assertEqual(self.spare.calls, [])
+        self.plug.close()
+        self.assertEqual(self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": "Keller"}, expect=504)["error"],
+                         "Die Steckdose antwortet nicht unter ihrer letzten Adresse. Ist sie eingesteckt und im WLAN?")
+
+    def test_a_wifi_plug_that_refuses_its_name(self):
+        self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})
+        self.call("POST", "/api/plugs", {"plug": PLUG})
+        self.plug.password = True   # a password set in the Shelly app since it was taken over
+        answer = self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": "Keller"}, expect=409)
+        self.assertEqual(answer["error"], "Die Steckdose ist mit einem Passwort geschützt – die App kann sie nicht "
+                                          "umbenennen.")
+        self.assertEqual(self.saved()[PLUG]["device_name"], "Küche")
 
     def test_a_wifi_plug_that_does_not_answer(self):
         self.call("POST", "/api/plugs/discover", {"network": "192.168.5"})

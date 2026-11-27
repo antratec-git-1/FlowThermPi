@@ -1434,7 +1434,10 @@ function renderDialog() {
     <h2 id="dialog-title">${esc(d.title)}</h2>
     ${d.text ? `<p>${esc(d.text)}</p>` : ""}
     ${d.html || ""}
-    ${d.fields.map(f => `<label>${esc(f.label)}<input data-dialog-field="${esc(f.id)}" type="password" inputmode="numeric"
+    ${d.fields.map(f => f.type === "text"   // a name – else a PIN
+      ? `<label>${esc(f.label)}<input data-dialog-field="${esc(f.id)}" type="text" value="${esc(f.value || "")}"
+        placeholder="${esc(f.placeholder || "")}" maxlength="${f.maxlength || 40}" autocomplete="off" ${d.busy ? "disabled" : ""}></label>`
+      : `<label>${esc(f.label)}<input data-dialog-field="${esc(f.id)}" type="password" inputmode="numeric"
       pattern="[0-9]*" maxlength="8" autocomplete="off" ${d.busy ? "disabled" : ""}></label>`).join("")}
     <p class="dialog-error" ${d.error ? "" : "hidden"}>${esc(d.error)}</p>
     <div class="dialog-buttons">${d.buttons.map((b, i) =>
@@ -1443,7 +1446,7 @@ function renderDialog() {
   linkAddresses(el);
   el.hidden = false;
   const first = el.querySelector("input");
-  if (first) first.focus();
+  if (first) { first.focus(); if (first.type === "text") first.select(); }
 }
 
 function closeDialog(value) {
@@ -1460,6 +1463,7 @@ async function dialogButton(i) {
   if (b.value !== "submit" || !d.onSubmit) return closeDialog(b.value);
   const values = {};
   for (const input of document.querySelectorAll("#dialog [data-dialog-field]")) values[input.dataset.dialogField] = input.value.trim();
+  for (const f of d.fields) if (f.type === "text") f.value = values[f.id];   // drawn again (busy, error): what was typed stays
   d.busy = true;
   d.error = "";
   renderDialog();
@@ -2125,6 +2129,13 @@ function plugRoomHTML(p) {   // at a heater: the heater's room – without one: 
     plugRoomOptions(p.room)}</select>`;
 }
 
+function plugSwitchHTML(p) {   // on and off, to test – the start page only switches a plug on again
+  if (busy.has("plugswitch:" + p.id)) return '<span class="muted">schaltet …</span>';
+  const on = '<button class="small" data-action="plug-switch" data-on="1">Einschalten</button>';
+  const off = '<button class="small" data-action="plug-switch" data-on="0">Ausschalten</button>';
+  return p.state === "ON" ? `an ${off}` : p.state === "OFF" ? `aus ${on}` : `${on} ${off}`;
+}
+
 function plugTileHTML(p) {
   const removing = busy.has("plug:" + p.id) || zigbeeNetPending === p.id;
   const z = p.kind === "zigbee" ? zigbeeDevice(p.id) : null;
@@ -2136,10 +2147,12 @@ function plugTileHTML(p) {
       ${radioTag(p.kind === "zigbee")}<span class="muted">${esc(plugFacts(p) || (p.found ? "" : "noch kein Messwert"))}</span>
       <button class="small" data-action="plug-remove" ${removing ? "disabled" : ""}>${removing ? "entferne …" : "Entfernen …"}</button></div>
     <dl>
+      <dt>Name</dt><dd>${esc(p.name)} <button class="small" data-action="plug-rename">Ändern …</button></dd>
       <dt>Heizung</dt><dd>${aeroflows ? `<select data-action="plug-heater" aria-label="Heizung an ${esc(p.name)}" ${
         busy.has("plugheater:" + p.id) ? "disabled" : ""}>${plugHeaterOptions(p.id, p.heater)}</select>`
         : '<span class="muted">noch keine AeroFlow-Heizung in der App</span>'}</dd>
       <dt>Raum</dt><dd>${plugRoomHTML(p)}</dd>
+      <dt>Schalten</dt><dd>${plugSwitchHTML(p)}</dd>
       <dt>Strom</dt><dd><button class="small" data-action="plug-energy">Viertelstunden ansehen</button></dd>
       <dt>Gerät</dt><dd>${esc(device.filter(Boolean).join(" · ") || "–")}</dd>
       ${p.kind === "zigbee" ? `<dt>Zigbee-Adresse</dt><dd>${esc(p.id)}</dd>` : ""}
@@ -2184,7 +2197,8 @@ function plugsCardHTML() {
     <p class="hint">Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen, wie viel Strom sie
       wirklich zieht. Zu welcher Heizung eine Steckdose gehört – oder ohne Heizung, in welchem Raum sie ist –, wählst du
       hier bei der Steckdose. „Viertelstunden ansehen“ zeigt, wie viel Strom sie in jeder Viertelstunde gezählt hat. Ist
-      die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein – ausschalten tut die App eine Steckdose nie.</p>
+      die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein. Ausschalten geht nur hier
+      bei „Schalten“ – zum Testen.</p>
     ${plugs.map(plugTileHTML).join("")}
     ${plugs.length ? "" : '<p class="empty">Noch keine Steckdose in der App.</p>'}
   </article>`;
@@ -2272,6 +2286,37 @@ async function setPlugRoom(id, room, quiet = false) {   // a plug without a heat
   invalidate();
   await refresh();
   return ok;
+}
+
+async function switchPlug(id, on) {   // „Einschalten“ / „Ausschalten“ at the plug – to test it
+  const p = (state.plugs || []).find(x => x.id === id);
+  if (!p) return;
+  const owner = p.heater && state.heaters.find(h => h.id === p.heater);
+  if (!on && owner) {
+    const yes = await ask({ title: "Steckdose ausschalten?",
+      text: `${owner.name} hat dann keinen Strom und heizt nicht, bis die Steckdose wieder an ist. Einschalten kannst du ` +
+        "sie hier, auf der Startseite oder an ihrer Taste.",
+      buttons: [{ label: "Abbrechen", value: null }, { label: "Ausschalten", value: "yes", cls: "danger-solid" }] });
+    if (!yes) return;
+  }
+  act("plugswitch:" + id, async () => toast((await api("POST", `api/plugs/${encodeURIComponent(id)}/switch`, { on })).message));
+}
+
+async function renamePlug(id) {   // „Ändern …“ at the name: a WLAN plug keeps it itself, a Zigbee plug's stays in the app
+  const p = (state.plugs || []).find(x => x.id === id);
+  if (!p) return;
+  const wifi = p.kind !== "zigbee";
+  const fallback = `${wifi ? "WLAN-Steckdose" : "Steckdose"} ${id.slice(-4).toUpperCase()}`;   // as the server names it
+  const done = await ask({ title: "Steckdose umbenennen",
+    text: (wifi ? "Die App speichert den Namen in der Steckdose – die Shelly-App zeigt ihn dann auch. " : "") +
+      `Leer lassen: „${fallback}“.`,
+    fields: [{ id: "name", label: "Name", type: "text", value: p.name === fallback ? "" : p.name, placeholder: fallback }],
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Speichern", value: "submit", cls: "primary" }],
+    onSubmit: async v => {
+      try { toast((await api("PUT", `api/plugs/${encodeURIComponent(id)}/name`, { name: v.name })).message); return null; }
+      catch (e) { return e.message; }
+    } });
+  if (done) { invalidate(); await refresh(); }
 }
 
 async function removePlug(id) {   // „Entfernen …“: a WLAN plug the app forgets, a Zigbee plug the Pi unpairs – the plug stays as it is
@@ -4293,6 +4338,8 @@ document.addEventListener("click", e => {
     case "plug-search": return plugSearch && plugSearch.running ? undefined : runPlugSearch();
     case "plug-adopt": return adoptPlug(t.dataset.plug);
     case "plug-remove": return removePlug(t.closest("[data-plug]").dataset.plug);
+    case "plug-rename": return renamePlug(t.closest("[data-plug]").dataset.plug);
+    case "plug-switch": return switchPlug(t.closest("[data-plug]").dataset.plug, t.dataset.on === "1");
     case "plug-energy": return openPlugEnergy(t.closest("[data-plug]").dataset.plug);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));

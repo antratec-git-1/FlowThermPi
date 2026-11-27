@@ -82,6 +82,8 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("DELETE", rf"/api/plugs/{i}", lambda m, b, r: s.delete_wifi_plug(m[1]), SETUP),
         ("PUT", rf"/api/plugs/{i}/heater", lambda m, b, r: s.set_plug_heater(m[1], b), SETUP),   # „gehört zu“
         ("PUT", rf"/api/plugs/{i}/room", lambda m, b, r: s.set_plug_room(m[1], b), SETUP),   # a room, no heater
+        ("PUT", rf"/api/plugs/{i}/name", lambda m, b, r: s.rename_plug(m[1], b), SETUP),
+        ("POST", rf"/api/plugs/{i}/switch", lambda m, b, r: s.switch_plug(m[1], b), SETUP),   # on and off, to test
         ("GET", rf"/api/plugs/{i}/energy/(\d{{4}}-\d{{2}}-\d{{2}})",   # „Strom“: one day in quarter hours
          lambda m, b, r: s.energy_view(m[1], m[2]), SETUP),
         ("GET", r"/api/energy/(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})",   # „Als Tabelle“: all plugs, for Excel

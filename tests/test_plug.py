@@ -1,6 +1,6 @@
 """Tests for the Zigbee plugs with power metering (like the SONOFF S60ZBTPF): recognised in the Zigbee network, assigned
 to an AeroFlow at the plug (Geräte › Steckdosen; until 0.4.14 under Strom und Kosten, which PUT /api/costs still takes),
-measuring while it heats, switched on again from the tile.
+measuring while it heats, switched on again from the tile, switched on and off and renamed in Geräte › Steckdosen.
 
 Mosquitto and Zigbee2MQTT are played by tests/fake_mqtt.py, the AeroFlow heaters by tests/fake_heater.py – nothing real
 is reached. How often and how exactly the real plug reports is to be checked on the device.
@@ -309,6 +309,44 @@ class ApiTest(Base):
         self.assertEqual(answer["error"], "Die Steckdose hat nicht geantwortet. Bitte noch einmal versuchen – oder an der "
                                           "Steckdose die Taste einmal drücken.")
 
+    def test_switching_a_plug_off_and_on_in_the_setup(self):
+        self.assign({AERO: PLUG})
+        answer = self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False})
+        self.assertEqual(answer["message"], "Steckdose 00CC ist aus. Heat4U-911001 hat jetzt keinen Strom, bis die "
+                                            "Steckdose wieder an ist.")
+        self.assertEqual(self.sets()[-1], {"state": "OFF"})
+        self.assertEqual(self.net.plug(PLUG)["state"], "OFF")
+        h = next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == AERO)
+        self.assertEqual(h["plug"]["state"], "OFF")   # the start page offers „Steckdose einschalten“
+        self.assertEqual(self.call("POST", f"/api/plugs/{SPARE}/switch", {"on": False})["message"], "Steckdose 00DD ist aus.")
+        self.assertEqual(self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": True})["message"], "Steckdose 00CC ist an.")
+        self.assertEqual(self.sets()[-1], {"state": "ON"})
+        self.assertEqual(self.net.plug(PLUG)["state"], "ON")
+        self.call("POST", f"/api/plugs/{TRV}/switch", {"on": False}, expect=404)   # a thermostat is no plug
+        self.call("POST", f"/api/plugs/{PLUG}/switch", {}, expect=400)
+        self.z2m.asleep.add(PLUG)
+        with mock.patch("heizapp.service.PLUG_ANSWER", 0.3):
+            answer = self.call("POST", f"/api/plugs/{PLUG}/switch", {"on": False}, expect=504)
+        self.assertEqual(answer["error"], "Die Steckdose hat nicht geantwortet. Bitte noch einmal versuchen – oder an der "
+                                          "Steckdose die Taste einmal drücken.")
+
+    def test_renaming_a_plug(self):
+        self.assign({AERO: PLUG})
+        until(lambda: self.sets())   # its „on after a power cut“ has arrived
+        commands = len(self.z2m.commands)
+        answer = self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": "Infrarot Bad"})
+        self.assertEqual(answer["message"], "Die Steckdose heißt jetzt „Infrarot Bad“.")
+        self.assertEqual(self.service.store.data["plug_names"], {PLUG: "Infrarot Bad"})
+        state = self.call("GET", "/api/state")
+        self.assertEqual([p["name"] for p in state["plugs"]], ["Infrarot Bad", "Steckdose 00DD"])
+        self.assertEqual(next(h for h in state["heaters"] if h["id"] == AERO)["plug"]["name"], "Infrarot Bad")
+        self.assertEqual(len(self.z2m.commands), commands)   # nothing to the plug: its name stays in the app
+        self.assertEqual(self.call("PUT", f"/api/plugs/{PLUG}/name", {})["message"],
+                         "Die Steckdose heißt jetzt „Steckdose 00CC“.")
+        self.assertEqual(self.service.store.data["plug_names"], {})
+        self.call("PUT", f"/api/plugs/{TRV}/name", {"name": "Bad"}, expect=404)
+        self.call("PUT", f"/api/plugs/{PLUG}/name", {"name": ["Bad"]}, expect=400)
+
     def test_removing_the_plug_in_the_zigbee_network(self):
         self.assign({AERO: PLUG})
         answer = self.call("POST", f"/api/zigbee/devices/{PLUG}/remove", {"force": False})
@@ -323,6 +361,11 @@ class ApiTest(Base):
         self.assertEqual(self.service.store.data["plug_rooms"], {SPARE: room})
         self.call("POST", f"/api/zigbee/devices/{SPARE}/remove", {"force": False})
         self.assertEqual(self.service.store.data["plug_rooms"], {})
+
+    def test_a_removed_plug_forgets_its_name_too(self):
+        self.service.rename_plug(SPARE, {"name": "Werkstatt"})
+        self.call("POST", f"/api/zigbee/devices/{SPARE}/remove", {"force": False})
+        self.assertEqual(self.service.store.data["plug_names"], {})
 
 
 if __name__ == "__main__":
