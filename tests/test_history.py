@@ -270,14 +270,14 @@ class ServiceTest(unittest.TestCase):
     def test_today_on_the_tiles_with_energy_and_costs(self):
         self.record()
         state = self.call("GET", "/api/state")
-        self.assertEqual(state["costs"], {"price_ct": None, "show": False})   # ab Werk: no price, not on the start page
+        self.assertEqual(state["costs"], {"price_ct": None, "show": False, "show_power": False})   # ab Werk: nothing on the start page
         self.assertEqual(state["history"]["first_day"], self.today.isoformat())
         self.assertEqual(state["rooms"][0]["today"]["heat_s"], 5390)
         self.assertIsNone(state["rooms"][0]["today"]["kwh"])                 # no power set yet
         self.call("PUT", "/api/costs", {"price_ct": "32,5", "show": True, "powers": {"91110001": "1300", "92220002": ""}})
         state = self.call("GET", "/api/state")
         names = {h["id"]: h["name"] for h in state["heaters"]}
-        self.assertEqual(state["costs"], {"price_ct": 32.5, "show": True})
+        self.assertEqual(state["costs"], {"price_ct": 32.5, "show": True, "show_power": False})
         self.assertEqual(state["rooms"][0]["today"], {"heat_s": 5390, "kwh": 1.3, "eur": 0.42,
                                                       "power_missing": [names["92220002"]]})
         by_id = {h["id"]: h for h in state["heaters"]}
@@ -345,10 +345,10 @@ class ServiceTest(unittest.TestCase):
         self.call("PUT", "/api/costs", {"powers": ["91110001"]}, expect=400)
         self.assertNotIn("settings", self.data())   # nothing saved by a refused one
         self.call("PUT", "/api/costs", {"price_ct": " 29,9 ", "powers": {"91110001": " 1300 "}})
-        self.assertEqual(self.data()["settings"]["costs"], {"price_ct": 29.9, "show": False})
+        self.assertEqual(self.data()["settings"]["costs"], {"price_ct": 29.9, "show": False, "show_power": False})
         self.assertEqual(self.data()["heaters"]["91110001"]["power_w"], 1300)
         self.call("PUT", "/api/costs", {"price_ct": "", "powers": {"91110001": ""}})
-        self.assertEqual(self.data()["settings"]["costs"], {"price_ct": None, "show": False})
+        self.assertEqual(self.data()["settings"]["costs"], {"price_ct": None, "show": False, "show_power": False})
         self.assertNotIn("power_w", self.data()["heaters"]["91110001"])
 
     def test_costs_need_the_setup_the_history_does_not(self):

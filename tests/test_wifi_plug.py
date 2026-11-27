@@ -122,7 +122,7 @@ class SearchTest(Base):
         self.assertEqual(self.service.state()["plugs"], [
             {"id": PLUG, "kind": "wifi", "name": "Küche", "model": "Shelly Plug M Gen3", "heater": None,
              "found": True, "state": "ON", "power": 0.0, "energy_today": 0.0, "address": f"127.0.0.1:{self.plug.port}",
-             "device_name": "Küche", "room": None, "error": None}])
+             "device_name": "Küche", "room": None, "appliance": "sonstiges", "error": None}])
         self.assertEqual(self.plug.calls, [])   # taking over only reads
         self.assertEqual(self.service.find_plugs("192.168.5")["plugs"][0]["known"], True)
         with self.assertRaises(ActionError) as ctx:

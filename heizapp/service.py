@@ -343,7 +343,7 @@ class Service:
         heaters = self.store.data["heaters"]
         thermostat = bool(heaters.get(ieee, {}).get("zigbee"))
         owners = [hid for hid, meta in heaters.items() if meta.get("plug") == ieee]
-        placed = any(ieee in (self.store.data.get(key) or {}) for key in ("plug_rooms", "plug_names"))
+        placed = any(ieee in (self.store.data.get(key) or {}) for key in ("plug_rooms", "plug_names", "plug_appliances"))
         plug_name = self._plug_name(ieee)
         if thermostat or owners or placed:
             with self.store.edit() as d:
@@ -353,6 +353,7 @@ class Service:
                     d["heaters"].get(hid, {}).pop("plug", None)
                 (d.get("plug_rooms") or {}).pop(ieee, None)
                 (d.get("plug_names") or {}).pop(ieee, None)
+                (d.get("plug_appliances") or {}).pop(ieee, None)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
@@ -1842,6 +1843,15 @@ class Service:
     # ------------------------------------------------------------------ Verlauf und Kosten (heizapp.history)
     MAX_PRICE_CT = 200   # ct/kWh accepted as electricity price
     MAX_POWER_W = 5000   # W accepted for a heater (the FlexiSmart Pro models have 650 to 2450 W)
+    # „Angeschlossen“ at a plug (Geräte › Steckdosen): what hangs on it – ab Werk „Sonstiges“
+    APPLIANCES = {"heizung": "Heizung", "waschmaschine": "Waschmaschine", "trockner": "Trockner",
+                  "kuehlschrank": "Kühlschrank", "gefriergeraet": "Gefriergerät", "klimaanlage": "Klimaanlage",
+                  "sonstiges": "Sonstiges"}
+    NO_STANDBY = frozenset({"heizung", "kuehlschrank", "gefriergeraet"})   # their lowest power is no standby
+    STANDBY_DAYS = 7      # Strom: the standby of a plug from its quarter hours of the last seven days …
+    STANDBY_MIN = 96      # … once there is at least a day of them
+    STANDBY_SHARE = 0.1   # the standby: the power a plug stays at or below in a tenth of its quarter hours
+    COMPARE_SHARE = 0.9   # a comparison only when the plug was measured in nine of ten quarter hours of both times
 
     def _record(self, now: float | None = None) -> None:
         """What every device shows now, for its five-minute entry – only with a clock that is right."""
@@ -1887,7 +1897,11 @@ class Service:
     @staticmethod
     def _costs(data: dict) -> dict:
         c = (data.get("settings") or {}).get("costs") or {}
-        return {"price_ct": c.get("price_ct"), "show": bool(c.get("show"))}
+        return {"price_ct": c.get("price_ct"), "show": bool(c.get("show")), "show_power": bool(c.get("show_power"))}
+
+    @staticmethod
+    def _eur(wh: float, price_ct) -> float | None:
+        return round(wh / 1000 * price_ct / 100, 2) if price_ct else None
 
     def _heater_infos(self, data: dict, ids: list[str]) -> list[dict]:
         """Name, kind and power of heaters, for heizapp.history.totals."""
@@ -1903,7 +1917,8 @@ class Service:
         return {"heat_s": tot["heat_s"], "kwh": tot["kwh"], "eur": tot["eur"], "power_missing": tot["power_missing"]}
 
     def set_costs(self, body: dict) -> dict:
-        """Strom und Kosten: the electricity price, whether residents see energy and costs, the power of heaters."""
+        """Strom und Kosten: the electricity price, whether residents see the heaters' costs (show) and what the plugs
+        measured today (show_power) on the start page, the power of heaters."""
         price = body.get("price_ct")
         if price in ("", None):
             price = None
@@ -1934,10 +1949,11 @@ class Service:
                 raise ActionError(f"{self._name(e)}: Die Leistung muss zwischen 1 und {self.MAX_POWER_W} W liegen.")
             clean[e.id] = watts
         show = bool(body.get("show"))
+        show_power = bool(body["show_power"]) if "show_power" in body else self._costs(self.store.data)["show_power"]
         plugs = self._plugs_from(body)
         changed = {i: p for i, p in plugs.items() if self.store.data["heaters"].get(i, {}).get("plug") != p}
         with self.store.edit() as d:
-            d.setdefault("settings", {})["costs"] = {"price_ct": price, "show": show}
+            d.setdefault("settings", {})["costs"] = {"price_ct": price, "show": show, "show_power": show_power}
             for heater_id, watts in clean.items():
                 meta = d["heaters"].setdefault(heater_id, self._new_meta(self._entry(heater_id)))
                 if watts is None:
@@ -1950,8 +1966,10 @@ class Service:
                     meta.pop("plug", None)
                 else:
                     meta["plug"] = ieee
-        log.info("Strom und Kosten gespeichert: Strompreis %s, auf der Startseite %s%s",
+                    d.setdefault("plug_appliances", {})[ieee] = "heizung"
+        log.info("Strom und Kosten gespeichert: Strompreis %s, auf der Startseite Heizkosten %s, Strom heute %s%s",
                  f"{_num(price, '.2f')} ct/kWh" if price is not None else "keiner", "ja" if show else "nein",
+                 "ja" if show_power else "nein",
                  "".join(f", {self._name(self._entry(i))} {f'{w} W' if w else 'ohne Leistung'}" for i, w in clean.items()))
         for heater_id, ieee in changed.items():   # what it measured belongs to the plug it had
             self._plug_samples.pop(heater_id, None)
@@ -2071,6 +2089,13 @@ class Service:
             return ", Steckdose aus"
         return f", Steckdose {plug['power']:.0f} W" if plug["power"] is not None else ", Steckdose an"
 
+    def _appliance(self, pid: str, data: dict) -> str:
+        """What hangs on a plug („Angeschlossen“): at a plug that gives an AeroFlow power, a heater."""
+        if any(meta.get("plug") == pid for meta in data["heaters"].values()):
+            return "heizung"
+        kind = (data.get("plug_appliances") or {}).get(pid)
+        return kind if kind in self.APPLIANCES else "sonstiges"
+
     def _plug_list(self, data: dict) -> list[dict]:
         """Every plug the app knows, for Strom und Kosten and Geräte › Steckdosen: the Zigbee ones in the network, the
         WLAN ones taken over from the search – with what they report and which heater each one belongs to."""
@@ -2084,7 +2109,7 @@ class Service:
             out.append({"id": pid, "kind": kind, "name": self._plug_name(pid, data), "model": model, "heater": owners.get(pid),
                         "found": kind == "zigbee" or bool(v), "state": v.get("state"), "power": v.get("power"),
                         "energy_today": v.get("energy_today"), "address": address, "device_name": device_name,
-                        "room": self._plug_place(pid, data)["raum"],
+                        "room": self._plug_place(pid, data)["raum"], "appliance": self._appliance(pid, data),
                         "error": None if kind == "zigbee" else self._wifi_plug_error(pid)})
         return out
 
@@ -2218,6 +2243,8 @@ class Service:
             if e is not None:
                 d["heaters"].setdefault(e.id, self._new_meta(e))["plug"] = plug_id
                 (d.get("plug_rooms") or {}).pop(plug_id, None)   # it is in the heater's room now
+            if e is not None or owners:   # chosen at „Heizung“: a heater hangs on it – also after „– keine –“
+                d.setdefault("plug_appliances", {})[plug_id] = "heizung"
         who = {x.id: self._who(x) for x in self.entries}
         for hid in owners:   # what a heater measured belongs to the plug it had
             if e is None or hid != e.id:
@@ -2260,6 +2287,27 @@ class Service:
         room = data["rooms"][room_id]["name"]
         log.info("%s ist jetzt im Raum %s", name, room)
         return {"message": f"{name} ist jetzt im Raum „{room}“."}
+
+    def set_plug_appliance(self, plug_id: str, body: dict) -> dict:
+        """Geräte › Steckdosen: what hangs on a plug („Angeschlossen“) – Strom shows what suits it. A plug that gives
+        an AeroFlow power stays at „Heizung“."""
+        kind = body.get("appliance")
+        if kind not in self.APPLIANCES:
+            raise ActionError("Diese Geräteart kennt die App nicht.")
+        data = self.store.snapshot()
+        if plug_id not in {p["id"] for p in self._plug_list(data)}:
+            raise ActionError("Diese Steckdose kennt die App nicht (mehr).", 404)
+        name = self._plug_name(plug_id, data)
+        if kind != "heizung" and self._plug_place(plug_id, data)["heizung"]:
+            raise ActionError(f"An {name} hängt eine AeroFlow-Heizung. Für ein anderes Gerät zuerst bei „Heizung“ "
+                              "„– keine –“ wählen.", 409)
+        with self.store.edit() as d:
+            if kind == "sonstiges":
+                (d.get("plug_appliances") or {}).pop(plug_id, None)
+            else:
+                d.setdefault("plug_appliances", {})[plug_id] = kind
+        log.info("%s: angeschlossen ist jetzt %s", name, self.APPLIANCES[kind])
+        return {"message": f"{name}: angeschlossen ist jetzt „{self.APPLIANCES[kind]}“."}
 
     def _plugs_on_after_outage(self, plugs: dict[str, str | None]) -> list[str]:
         """Each plug a heater hangs on comes on again after a power cut (Zigbee: power_on_behavior „on“, Shelly:
@@ -2474,6 +2522,7 @@ class Service:
         with self.store.edit() as d:
             d["plugs"].pop(pid, None)
             (d.get("plug_rooms") or {}).pop(pid, None)
+            (d.get("plug_appliances") or {}).pop(pid, None)
             for hid in owners:
                 d["heaters"].get(hid, {}).pop("plug", None)
         for hid in owners:
@@ -2602,6 +2651,109 @@ class Service:
         return (f"strom-steckdosen-{span}.csv", energy.table(rows, self.energy.local, names, rooms, heaters),
                 "text/csv; charset=utf-8")
 
+    # ------------------------------------------------------------------ Strom: what every plug measured
+    def power_view(self, span: str, day_text: str) -> dict:
+        """Strom: what every plug measured in a day, a week (Monday to Sunday) or a month – a week or a month with the
+        one before (while it runs: up to the same clock time), and the standby of every plug (heizapp.energy)."""
+        if span not in ("day", "week", "month"):
+            raise ActionError("Unbekannter Zeitraum", 404)
+        try:
+            day = date.fromisoformat(day_text)
+        except ValueError:
+            raise ActionError("Unbekanntes Datum") from None
+        data, now, local_now = self.store.snapshot(), time.time(), self.now()
+        today = local_now.date()
+        first, last = _span_of(span, day)
+        before_first, before_last = _span_of(span, first - timedelta(days=1))
+        start, end = self.history.moment(first), self.history.moment(last, 24)
+        before_start, before_end = self.history.moment(before_first), self.history.moment(before_last, 24)
+        running = first <= today <= last
+        cut, before_cut = end, before_end
+        if running:   # up to now – and the time before up to the same clock time (a shorter month: to its end)
+            cut = now
+            before_cut = min(before_end, self._stamp(_midnight(before_first) + (local_now - _midnight(first))))
+        rows =self.energy.rows_between(before_first, last) if first <= today else {}
+        since = now - self.STANDBY_DAYS * 86400
+        recent = rows if before_first <= self.energy.local(since).date() and last >= today \
+            else self.energy.rows_between(self.energy.local(since).date(), today)
+        plugs = {p["id"] for p in self._plug_list(data)}
+        price = self._costs(data)["price_ct"]
+        compare = span != "day"
+        quarters, before_quarters = _quarters(start, cut), _quarters(before_start, before_cut)
+        devices, all_compared = [], True
+        for pid in sorted(plugs | set(rows)):
+            by_t = rows.get(pid, {})
+            wh, n = _part(by_t, start, cut)
+            before_wh, before_n = _part(by_t, before_start, before_cut)
+            if pid not in plugs and not n:
+                continue   # removed meanwhile: only while it measured in this time
+            compared = compare and n >= self.COMPARE_SHARE * quarters and before_n >= self.COMPARE_SHARE * before_quarters
+            if (n or before_n) and not compared:
+                all_compared = False
+            appliance = self._appliance(pid, data)
+            standby = None if appliance in self.NO_STANDBY else self._standby(recent.get(pid, {}), since, now)
+            place = self._plug_place(pid, data)
+            devices.append({
+                "id": pid, "name": self._plug_name(pid, data), "appliance": appliance, "known": pid in plugs,
+                "room": data["rooms"][place["raum"]]["name"] if place["raum"] else None,
+                "heater": self._heater_title(place["heizung"], data),
+                "wh": round(wh, 1) if n else None, "eur": self._eur(wh, price) if n else None,
+                "before_wh": round(before_wh, 1) if compared else None,
+                "standby_w": standby, "standby_eur_year": None if standby is None else self._eur(standby * 8760, price)})
+        devices.sort(key=lambda x: (x["wh"] is None, -(x["wh"] or 0), x["name"].lower()))
+        measured = [x for x in devices if x["wh"] is not None]
+        total = sum(x["wh"] for x in measured)
+        first_day = self.energy.first_day()
+        return {"span": span, "first": first.isoformat(), "last": last.isoformat(),
+                "label": self._span_label(span, first, today), "dates": _span_dates(span, first, last),
+                "running": running, "now": now, "tz": getattr(self.tz, "key", None),
+                "before": {"label": "Woche davor" if span == "week" else self._month_label(before_first, today),
+                           "cut": before_cut if running else None} if compare else None,
+                "prev": before_first.isoformat() if first_day and first_day <= before_last else None,
+                "next": (last + timedelta(days=1)).isoformat() if last < today else None,
+                "price_ct": price, "devices": devices,
+                "total": {"wh": round(total, 1) if measured else None, "eur": self._eur(total, price) if measured else None,
+                          "before_wh": round(sum(x["before_wh"] for x in measured), 1)
+                          if compare and measured and all_compared else None},
+                "standby_days": self.STANDBY_DAYS, "first_day": first_day.isoformat() if first_day else None,
+                "recording": self.energy.active}
+
+    def _standby(self, by_t: dict[int, dict], since: float, now: float) -> float | None:
+        """The standby of a plug: the power it stays at or below in a tenth of its finished quarter hours since `since`
+        (W) – None with less than a day of them."""
+        powers = sorted(row["wh"] * 3600 / energy.SLOT for t, row in by_t.items() if t >= since and t + energy.SLOT <= now)
+        if len(powers) < self.STANDBY_MIN:
+            return None
+        return round(powers[int(len(powers) * self.STANDBY_SHARE)], 1)
+
+    def _stamp(self, local: datetime) -> float:   # seconds since 1970 of a local wall-clock time
+        return local.replace(tzinfo=self.tz).timestamp()
+
+    def _span_label(self, span: str, first: date, today: date) -> str:
+        if span == "day":
+            return self.history.label(first, today)
+        if span == "month":
+            return self._month_label(first, today)
+        monday = today - timedelta(days=today.weekday())
+        return ("Diese Woche" if first == monday else "Letzte Woche" if first == monday - timedelta(days=7)
+                else _span_dates(span, first, first + timedelta(days=6)))
+
+    @staticmethod
+    def _month_label(first: date, today: date) -> str:   # „November“, another year „November 2025“
+        name = history.MONTH_NAMES[first.month - 1]
+        return name if first.year == today.year else f"{name} {first.year}"
+
+    def _power_today(self, data: dict, plugs: list[dict]) -> dict | None:
+        """„Strom heute“ on the start page – only with its switch (Strom › Strom und Kosten): what the plugs measured
+        today."""
+        costs = self._costs(data)
+        if not costs["show_power"] or not plugs:
+            return None
+        totals = self.energy.day_totals(self.now().date())
+        wh = sum(totals.values())
+        return {"wh": round(wh, 1) if totals else None, "eur": self._eur(wh, costs["price_ct"]) if totals else None,
+                "plugs": len(totals)}
+
     # ------------------------------------------------------------------ snapshot for the UI
     def state(self) -> dict:
         self._sync_thermostats()
@@ -2635,9 +2787,10 @@ class Service:
             })
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
+        plugs = self._plug_list(data)
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
-                "costs": self._costs(data), "plugs": self._plug_list(data),
+                "costs": self._costs(data), "plugs": plugs, "power_today": self._power_today(data, plugs),
                 "history": {"recording": self.history.active,
                             "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,
@@ -2690,3 +2843,34 @@ class Service:
                         last_seen=self._iso(info.pop("heard")) or view["last_seen"], restore=self._restore_view(e.id),
                         **info)
         return view
+
+
+
+# ---------------------------------------------------------------------- Strom: periods
+def _span_of(span: str, day: date) -> tuple[date, date]:
+    """The first and the last day of the day, the week (Monday to Sunday) or the month that day is in."""
+    if span == "day":
+        return day, day
+    if span == "week":
+        first = day - timedelta(days=day.weekday())
+        return first, first + timedelta(days=6)
+    first = day.replace(day=1)
+    return first, (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+
+def _span_dates(span: str, first: date, last: date) -> str | None:   # a week: „23.11. – 29.11.2026“
+    return f"{first:%d.%m.} – {last:%d.%m.%Y}" if span == "week" else None
+
+
+def _midnight(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day)
+
+
+def _quarters(start: float, end: float) -> int:   # quarter hours from start to end, the one begun included
+    return max(1, int(-(-(end - start) // energy.SLOT)))
+
+
+def _part(by_t: dict[int, dict], start: float, end: float) -> tuple[float, int]:
+    """Wh of the quarter hours from start to end, and how many of them have values."""
+    hits = [row["wh"] for t, row in by_t.items() if start <= t < end]
+    return sum(hits), len(hits)

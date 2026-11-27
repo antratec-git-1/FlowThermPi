@@ -40,6 +40,9 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   gibt. Mit ‹ › geht es zu den Tagen davor; ein Tipp auf die Kurve zeigt die Werte dieser fünf Minuten, „Stunde für
   Stunde“ dasselbe als Tabelle. Strom und Kosten („etwa 0,90 €“) stehen nur dabei, wenn sie in der Einrichtung
   eingeschaltet sind – siehe [Verlauf und Kosten](#verlauf-und-kosten).
+- **Strom heute** (ab 0.4.19, nur wenn in der Einrichtung eingeschaltet – ab Werk aus): unter den Kacheln eine Zeile
+  „Strom heute 4,2 kWh · etwa 1,30 € · gemessen an 3 Steckdosen“ – was alle
+  [Steckdosen mit Strommessung](#strom-was-jedes-gerät-braucht) heute gezählt haben.
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -69,9 +72,13 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat. Ab 0.4.12 mit
   Symbol vor jedem Gerät (der Heizkörper ist warm gefärbt, solange er heizt, und rot ohne Verbindung) und unter jeder
   Heizung der Abweichung zum Fühler.
-- **Strom und Kosten** (Tab „Räume“, ganz unten, ab 0.4.13): einen Strompreis für den Haushalt (ct/kWh) und die
-  Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter zeigt Strom und Kosten auch
-  auf der Startseite (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
+- **Strom** (Tab, ab 0.4.19): was jedes Gerät an einer Steckdose mit Strommessung braucht und kostet – Tag, Woche
+  oder Monat, mit der Woche bzw. dem Monat davor, dazu die Bereitschaft (Standby) jedes Geräts. Siehe
+  [Strom: was jedes Gerät braucht](#strom-was-jedes-gerät-braucht).
+- **Strom und Kosten** (ab 0.4.13 im Tab „Räume“, ab 0.4.19 im Tab „Strom“, jeweils ganz unten): einen Strompreis für
+  den Haushalt (ct/kWh) und die Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter
+  zeigt Strom und Kosten der Heizungen auch auf der Startseite (ab Werk aus), ab 0.4.19 ein zweiter „Strom heute“ der
+  Steckdosen (ab Werk aus). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
   **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Hängt eine AeroFlow an einer Steckdose mit
   Strommessung ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung), ab
   0.4.14), steht hier, was sie misst, und **Übernehmen** trägt die beim Heizen gemessene Leistung ein. Welche
@@ -90,15 +97,16 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
   seines Raums – so sieht man, ob eine Heizung kalibriert werden sollte. Ein **Kalibrierlauf** (zum Beispiel einen Tag
   lang) schlägt dann je Heizung die passende Korrektur vor. Siehe [Raumfühler: Shelly Pill](#raumfühler-shelly-pill).
 - **Steckdosen** (Tab „Geräte“ → „Steckdosen“, ab 0.4.14): alle Steckdosen mit Strommessung mit an/aus, Watt und
-  „heute … kWh“; an jeder Steckdose wählt man ihre Heizung (ab 0.4.15) oder – ohne Heizung – ihren Raum (ab 0.4.17)
-  und kann sie entfernen. Ab 0.4.18 benennt **Ändern …** beim Namen sie um, und **Schalten** schaltet sie zum Testen
+  „heute … kWh“; an jeder Steckdose wählt man, was an ihr hängt (**Angeschlossen**, ab 0.4.19), ihre Heizung (ab 0.4.15)
+  oder – ohne Heizung – ihren Raum (ab 0.4.17) und kann sie entfernen. Ab 0.4.18 benennt **Ändern …** beim Namen sie um, und **Schalten** schaltet sie zum Testen
   ein und aus. **Viertelstunden ansehen** zeigt ihren Strom je Viertelstunde, auch als Tabelle für Excel
   (ab 0.4.17, siehe [Strom der Steckdosen](#strom-der-steckdosen-in-viertelstunden)). Siehe
   [WLAN-Steckdosen](#wlan-steckdosen-mit-strommessung) und [Zigbee-Steckdosen](#zigbee-steckdosen-mit-strommessung).
 - **Gerät hinzufügen** (Tab „Geräte“, ab 0.4.15): ein Knopf **+ Gerät hinzufügen** für Heizung, Thermostat, Raumfühler
   und Steckdose, in vier Schritten: *Was?* · *So geht's* (eine kurze Anleitung; die App sucht dabei selbst – im WLAN,
   über Zigbee oder bei einer Steckdose in beidem) · *Gefunden* (**Übernehmen**; ein Zigbee-Gerät meldet sich von
-  selbst) · *Wohin?* (der Raum, bei einer Steckdose ihre Heizung oder – ohne Heizung – ihr Raum). Eine AeroFlow lässt
+  selbst) · *Wohin?* (der Raum, bei einer Steckdose ab 0.4.19 erst, was an ihr hängt, dann ihre Heizung oder – ohne
+  Heizung – ihr Raum). Eine AeroFlow lässt
   sich weiter von Hand mit
   Adresse und Token eintragen. Jedes Gerät trägt das Schild „WLAN“ oder „Zigbee“; Raum, Heizung, Firmware und
   **Entfernen …** stehen direkt beim Gerät.
@@ -548,7 +556,7 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
   vier Zeichen ihrer Adresse und steht unter *Geräte › Steckdosen* – mit an/aus, Watt, „heute … kWh“ und ihrer
   Heizung. Eine Steckdose ist keine Heizung; bei den Heizungen steht sie nicht.
 - **Zuordnen:** im letzten Schritt „Wohin?“ oder später an der Steckdose unter *Geräte › Steckdosen* die Heizung
-  wählen (bis 0.4.14 unter *Räume › Strom und Kosten*). Nur AeroFlow-Heizungen, jede Steckdose höchstens bei einer
+  wählen (bis 0.4.14 unter *Räume › Strom und Kosten*; ab 0.4.19 bei „Angeschlossen“ erst „Heizung“). Nur AeroFlow-Heizungen, jede Steckdose höchstens bei einer
   Heizung und jede Heizung an höchstens einer Steckdose. Dabei stellt die App die Steckdose so ein, dass sie nach einem
   Stromausfall wieder angeht – sonst bliebe die Heizung kalt. Ist sie gerade nicht zu erreichen, sagt die App das;
   dann die Heizung später noch einmal wählen. Ab 0.4.17 kann eine Steckdose ohne Heizung auch nur einem Raum gehören
@@ -556,7 +564,7 @@ misst, was die Heizung wirklich zieht. Das geht nur bei Heizungen mit Stecker, n
 - **Messen:** Solange die Heizung heizt und die Steckdose mehr als 50 W durchlässt, merkt sich die App alle
   10 Sekunden den Wert (höchstens die letzte Stunde Heizen, nur im Speicher – nach einem Neustart misst sie neu).
   Nach einer Minute Heizen steht unter der Heizung „Beim Heizen gemessen: etwa … W“ (der mittlere Wert, einzelne
-  Ausreißer zählen nicht; zu sehen unter *Räume › Strom und Kosten*). **Übernehmen** trägt ihn als Leistung ein;
+  Ausreißer zählen nicht; zu sehen unter *Strom › Strom und Kosten*, bis 0.4.18 unter *Räume*). **Übernehmen** trägt ihn als Leistung ein;
   gespeichert ist er erst mit **Speichern**.
 - **Ausgeschaltet:** Die Taste der Steckdose schaltet sie aus – dann hat die Heizung keinen Strom. Die Startseite
   sagt das und hat **Steckdose einschalten** (ohne PIN). Ausschalten kann man sie in der App nur unter *Geräte ›
@@ -652,6 +660,37 @@ geflossen ist – ob an ihr eine Heizung hängt oder ein anderes Gerät.
 - **Schnittstelle** (alle mit PIN): `GET /api/plugs/<Kennung>/energy/JJJJ-MM-TT` (ein Tag in Viertelstunden),
   `GET /api/energy/JJJJ-MM-TT/JJJJ-MM-TT` (die CSV-Datei, alle Steckdosen, höchstens 366 Tage),
   `PUT /api/plugs/<Kennung>/room` (`{"room": "<Raum>"}`, `null` für keinen; nur ohne Heizung).
+
+## Strom: was jedes Gerät braucht
+
+Ab 0.4.19. Der Tab **Strom** in der Einrichtung zeigt, was jedes Gerät an einer Steckdose mit Strommessung braucht und
+kostet – aus den [Viertelstunden](#strom-der-steckdosen-in-viertelstunden), die die App ohnehin mitschreibt.
+
+- **Was hängt dran:** An jeder Steckdose (*Geräte › Steckdosen* und im Schritt „Wohin?“) steht **Angeschlossen**:
+  Heizung, Waschmaschine, Trockner, Kühlschrank, Gefriergerät, Klimaanlage oder Sonstiges (ab Werk). Hängt eine
+  AeroFlow daran, ist es eine Heizung; die AeroFlow wählt man darunter bei „Heizung“. Für ein anderes Gerät dort erst
+  „– keine –“ wählen. Gespeichert in `data.json` unter `plug_appliances`; „Sonstiges“ wird nicht gespeichert.
+- **Tag · Woche · Monat:** je Gerät kWh und „etwa … €“ (mit eingetragenem Strompreis) und ein Balken, das größte oben;
+  darunter „Zusammen“. Mit ‹ › die Zeit davor und danach. Die Woche geht von Montag bis Sonntag. Ein Tipp auf ein
+  Gerät öffnet seine Viertelstunden. Gezählt ist nur, was durch die Steckdosen fließt – nicht der ganze Haushalt.
+- **Vergleich** (Woche und Monat): mit der Woche bzw. dem Monat davor, „Woche davor 2,4 kWh · 26 % mehr“. Solange die
+  Woche oder der Monat noch läuft, nur bis zur gleichen Uhrzeit davor (beim Monat höchstens bis zu dessen Ende). Nur
+  wenn die Steckdose beide Male in mindestens 9 von 10 Viertelstunden gemessen hat – eine neue Steckdose oder ein
+  Pi, der Tage aus war, gäbe sonst falsche Prozente. „Zusammen“ wird nur verglichen, wenn jedes Gerät verglichen wird.
+- **Bereitschaft (Standby):** was ein Gerät auch dann zieht, wenn es nichts tut – der Wert, unter dem es in einem
+  Zehntel der Viertelstunden der letzten 7 Tage lag (Durchschnitt der Viertelstunde), erst nach einem Tag Messung.
+  Dazu, was das rund um die Uhr im Jahr macht (W × 8,76 kWh, mit Strompreis in €). Nicht bei Heizung, Kühlschrank und
+  Gefriergerät – deren niedrigster Wert ist keine Bereitschaft. Die Auflösung ist 0,4 W (0,1 Wh je Viertelstunde).
+- **Strom heute auf der Startseite:** *Strom › Strom und Kosten* › „„Strom heute“ der Steckdosen auch auf der
+  Startseite zeigen“ (ab Werk aus). Die Zeile zählt alle Steckdosen, die heute gemessen haben.
+- **Nur simuliert geprüft:** mit erfundenen Zählerständen (`tests/test_power.py`) und in der Demo mit einer
+  erfundenen Waschmaschine und einem Trockner (`uebergabe/demo_server.py … strom`). Am echten Gerät noch nicht.
+- **Schnittstelle** (mit PIN): `PUT /api/plugs/<Kennung>/appliance` (`{"appliance": "waschmaschine"}`; `heizung`,
+  `trockner`, `kuehlschrank`, `gefriergeraet`, `klimaanlage`, `sonstiges`; 409, wenn eine AeroFlow daran hängt und es
+  keine Heizung sein soll), `GET /api/power/<day|week|month>/JJJJ-MM-TT` (der Zeitraum mit diesem Tag: je Gerät `wh`,
+  `eur`, `before_wh`, `standby_w`, `standby_eur_year`; dazu `total`, `prev`, `next`). `PUT /api/costs` nimmt
+  `show_power`; in `GET /api/state` stehen je Steckdose `appliance` und `power_today` (`null`, solange der Schalter aus
+  ist).
 
 ## Verlauf und Kosten
 
@@ -801,7 +840,10 @@ Steckdosen spielt `tests/fake_mqtt.py` wie eine SONOFF S60ZBTPF (`tests/test_plu
 `tests/fake_shelly.py` wie eine Shelly Plug M Gen3 – auch eine mit Passwort und eine Steckdosenleiste
 (`tests/test_wifi_plug.py`); wie oft und wie genau die echten melden, prüfen die Tests nicht. Den Strom in
 Viertelstunden prüft `tests/test_energy.py` mit erfundenen Zählerständen – auch Neustart, Lücken, zurückspringende
-Zähler und die Datei für Excel.
+Zähler und die Datei für Excel. Den Tab „Strom“ prüft `tests/test_power.py` mit erfundenen Viertelstunden – eine
+laufende Woche mit der Woche davor, ein kürzerer Monat, eine Steckdose, die erst seit gestern misst (kein Vergleich),
+Bereitschaft und „Strom heute“. Wie die Waschmaschine oder der Trockner im echten Haushalt Strom ziehen, prüfen die
+Tests nicht.
 
 ## Ideen für später
 
@@ -809,6 +851,8 @@ Zähler und die Datei für Excel.
 - Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.
+- Strom, Teil 2: erkennen, wann Waschmaschine oder Trockner fertig sind; ein Wächter für Kühlschrank und
+  Gefriergerät; später die Spülmaschine und der Stromzähler des Hauses.
 - Heizungen zusätzlich in Apple Home einbinden.
 
 ## Lizenz

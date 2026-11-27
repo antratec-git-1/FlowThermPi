@@ -68,6 +68,7 @@ class PlugEnergy:
         self._warned = False
         self._said: dict[str, str] = {}           # id -> what the protocol said last about this plug's meter
         self._first: date | None = self._first_in_files()
+        self._day: tuple[date, dict[str, float]] | None = None   # day_totals: one day's Wh per plug in the files
 
     # ------------------------------------------------------------------ time
     def local(self, t: float) -> datetime:
@@ -191,6 +192,11 @@ class PlugEnergy:
         if self._waiting:
             first = self.local(min(row["t"] for row in self._waiting)).date()
             self._first = min(self._first, first) if self._first else first
+        if self._day is not None:   # what just went into the files: into the day kept for day_totals as well
+            start, end = self.moment(self._day[0]), self.moment(self._day[0] + timedelta(days=1))
+            for row in self._waiting:
+                if start <= row["t"] < end:
+                    self._day[1][row["id"]] = self._day[1].get(row["id"], 0.0) + row["wh"]
         self._waiting = []
 
     def _save_marks(self) -> None:
@@ -260,6 +266,30 @@ class PlugEnergy:
                 if keep(row):
                     _merge(rows.setdefault(row["id"], {}), row)
         return rows
+
+    def day_totals(self, day: date) -> dict[str, float]:
+        """id -> Wh of one local day, for „Strom heute“ on the start page (asked every few seconds): the same sum as
+        rows_between, but the file is read once a day – what is written later is added as it goes in."""
+        start, end = self.moment(day), self.moment(day + timedelta(days=1))
+        with self._lock:
+            if self._day is None or self._day[0] != day:
+                kept: dict[str, float] = {}
+                path = os.path.join(self.folder, f"{day:%Y-%m}.csv")
+                try:
+                    with open(path, encoding="utf-8", newline="") as fh:
+                        for row in filter(None, map(_parse, csv.reader(fh))):
+                            if start <= row["t"] < end:
+                                kept[row["id"]] = kept.get(row["id"], 0.0) + row["wh"]
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:   # kept empty for the day: the warning comes once, not every few seconds
+                    log.warning("Strom der Steckdosen: %s nicht lesbar: %s", path, exc)
+                self._day = (day, kept)
+            totals = dict(self._day[1])
+            for row in self._waiting + [_row(e) for e in self._open.values()]:
+                if start <= row["t"] < end:
+                    totals[row["id"]] = totals.get(row["id"], 0.0) + row["wh"]
+        return {ident: round(wh, 1) for ident, wh in totals.items()}
 
     def _first_in_files(self) -> date | None:
         try:

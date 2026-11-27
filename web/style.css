@@ -292,6 +292,31 @@ dd { margin: 0; word-break: break-word; }
                 padding: 8px 14px; border: 0; border-radius: 14px; background: var(--pill); font-size: 17px; text-align: left;
                 touch-action: manipulation; }
 .tile-history .go { color: var(--primary); font-weight: 600; white-space: nowrap; }
+/* „Strom“: one bar per device – one colour, the amount; the numbers stay in ink. The biggest first. */
+.power-nav { margin-bottom: 6px; }
+.day-label small { display: block; font-size: 14px; font-weight: 400; color: var(--muted); }
+.power-list, .standby-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.power-row { display: grid; grid-template-columns: minmax(9em, 1fr) auto; gap: 2px 12px; align-items: baseline; width: 100%;
+             padding: 10px 12px; border: 0; border-radius: 12px; background: var(--bg); text-align: left; font-size: 15px;
+             touch-action: manipulation; }
+button.power-row:hover:not(:disabled) { outline: 1px solid var(--muted); }
+.power-name { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.power-name .muted { font-size: 13px; }
+.power-value { text-align: right; font-variant-numeric: tabular-nums; }
+.power-before { display: block; font-size: 13px; color: var(--muted); }
+.pbar { grid-column: 1 / -1; height: 8px; margin-top: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.pbar span { display: block; height: 100%; border-radius: 4px; background: var(--chart-power); }
+.power-sum { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-top: 10px; padding: 10px 12px 0;
+             border-top: 1px solid var(--line); font-size: 15px; }
+.standby-list li { display: grid; grid-template-columns: minmax(9em, 1fr) auto; gap: 2px 12px; align-items: baseline;
+                   padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.standby-list li:first-child { border-top: 0; }
+.power-value .muted { white-space: nowrap; }   /* „etwa 0,98 €“ stays together */
+@media (max-width: 520px) {   /* phone: the values below the name, the whole width for them */
+  .power-row, .standby-list li { grid-template-columns: minmax(0, 1fr); }
+  .power-value { text-align: left; }
+}
+.home-power { margin: 4px 16px 10px; text-align: center; font-size: 18px; }
 .today-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px;
              font-size: 14px; }
 body.sheet-open { overflow: hidden; }

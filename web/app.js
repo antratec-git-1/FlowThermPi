@@ -133,6 +133,7 @@ async function refresh() {
       "Die Heizungen heizen weiter." : null, true);
     showAppInfo(state.app);
     searchAgain();
+    powerAgain();
     if (view === "setup" && !state.setup.unlocked && !pinPromise) showView("home");  // e.g. the app was restarted
   } catch (e) {
     setStatus("keine Verbindung zur App", true);
@@ -265,6 +266,7 @@ function showView(name) {
 
 function openTab() {   // what the chosen tab needs fresh from the Pi
   if (tab === "connections") openConnTab();
+  if (tab === "power") loadPower();
   if (tab === "devices" && state && state.app.zigbee) loadZigbee();   // the Zigbee devices and whether Zigbee is ready
 }
 
@@ -347,7 +349,7 @@ function render() {
     if (nav && (b.offsetLeft < nav.scrollLeft || b.offsetLeft + b.offsetWidth > nav.scrollLeft + nav.clientWidth))
       nav.scrollLeft = b.offsetLeft - 8;
   }
-  for (const name of ["rooms", "plans", "devices", "connections", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
+  for (const name of ["rooms", "plans", "devices", "power", "connections", "about"]) document.getElementById("tab-" + name).hidden = name !== tab;
   if (!state) return;
   const el = document.getElementById("tab-" + tab);
   const focus = document.activeElement;
@@ -356,6 +358,7 @@ function render() {
   else if (tab === "plans") { if (!editing) renderPlans(el); }       // the editor renders itself
   else if (tab === "about") renderAbout(el);
   else if (tab === "connections") renderConnections(el);
+  else if (tab === "power") renderPower(el);
   else renderDevices(el);
 }
 
@@ -806,6 +809,11 @@ function renderHome() {
   if (html !== tiles._html)   // new tiles: their heat waves go on where the old ones were, instead of starting over
     document.documentElement.style.setProperty("--wave-delay", `-${(performance.now() % 8000 / 1000).toFixed(2)}s`);
   setHTML(tiles, html);
+  const pt = state.power_today, line = document.getElementById("home-power");   // only with its switch
+  line.hidden = !(pt && pt.wh != null);
+  if (!line.hidden) setHTML(line, `Strom heute <b>${esc(kwhText(pt.wh / 1000))}</b>${pt.eur != null
+    ? ` · etwa ${esc(euroText(pt.eur))}` : ""}<span class="muted"> · gemessen an ${pt.plugs === 1 ? "einer Steckdose"
+    : `${pt.plugs} Steckdosen`}</span>`);
 }
 
 function homeReport(g, okText, data) {
@@ -904,7 +912,7 @@ async function helpDo(url) {
 let hist = null;       // the open „Verlauf“: {kind, id, from: "home"|"setup", day, data, error, loading, table}
 let histHover = null;  // start (s) of the five minutes under the finger or the mouse
 let histResize = 0;
-let costForm = null;   // „Strom und Kosten“ while it is being typed in: {price, show, powers: {heater id: text}}
+let costForm = null;   // „Strom und Kosten“ while it is being typed in: {price, show, show_power, powers: {heater id: text}}
 const POWER_VALUES = [650, 1200, 1300, 1600, 1950, 2000, 2450];   // W, the FlexiSmart Pro models A01–A14 (manual)
 
 function durText(s) {  // 7800 -> "2 Std. 10 Min."
@@ -1041,8 +1049,8 @@ function historyBodyHTML(d, from) {
     notes.push(`Strom und Kosten sind geschätzt: Heizdauer × Leistung der Heizung${d.price_ct != null
       ? ` × Strompreis (${ctText(d.price_ct)} ct/kWh)` : ""}.`);
   if (setup && d.power_missing.length)
-    notes.push(`Ohne Leistung kein Strom: ${d.power_missing.join(", ")}. Eintragen unter „Räume“ › „Strom und Kosten“.`);
-  if (setup && d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Räume“ › „Strom und Kosten“.");
+    notes.push(`Ohne Leistung kein Strom: ${d.power_missing.join(", ")}. Eintragen unter „Strom“ › „Strom und Kosten“.`);
+  if (setup && d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Strom“ › „Strom und Kosten“.");
   if (costs && d.devices.some(x => x.kind === "zigbee")) notes.push("Thermostate zählen nur die Heizdauer, die Wärme kommt vom Heizkessel.");
   return `<dl class="hist-stats">${stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
     <div class="hist-chart" id="hist-chart"></div>
@@ -1073,7 +1081,7 @@ function energyBodyHTML(d) {  // „Strom“ of a plug: what flowed through it i
     notes.push("Gerade wird nichts aufgezeichnet. Nach dem Einschalten wartet die App, bis die Uhrzeit stimmt.");
   notes.push("Jeder Balken ist eine Viertelstunde, gemessen vom Zähler der Steckdose. Meldet sie sich eine Weile nicht, " +
     "verteilt die App, was in der Zeit floss, gleichmäßig auf die Viertelstunden.");
-  if (d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Räume“ › „Strom und Kosten“.");
+  if (d.kwh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unter „Strom“ › „Strom und Kosten“.");
   const month = d.day.slice(0, 8) + "01";
   return `${where ? `<p class="hist-where">${esc(where)}</p>` : ""}
     <dl class="hist-stats">${stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
@@ -1346,11 +1354,11 @@ function hourTableHTML(d) {  // „Stunde für Stunde“: the same day as a tabl
       anyWin ? `<td>${r.win >= 60 ? durText(r.win) : "–"}</td>` : ""}</tr>`).join("")}</tbody></table></details>`;
 }
 
-// „Strom und Kosten“ at the end of „Räume“: one price for the household, the power of every AeroFlow, the switch
+// „Strom und Kosten“ at the end of „Strom“: one price for the household, the power of every AeroFlow, the switches
 function costValues() {
   if (costForm) return costForm;
   const c = state.costs || {}, heaters = state.heaters.filter(h => h.kind !== "zigbee");
-  return { price: c.price_ct == null ? "" : ctText(c.price_ct), show: !!c.show,
+  return { price: c.price_ct == null ? "" : ctText(c.price_ct), show: !!c.show, show_power: !!c.show_power,
            powers: Object.fromEntries(heaters.map(h => [h.id, h.power_w == null ? "" : String(h.power_w)])) };
 }
 
@@ -1373,8 +1381,7 @@ function plugLineHTML(h) {   // the heater's plug: what it measures – and „�
 function editCosts() { if (!costForm) costForm = clone(costValues()); return costForm; }
 
 function costsCardHTML() {
-  const heaters = state.heaters.filter(h => h.kind !== "zigbee");
-  if (!heaters.length) return "";
+  const heaters = state.heaters.filter(h => h.kind !== "zigbee"), plugs = state.plugs || [];
   const f = costValues(), saving = busy.has("costs");
   const powers = heaters.map(h => `<div class="power-item"><label class="power-row"><span class="pname">${deviceIcon(h)}${esc(h.name)}</span>
       <span class="unit-input"><input data-cpower="${esc(h.id)}" inputmode="numeric" list="power-values" autocomplete="off"
@@ -1383,11 +1390,12 @@ function costsCardHTML() {
   const anyPlug = heaters.some(h => h.plug);
   return `<article class="card costs-card">
     <div class="card-head"><h2>Strom und Kosten</h2></div>
-    <p class="hint">Die Heizungen melden keinen Verbrauch. Die App schätzt ihn: Heizdauer × Leistung × Strompreis.</p>
+    <p class="hint">Ein Strompreis für den ganzen Haushalt – damit rechnet die App den Strom in Euro um.${heaters.length
+      ? " Die Heizungen melden keinen Verbrauch. Die App schätzt ihn: Heizdauer × Leistung × Strompreis." : ""}</p>
     <div class="costs-form">
       <label>Strompreis<span class="unit-input"><input data-cfield="price" inputmode="decimal" autocomplete="off"
         value="${esc(f.price)}" placeholder="z. B. 32,5"><span>ct/kWh</span></span></label>
-      <fieldset><legend>Leistung der Heizungen</legend>${powers}
+      ${heaters.length ? `<fieldset><legend>Leistung der Heizungen</legend>${powers}
         <p class="hint">Steht auf dem Typenschild, bei der FlexiSmart Pro je nach Größe 650 bis 2450 W. ${anyPlug
           ? `Hängt eine Heizung an einer Steckdose mit Strommessung, misst die App beim Heizen nach – „Übernehmen“
           trägt den Wert ein. Welche Steckdose zu welcher Heizung gehört, wählst du unter „Geräte“ › „Steckdosen“.`
@@ -1395,7 +1403,9 @@ function costsCardHTML() {
           die Heizung an eine Steckdose mit Strommessung hängst: unter „Geräte“ mit „+ Gerät hinzufügen“.`}</p></fieldset>
       <datalist id="power-values">${POWER_VALUES.map(w => `<option value="${w}">`).join("")}</datalist>
       <label class="check"><input type="checkbox" data-cfield="show" ${f.show ? "checked" : ""}>
-        <span>Strom und Kosten auch auf der Startseite zeigen</span></label>
+        <span>Strom und Kosten der Heizungen auch auf der Startseite zeigen</span></label>` : ""}
+      ${plugs.length ? `<label class="check"><input type="checkbox" data-cfield="show_power" ${f.show_power ? "checked" : ""}>
+        <span>„Strom heute“ der Steckdosen auch auf der Startseite zeigen</span></label>` : ""}
       <div class="row">
         <button class="primary" data-action="costs-save" ${saving ? "disabled" : ""}>${saving ? "speichere …" : "Speichern"}</button>
         ${costForm ? '<button data-action="costs-cancel">Verwerfen</button>' : ""}
@@ -1409,12 +1419,137 @@ async function saveCosts() {
   busy.add("costs");
   render();
   try {
-    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, powers: f.powers });
+    const res = await api("PUT", "api/costs", { price_ct: f.price, show: f.show, show_power: f.show_power, powers: f.powers });
     costForm = null;
     toast(res.message || "Gespeichert.", !!res.warning);
   } catch (e) { toast(e.message, true); }
   busy.delete("costs");
   await refresh();
+}
+
+// ------------------------------------------------------------------ „Strom“: what every plug measured (setup tab)
+// A day, a week (Monday to Sunday) or a month: per device kWh and „etwa … €“, the biggest first – a tap opens its
+// quarter hours; a week and a month with the one before. Below: the standby of every device and „Strom und Kosten“.
+const APPLIANCES = [["heizung", "Heizung"], ["waschmaschine", "Waschmaschine"], ["trockner", "Trockner"],
+                    ["kuehlschrank", "Kühlschrank"], ["gefriergeraet", "Gefriergerät"], ["klimaanlage", "Klimaanlage"],
+                    ["sonstiges", "Sonstiges"]];   // „Angeschlossen“ at a plug – like Service.APPLIANCES
+const NO_STANDBY = ["heizung", "kuehlschrank", "gefriergeraet"];   // their lowest power is no standby (Service.NO_STANDBY)
+const POWER_SPANS = [["day", "Tag", "Tag davor", "Tag danach"], ["week", "Woche", "Woche davor", "Woche danach"],
+                     ["month", "Monat", "Monat davor", "Monat danach"]];
+let powerSpan = ["week", "month"].includes(localStorage.getItem("heizung.powerSpan")) ? localStorage.getItem("heizung.powerSpan") : "day";
+let power = null;   // the period shown: {span, day (a day in it), data, loading, error, at (Date.now() when asked)}
+
+function applianceText(id) { return (APPLIANCES.find(a => a[0] === id) || APPLIANCES[APPLIANCES.length - 1])[1]; }
+
+async function loadPower(day) {   // the period with `day` in it – without one, the period shown again (or today's)
+  if (!state) return;
+  const same = power && power.span === powerSpan ? power : null;
+  const p = power = { span: powerSpan, day: day || (same ? same.day : state.now.slice(0, 10)),
+                      data: same && !day ? same.data : null, loading: true, error: "", at: Date.now() };
+  render();
+  try {
+    const data = await api("GET", `api/power/${p.span}/${p.day}`);
+    if (power !== p) return;   // another period chosen meanwhile
+    p.data = data;
+  } catch (e) {
+    if (power !== p) return;
+    p.error = e.message;
+  }
+  p.loading = false;
+  render();
+}
+
+function powerAgain() {   // a period still running comes again every minute while it is shown
+  const p = power;
+  if (p && !p.loading && p.data && p.data.running && view === "setup" && tab === "power" && !document.hidden
+      && Date.now() - p.at > 60000) loadPower();
+}
+
+function powerKwh(wh) { return wh > 0 && wh < 5 ? "unter 0,01 kWh" : kwhText(wh / 1000); }   // not „0,00 kWh“
+function powerEur(eur, wh) {   // „ · etwa 1,30 €“ – a few Wh: „ · unter 1 Cent“, nothing: nothing
+  return eur == null ? "" : eur >= 0.01 ? ` · etwa ${euroText(eur)}` : wh > 0 ? " · unter 1 Cent" : "";
+}
+
+function standbyText(w) { return (w < 10 && w % 1 ? w.toFixed(1).replace(".", ",") : String(Math.round(w))) + " W"; }
+
+function powerCutText(t, d) {   // „Donnerstag, 19.11., 14:00 Uhr“ in the app's time zone
+  const opt = { weekday: "long", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" };
+  try { return new Date(t * 1000).toLocaleString("de-DE", d.tz ? Object.assign({ timeZone: d.tz }, opt) : opt) + " Uhr"; }
+  catch (_) { return new Date(t * 1000).toLocaleString("de-DE", opt) + " Uhr"; }
+}
+
+function compareHTML(wh, before, d) {   // „Woche davor 3,8 kWh · 11 % mehr“
+  if (!d.before || wh == null || before == null) return "";
+  const pct = before > 0 ? Math.round((wh - before) / before * 100) : null;
+  const change = pct == null ? "" : pct === 0 ? " · gleich viel" : ` · ${Math.abs(pct)} % ${pct > 0 ? "mehr" : "weniger"}`;
+  return `<span class="power-before">${esc(d.before.label)} ${esc(powerKwh(before))}${esc(change)}</span>`;
+}
+
+function powerRowHTML(x, d, max) {   // one device: name, what it is and where, kWh and €, a bar for the amount
+  const kind = applianceText(x.appliance);   // a plug called like what hangs on it: once is enough
+  const where = [kind !== x.name ? kind : "", x.heater || x.room, x.known ? "" : "nicht mehr in der App"].filter(Boolean).join(" · ");
+  const value = x.wh == null ? '<span class="muted">keine Werte</span>' : `<b>${esc(powerKwh(x.wh))}</b><span class="muted">${
+    esc(powerEur(x.eur, x.wh))}</span>`;
+  const share = x.wh && max ? Math.max(1, Math.round(x.wh / max * 100)) : 0;
+  const inner = `<span class="power-name"><b>${esc(x.name)}</b><span class="muted">${esc(where)}</span></span>
+    <span class="power-value">${value}${compareHTML(x.wh, x.before_wh, d)}</span>
+    <span class="pbar" aria-hidden="true"><span style="width:${share}%"></span></span>`;
+  return `<li>${x.known ? `<button class="power-row" data-action="power-plug" data-plug="${esc(x.id)}"
+    aria-label="${esc(x.name)}: Viertelstunden ansehen">${inner}</button>` : `<div class="power-row">${inner}</div>`}</li>`;
+}
+
+function powerCardHTML() {
+  const p = power, d = p && p.data, span = POWER_SPANS.find(s => s[0] === powerSpan);
+  const step = (to, label, sym) => `<button class="day-step" data-action="power-day" data-day="${to || ""}" ${
+    to && !(p && p.loading) ? "" : "disabled"} aria-label="${label}">${sym}</button>`;
+  const head = `<div class="hist-day power-nav">${step(d && d.prev, span[2], "‹")}<span class="day-label">${
+    esc(d ? d.label : "…")}${d && d.dates && d.dates !== d.label ? `<small>${esc(d.dates)}</small>` : ""}</span>${
+    step(d && d.next, span[3], "›")}</div>`;
+  if (!d) return `<article class="card power-card">${head}<p class="hint">${esc((p && p.error) || "Wird geladen …")}</p></article>`;
+  const max = Math.max(0, ...d.devices.map(x => x.wh || 0)), t = d.total;
+  const notes = [];
+  if (t.wh != null) notes.push("Gezählt ist nur, was durch die Steckdosen fließt – nicht der ganze Haushalt. Antippen zeigt die Viertelstunden.");
+  if (t.wh != null && d.price_ct == null) notes.push("Ohne Strompreis keine Kosten. Eintragen unten bei „Strom und Kosten“.");
+  if (d.before && d.running && d.before.cut != null)
+    notes.push(`Verglichen wird mit der gleichen Zeit davor – bis ${powerCutText(d.before.cut, d)}.`);
+  if (d.before && d.devices.some(x => x.wh != null && x.before_wh == null))
+    notes.push("Einen Vergleich gibt es, sobald eine Steckdose beide Male fast durchgehend gemessen hat.");
+  if (t.wh == null) notes.push(`In dieser Zeit hat die App ${d.running ? "noch " : ""}nichts gemessen.`);
+  return `<article class="card power-card">${head}
+    <ul class="power-list">${d.devices.map(x => powerRowHTML(x, d, max)).join("")}</ul>
+    ${t.wh == null ? "" : `<div class="power-sum"><span>Zusammen</span><span class="power-value"><b>${esc(powerKwh(t.wh))}</b><span
+      class="muted">${esc(powerEur(t.eur, t.wh))}</span>${compareHTML(t.wh, t.before_wh, d)}</span></div>`}
+    ${notes.map(n => `<p class="hint">${esc(n)}</p>`).join("")}
+  </article>`;
+}
+
+function standbyCardHTML() {   // „Bereitschaft“: what a device draws while it does nothing – and what that costs a year
+  const d = power && power.data;
+  const rows = d ? d.devices.filter(x => x.known && !NO_STANDBY.includes(x.appliance)).map(x => {
+    const text = x.standby_w == null ? '<span class="muted">noch zu wenig Werte</span>'
+      : x.standby_w === 0 ? "0 W <span class=\"muted\">– ganz aus, wenn es nichts tut</span>"
+      : `<b>${esc(standbyText(x.standby_w))}</b> rund um die Uhr<span class="muted"> ≈ ${esc(kwhText(x.standby_w * 8.76))} im Jahr${
+        x.standby_eur_year != null ? ` ≈ ${esc(euroText(x.standby_eur_year))}` : ""}</span>`;
+    const kind = applianceText(x.appliance);
+    return `<li><span class="power-name"><b>${esc(x.name)}</b><span class="muted">${kind !== x.name ? esc(kind) : ""}</span></span>
+      <span class="power-value">${text}</span></li>`;
+  }).join("") : "";
+  if (!rows) return "";
+  return `<article class="card"><div class="card-head"><h2>Bereitschaft</h2></div>
+    <p class="hint">Was ein Gerät auch dann zieht, wenn es nichts tut: die niedrigsten Werte der letzten ${d.standby_days} Tage.
+      Erst nach einem Tag Messung. Heizung, Kühlschrank und Gefriergerät fehlen hier – sie haben keine Bereitschaft.</p>
+    <ul class="standby-list">${rows}</ul></article>`;
+}
+
+function renderPower(el) {
+  el.className = "tab single";
+  const plugs = state.plugs || [], d = power && power.data;
+  const spans = `<div class="subtabs" role="tablist" aria-label="Zeitraum">${POWER_SPANS.map(([id, label]) =>
+    `<button data-powerspan="${id}" role="tab" aria-selected="${powerSpan === id}">${label}</button>`).join("")}</div>`;
+  const none = `<article class="card"><div class="card-head"><h2>Strom der Geräte</h2></div><p class="hint">Noch keine
+    Steckdose mit Strommessung in der App. Unter „Geräte“ kommt eine mit „+ Gerät hinzufügen“ dazu – dann zeigt die App
+    hier, was jedes Gerät braucht und kostet.</p></article>`;
+  setHTML(el, (plugs.length || (d && d.devices.length) ? spans + powerCardHTML() + standbyCardHTML() : none) + costsCardHTML());
 }
 
 // ------------------------------------------------------------------ dialog (confirmations and PIN)
@@ -1573,7 +1708,7 @@ function renderRooms(el) {
   if (!gs.length) { setHTML(el, head + '<p class="empty">Keine Heizungen konfiguriert – unter „Geräte“ über „+ Gerät hinzufügen“ anlegen.</p>'); return; }
   setHTML(el, head + gs.map(roomCard).join("") + (state.rooms.length || adding ? "" :
     '<p class="empty">Tipp: Über „+ Raum“ einen Raum anlegen und die Heizungen ankreuzen, die dazugehören. ' +
-    'So lassen sich mehrere Heizungen gemeinsam steuern und Heizpläne senden.</p>') + costsCardHTML());
+    'So lassen sich mehrere Heizungen gemeinsam steuern und Heizpläne senden.</p>'));
 }
 
 function roomFormHTML(f) {
@@ -2129,6 +2264,16 @@ function plugRoomHTML(p) {   // at a heater: the heater's room – without one: 
     plugRoomOptions(p.room)}</select>`;
 }
 
+function applianceOptions(chosen) {
+  return APPLIANCES.map(([id, label]) => `<option value="${id}" ${id === chosen ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function plugApplianceHTML(p) {   // what hangs on the plug – at an AeroFlow a heater (to change: „– keine –“ at „Heizung“)
+  if (p.heater) return 'Heizung <span class="muted">– eine AeroFlow</span>';
+  return `<select data-action="plug-appliance" aria-label="Was an ${esc(p.name)} hängt" ${
+    busy.has("plugappliance:" + p.id) ? "disabled" : ""}>${applianceOptions(p.appliance)}</select>`;
+}
+
 function plugSwitchHTML(p) {   // on and off, to test – the start page only switches a plug on again
   if (busy.has("plugswitch:" + p.id)) return '<span class="muted">schaltet …</span>';
   const on = '<button class="small" data-action="plug-switch" data-on="1">Einschalten</button>';
@@ -2148,9 +2293,11 @@ function plugTileHTML(p) {
       <button class="small" data-action="plug-remove" ${removing ? "disabled" : ""}>${removing ? "entferne …" : "Entfernen …"}</button></div>
     <dl>
       <dt>Name</dt><dd>${esc(p.name)} <button class="small" data-action="plug-rename">Ändern …</button></dd>
-      <dt>Heizung</dt><dd>${aeroflows ? `<select data-action="plug-heater" aria-label="Heizung an ${esc(p.name)}" ${
-        busy.has("plugheater:" + p.id) ? "disabled" : ""}>${plugHeaterOptions(p.id, p.heater)}</select>`
-        : '<span class="muted">noch keine AeroFlow-Heizung in der App</span>'}</dd>
+      <dt>Angeschlossen</dt><dd>${plugApplianceHTML(p)}</dd>
+      ${p.heater || p.appliance === "heizung" ? `<dt>Heizung</dt><dd>${aeroflows
+        ? `<select data-action="plug-heater" aria-label="Heizung an ${esc(p.name)}" ${busy.has("plugheater:" + p.id)
+          ? "disabled" : ""}>${plugHeaterOptions(p.id, p.heater)}</select>`
+        : '<span class="muted">noch keine AeroFlow-Heizung in der App</span>'}</dd>` : ""}
       <dt>Raum</dt><dd>${plugRoomHTML(p)}</dd>
       <dt>Schalten</dt><dd>${plugSwitchHTML(p)}</dd>
       <dt>Strom</dt><dd><button class="small" data-action="plug-energy">Viertelstunden ansehen</button></dd>
@@ -2194,9 +2341,10 @@ function plugSearchPanelHTML() {   // the WLAN part of „+ Gerät hinzufügen�
 function plugsCardHTML() {
   const plugs = state.plugs || [];
   return `<article class="card"><div class="card-head"><h2>Steckdosen mit Strommessung</h2></div>
-    <p class="hint">Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen, wie viel Strom sie
-      wirklich zieht. Zu welcher Heizung eine Steckdose gehört – oder ohne Heizung, in welchem Raum sie ist –, wählst du
-      hier bei der Steckdose. „Viertelstunden ansehen“ zeigt, wie viel Strom sie in jeder Viertelstunde gezählt hat. Ist
+    <p class="hint">Was an einer Steckdose hängt, wählst du bei „Angeschlossen“ – unter „Strom“ zeigt die App dann, was
+      jedes Gerät braucht und kostet. Hängt eine AeroFlow an einer Steckdose mit Strommessung, misst die App beim Heizen,
+      wie viel Strom sie wirklich zieht. Zu welcher Heizung eine Steckdose gehört – oder ohne Heizung, in welchem Raum
+      sie ist –, wählst du hier bei der Steckdose. „Viertelstunden ansehen“ zeigt, wie viel Strom sie in jeder Viertelstunde gezählt hat. Ist
       die Steckdose aus, zeigt die Startseite das und schaltet sie mit einem Tipp wieder ein. Ausschalten geht nur hier
       bei „Schalten“ – zum Testen.</p>
     ${plugs.map(plugTileHTML).join("")}
@@ -2256,6 +2404,27 @@ async function setPlugHeater(id, heater, quiet = false) {   // „gehört zu“ 
   try {
     const res = await api("PUT", `api/plugs/${encodeURIComponent(id)}/heater`, { heater: heater || null });
     if (!quiet || res.warning) toast(res.message || "Gespeichert.", !!res.warning);
+    ok = true;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
+  return ok;
+}
+
+async function setPlugAppliance(id, appliance, quiet = false) {   // „Angeschlossen“: what hangs on it – true when saved
+  const key = "plugappliance:" + id;
+  if (busy.has(key)) return false;
+  busy.add(key);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  let ok = false;
+  try {
+    const res = await api("PUT", `api/plugs/${encodeURIComponent(id)}/appliance`, { appliance });
+    if (!quiet) toast(res.message || "Gespeichert.");
     ok = true;
   } catch (e) {
     toast(e.message, true);
@@ -2937,7 +3106,7 @@ function addKinds() {   // what can be added here: a thermostat only on a Pi wit
   return [["heater", "Heizung", "AeroFlow-Heizung mit FlexiSmart-Pro-Regler – im WLAN"]]
     .concat(zig ? [["thermostat", "Thermostat", "SONOFF-Thermostat für einen Heizkörper – funkt über Zigbee"]] : [])
     .concat([["sensor", "Raumfühler", "Shelly Pill mit Temperaturfühler – im WLAN"],
-             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder einen Raum – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
+             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder ein anderes Gerät – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
 }
 
 function addStep() {   // 0 … 3 for the steps above the guide
@@ -3037,15 +3206,14 @@ function addWhereHTML(roomOptions) {   // step 4: the room – for a plug the he
   if (w.type === "plug") {
     const p = (state.plugs || []).find(x => x.id === w.id);
     const named = `<b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App.`;
+    const heating = f.appliance === "heizung", aeroflows = state.heaters.some(h => h.kind !== "zigbee");
     const room = `<label>Raum<select data-afield="room">${roomOptions(f.room)}</select></label>`;
-    if (!state.heaters.some(h => h.kind !== "zigbee")) {
-      return `<p>${named} In welchem Raum ist sie?</p><div class="device-form">${room}<p class="hint">Noch keine
-        AeroFlow-Heizung in der App. Hängt später eine an der Steckdose, wählst du sie bei ihr unter „Steckdosen“.</p></div>${done}`;
-    }
-    return `<p>${named} Zu welcher Heizung gehört sie – oder in welchen Raum?</p>
-      <div class="device-form"><label>Heizung<select data-afield="heater">${plugHeaterOptions(w.id, f.heater)}</select></label>
-      ${f.heater ? '<p class="hint">Die App stellt die Steckdose dabei so ein, dass sie nach einem Stromausfall wieder angeht.</p>'
-        : `${room}<p class="hint">Ohne Heizung – etwa an einem anderen Gerät – zählt ihr Strom für den Raum, den du hier wählst.</p>`}
+    return `<p>${named} Was hängt daran – und wo ist sie?</p>
+      <div class="device-form"><label>Angeschlossen<select data-afield="appliance">${applianceOptions(f.appliance)}</select></label>
+      ${heating && aeroflows ? `<label>Heizung<select data-afield="heater">${plugHeaterOptions(w.id, f.heater)}</select></label>` : ""}
+      ${heating && f.heater ? '<p class="hint">Die App stellt die Steckdose dabei so ein, dass sie nach einem Stromausfall wieder angeht.</p>'
+        : `${room}<p class="hint">${heating && !aeroflows ? "Noch keine AeroFlow-Heizung in der App. Hängt später eine an der "
+          + "Steckdose, wählst du sie bei ihr unter „Steckdosen“. " : ""}Der Strom des Geräts zählt für den Raum, den du hier wählst.</p>`}
       </div>${done}`;
   }
   const h = state.heaters.find(x => x.id === w.id), thermostat = h ? h.kind === "zigbee" : String(w.id).startsWith("0x");
@@ -3127,7 +3295,7 @@ function addWhere(type, id) {   // step 4
   const h = type === "heater" ? state.heaters.find(x => x.id === id) : null;
   const p = type === "plug" ? (state.plugs || []).find(x => x.id === id) : null;
   addFlow = Object.assign(addFlow || { kind: type }, { step: "where", where: { type, id }, name: "",
-    room: (h && h.room) || "", heater: (p && p.heater) || "" });
+    room: (h && h.room) || "", heater: (p && p.heater) || "", appliance: (p && p.appliance) || "sonstiges" });
   invalidate();
   render();
 }
@@ -3136,7 +3304,9 @@ async function addFinish() {   // „Fertig“: save the room (and a thermostat'
   const f = addFlow, w = f && f.where;
   if (!w || busy.has("addflow")) return;
   if (w.type === "plug") {
-    if (f.heater ? !(await setPlugHeater(w.id, f.heater, true)) : f.room && !(await setPlugRoom(w.id, f.room, true))) return;
+    const p = (state.plugs || []).find(x => x.id === w.id), heater = f.appliance === "heizung" ? f.heater : "";
+    if (!heater && p && f.appliance !== p.appliance && !(await setPlugAppliance(w.id, f.appliance, true))) return;
+    if (heater ? !(await setPlugHeater(w.id, heater, true)) : f.room && !(await setPlugRoom(w.id, f.room, true))) return;
     deviceTab = "plugs";
   } else {
     const body = {};
@@ -4271,6 +4441,8 @@ document.addEventListener("click", e => {
     case "history": return openHistory(t.closest("article.tile, article.card"), view);
     case "hist-close": return closeHistory();
     case "hist-day": return loadHistory(t.dataset.day);
+    case "power-day": return t.dataset.day ? loadPower(t.dataset.day) : undefined;
+    case "power-plug": return openPlugEnergy(t.dataset.plug);
     case "costs-save": return saveCosts();
     case "costs-cancel": costForm = null; return render();
     case "cpower-take": editCosts().powers[t.dataset.heater] = t.dataset.watts; return render();   // saved with „Speichern“
@@ -4287,6 +4459,12 @@ document.addEventListener("click", e => {
     if (tab === "plans" && editing) renderEditor();
     openTab();
     render();
+    return;
+  }
+  if (t.dataset.powerspan) {
+    powerSpan = t.dataset.powerspan;
+    localStorage.setItem("heizung.powerSpan", powerSpan);
+    loadPower(state.now.slice(0, 10));   // a new span starts at today
     return;
   }
   if (t.dataset.conntab) {
@@ -4413,10 +4591,10 @@ document.addEventListener("change", e => {
     if (pw) pw.type = t.checked ? "text" : "password";
     return;
   }
-  if (t.dataset.cfield === "show") { editCosts().show = t.checked; return; }
-  if (addFlow && t.dataset.afield) {   // a plug's heater chosen or taken away: its room is asked for only without one
-    addFlow[t.dataset.afield] = t.value;
-    if (t.dataset.afield === "heater") render();
+  if (t.dataset.cfield === "show" || t.dataset.cfield === "show_power") { editCosts()[t.dataset.cfield] = t.checked; return; }
+  if (addFlow && t.dataset.afield) {   // what hangs on a plug, its heater: the heater is asked for only at „Heizung“,
+    addFlow[t.dataset.afield] = t.value;   // the room only without one
+    if (t.dataset.afield === "heater" || t.dataset.afield === "appliance") { t.blur(); render(); }
     return;
   }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
@@ -4429,6 +4607,7 @@ document.addEventListener("change", e => {
       return patch(`api/sensors/${encodeURIComponent(t.closest(".device").dataset.sensor)}`, { room: t.value || null }, "Raum zugeordnet.");
     case "plug-heater": return setPlugHeater(t.closest("[data-plug]").dataset.plug, t.value);
     case "plug-room": return setPlugRoom(t.closest("[data-plug]").dataset.plug, t.value);
+    case "plug-appliance": return setPlugAppliance(t.closest("[data-plug]").dataset.plug, t.value);
     case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });

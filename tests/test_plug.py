@@ -367,6 +367,12 @@ class ApiTest(Base):
         self.call("POST", f"/api/zigbee/devices/{SPARE}/remove", {"force": False})
         self.assertEqual(self.service.store.data["plug_names"], {})
 
+    def test_a_removed_plug_forgets_what_hangs_on_it_too(self):
+        self.call("PUT", f"/api/plugs/{SPARE}/appliance", {"appliance": "kuehlschrank"})
+        self.assertEqual(self.service.store.data["plug_appliances"], {SPARE: "kuehlschrank"})
+        self.call("POST", f"/api/zigbee/devices/{SPARE}/remove", {"force": False})
+        self.assertEqual(self.service.store.data["plug_appliances"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
