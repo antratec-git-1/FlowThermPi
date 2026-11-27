@@ -51,6 +51,12 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   „läuft“ und „seit 23 Min.“.
 - **„Fertig“** (ab 0.4.20): Ist die Waschmaschine oder der Trockner fertig, steht oben „Die Waschmaschine ist fertig –
   seit 10:42.“ mit **OK** (ohne PIN). Siehe [Wäschen und Trockengänge](#wäschen-und-trockengänge).
+- **Licht** (ab 0.4.21): Hat ein Raum [Zigbee-Lampen](#licht-zigbee-lampen), steht unten auf seiner Kachel „Licht“
+  mit einem großen Knopf **Licht einschalten** bzw. **Licht ausschalten** für alle Lampen des Raums. Ist es an,
+  stehen darunter **dunkler** und **heller** mit der Helligkeit, etwa „60 %“ – in Schritten von 10 %, nie unter 10 %:
+  ganz aus geht nur mit „Licht ausschalten“. Bei mehreren Lampen steht jede darunter mit „an · 60 %“ oder „aus“ und
+  ihrem eigenen Knopf. Ein Raum ohne Heizung, aber mit Lampe (etwa der Flur) bekommt eine eigene Kachel. Antwortet
+  eine Lampe nicht, steht dort „… antwortet nicht. Ist der Lichtschalter an der Wand an?“. Alles ohne PIN.
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -743,6 +749,43 @@ meldet nur Änderungen).
   (`count`, `wh`, `eur`, `avg_wh`, `before`, `items`, `running`); `GET /api/plugs/<Kennung>/runs/<beginn>` (mit PIN) –
   ein Durchgang Minute für Minute, mit `prev` und `next`.
 
+## Licht: Zigbee-Lampen
+
+Ab 0.4.21. Zigbee-Lampen – Philips Hue, IKEA, Innr und andere – hängen direkt am Zigbee-Stick des Pi, ohne Hue-Bridge
+und ohne Cloud. Die Lampen brauchen immer Strom: Der Lichtschalter an der Wand bleibt an, geschaltet wird in der App.
+
+- **Welche:** gebaut für IKEA FLOALT und JETSTRÖM, Innr und Philips Hue. Andere gehen auch, wenn Zigbee2MQTT sie als
+  Licht mit an/aus kennt; ein Gerät mit mehreren Lichtern, die es einzeln schaltet, nicht.
+- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Lampe“. Die App sagt je Hersteller, wie man die
+  Lampe zurücksetzt, damit sie ein neues Netz sucht – Hue: in der Hue-App löschen, ohne Hue-App 5-mal 2 Sekunden aus
+  und 8 Sekunden an; FLOALT: 6-mal kurz aus und wieder an; JETSTRÖM: die Reset-Taste am Netzteil; Innr: nach der
+  Anleitung von Innr. Im letzten Schritt „Wohin?“ bekommt die Lampe ihren Namen und ihren Raum.
+- **Einrichtung:** *Geräte › Licht* – je Lampe Name, Raum, Schalten (zum Testen), **Lichtfarbe** und **Entfernen …**.
+  Die Lichtfarbe – warmweiß (2.700 K), neutralweiß (4.000 K) oder kaltweiß (5.000 K), nur was die Lampe kann – stellt
+  die App bei jedem Einschalten ein; „wie zuletzt“ lässt die Lampe, wie sie war. Name, Raum und Lichtfarbe stehen nur
+  in der App (`data.json`: `light_names`, `light_rooms`, `light_colors`); wird die Lampe im Zigbee-Netz entfernt,
+  vergisst die App sie.
+- **Schalten:** „Licht einschalten“ schickt allen Lampen des Raums den Befehl zugleich und wartet bis zu 6 Sekunden
+  auf ihre Antwort. **heller** und **dunkler** stellen alle eingeschalteten Lampen des Raums auf dieselbe Helligkeit:
+  von der Anzeige (dem Mittel der Lampen) auf die nächste Zehnerstufe, die mindestens 5 % entfernt ist – von 55 % also
+  auf 60 % bzw. 50 %.
+- **Keine Antwort:** Hat eine Lampe keinen Strom (Lichtschalter an der Wand aus), antwortet sie nicht. Die App sagt
+  das, und die Lampe steht auf „keine Verbindung“, bis sie sich wieder meldet; „heller“ und „dunkler“ lassen sie so
+  lange aus. Antwortet keine Lampe des Raums, kommt eine Fehlermeldung.
+- **Noch nicht:** Die Lampen eines Raums als Zigbee-Gruppe und die Schalter (Hue Smart Button, Hue Dimmschalter)
+  kommen mit 0.4.22, der Bewegungsmelder und das Licht im Flur danach. Farben wie Rot oder Grün stellt die App nicht
+  ein.
+- **Protokoll:** Wann jemand das Licht schaltet, steht nur im
+  [ausführlichen Protokoll](#protokoll-wenn-etwas-schiefgeht); wenn eine Lampe nicht antwortet, steht es immer drin.
+- **Nur simuliert geprüft:** mit nachgebauten Lampen in `tests/fake_mqtt.py` (`tests/test_light.py`) und in der Demo
+  (`uebergabe/demo_server.py … licht`). Mit echten Lampen noch nicht.
+- **Schnittstelle:** ohne PIN `POST /api/rooms/<Raum>/light` (`{"on": true}` oder `false`), `POST
+  /api/rooms/<Raum>/light/dim` (`{"step": 1}` oder `-1`) und `POST /api/lights/<IEEE-Adresse>/switch` (`{"on": …}`);
+  mit PIN `PUT /api/lights/<IEEE-Adresse>/name` (`{"name": "…"}`, leer für keinen), `…/room` (`{"room": "<Raum>"}`,
+  `null` für keinen) und `…/color` (`{"color": "warm"}`, `"neutral"`, `"kalt"` oder `""` für wie zuletzt). In
+  `GET /api/state` steht `lights`: je Lampe `id`, `name`, `model`, `room`, `state`, `brightness` (in %), `dim`,
+  `colors`, `color`, `lost` und `heard`.
+
 ## Verlauf und Kosten
 
 Die Heizungen melden keinen Verbrauch und führen keinen Verlauf – weder im Gerät noch in der Cloud (Thermotecs
@@ -897,12 +940,16 @@ Bereitschaft und „Strom heute“. Die Wäschen und Trockengänge prüft `tests
 Leistungskurven – eine Wäsche mit Einweichpause, ein Trockner mit Knitterschutz, Bereitschaft und kurze Stöße, eine
 Zigbee-Steckdose, die nur Änderungen meldet, ein Update mitten in der Wäsche, eine Steckdose, die verstummt, ein
 Gerät, das nie ruht, und das „fertig“ mit OK. Wie die Waschmaschine oder der Trockner im echten Haushalt Strom ziehen,
-prüfen die Tests nicht.
+prüfen die Tests nicht. Das Licht prüft `tests/test_light.py` mit Lampen, die `tests/fake_mqtt.py` wie eine IKEA
+FLOALT, eine Innr und eine Hue nachbaut (ihre Farbbereiche sind erfunden) – auch eine Lampe ohne Strom und das
+Protokoll; wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
-- Licht und Sensoren über die Philips-Hue-Bridge; Regelung über einen Raumfühler.
+- Licht, Teil 2 (0.4.22): die Lampen eines Raums als Zigbee-Gruppe, die Schalter (Hue Smart Button, Hue
+  Dimmschalter); danach der Bewegungsmelder und das Licht im Flur mit einstellbaren Zeiten und Helligkeit.
+- Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.
 - Strom, Teil 3: ein Wächter für Kühlschrank und Gefriergerät; später die Spülmaschine (Durchgänge wie bei

@@ -13,6 +13,7 @@
   --pill: #ffffff; --pill-line: #85756b; --badge: #f9d5bf; --on-badge: #6b260c;
   --hint: #fcefc7; --on-hint: #6b4500; --bad: #fbe9e7; --on-bad: #8e2a1c;
   --tile-off: #eceff1; --on-tile-off: #4e5b62; --sending: #0d5960; --wave: #f7c6a3;
+  --lamp: #8f6200;   /* a lamp that is on (4.7:1 on white) */
   --radius: 14px;
   color-scheme: light dark;
 }
@@ -22,7 +23,7 @@
           --danger: #ffb4a8; --ok: #86d3a8; --off: #56707a; --cold: #cfe3ea; --warm: #ffd2b0;
           --pill: #24404b; --pill-line: #6f909c; --badge: #3d2b20; --on-badge: #ffb37e;
           --hint: #3a3218; --on-hint: #ffd58a; --bad: #3a2222; --on-bad: #ffb4a8;
-          --tile-off: #1c313a; --on-tile-off: #a9bec4; --sending: #9fc3d6; --wave: #3d2b20; }
+          --tile-off: #1c313a; --on-tile-off: #a9bec4; --sending: #9fc3d6; --wave: #3d2b20; --lamp: #ffd76a; }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -83,6 +84,10 @@ input[type="number"] { width: 72px; }
 .segmented button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .segmented button.active:disabled { opacity: 1; }
 .segmented-text { font-size: 13px; margin-top: 4px; }
+@media (max-width: 560px) {   /* the four light colours do not fit side by side on a phone: there they wrap, each its own button */
+  .segmented.chips { display: flex; flex-wrap: wrap; gap: 6px; border: 0; border-radius: 0; overflow: visible; }
+  .segmented.chips button, .segmented.chips button + button { border: 1px solid var(--line); border-radius: 10px; }
+}
 
 .plan-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
 .plan-row select { flex: 1; min-width: 140px; }
@@ -252,6 +257,25 @@ dd { margin: 0; word-break: break-word; }
 .pstate.off { color: var(--muted); }
 .pstate.run { color: var(--chart-power); font-weight: 500; }
 .pval { grid-column: 2 / -1; font-size: 15px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* the light of the room: on and off for all its lamps, brighter and darker, each lamp on its own */
+.tile-light { display: grid; gap: 12px; padding-top: 14px; border-top: 1.5px solid var(--line); }
+.tile-head + .tile-light { padding-top: 0; border-top: 0; }   /* a room with nothing but light */
+.light-head { display: flex; align-items: center; gap: 10px; font-size: 20px; }
+.light-head .light-title { flex: 1; font-weight: 500; }
+.light-head .dico svg { width: 26px; height: 26px; }
+.tile-light .dico.on { color: var(--lamp); }
+.light-head .dico.on svg, .tile-lights .dico.on svg { fill: color-mix(in srgb, var(--lamp) 30%, transparent); }
+.tile-lights { list-style: none; margin: 0; padding: 10px 14px; border-radius: 14px; background: var(--pill); display: grid;
+               gap: 10px; font-size: 17px; }
+.tile-lights li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; }
+.tile-lights .dico svg { width: 22px; height: 22px; }
+.tile-lights .dname { overflow-wrap: anywhere; hyphens: auto; }
+.tile-lights .dname small { display: block; font-size: 15px; color: var(--muted); }
+.tile-lights button { min-height: 44px; font-size: 16px; border-radius: 99px; border: 1.5px solid var(--pill-line);
+                      padding: 6px 14px; touch-action: manipulation; }
+.light-set .step { color: var(--text); }
+.maker-steps { margin: 6px 0 0; padding-left: 18px; }
+.maker-steps li { margin: 3px 0; }
 .tile-set { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
 .step { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 6px; min-height: 64px;
         padding: 6px 10px; border-radius: 28px; border: 1.5px solid var(--pill-line); background: var(--pill);

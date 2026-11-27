@@ -28,11 +28,15 @@ WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
 mimetypes.add_type("font/woff2", ".woff2")   # the font in web/fonts – older Pythons and slim images do not know it
 MAX_BODY = 256 * 1024
 PUBLIC, SETUP = True, False   # PUBLIC: usable from the simple view without PIN
+# When someone switches the light is none of the protocol's business: these requests go to the detailed log only
+# (failures are logged as always)
+QUIET = re.compile(r"/api/(rooms/[\w\-]+/light(/dim)?|lights/0x[0-9a-f]{16}/switch)")
 
 
 def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
     h = r"([\w:.\-]+)"  # heater id (serial number or host:<ip>)
     i = r"([\w\-]+)"    # room / plan id
+    x = r"(0x[0-9a-f]{16})"   # a Zigbee device: its IEEE address
     return [
         # simple view (residents) – never needs the PIN
         ("GET", r"/api/state", lambda m, b, r: r.state(), PUBLIC),
@@ -44,6 +48,9 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
          lambda m, b, r: s.set_mode("heater", m[1], b.get("mode"), b.get("minutes")), PUBLIC),
         ("POST", rf"/api/heaters/{h}/plug/on", lambda m, b, r: s.plug_on(m[1]), PUBLIC),   # its plug was switched off
         ("POST", rf"/api/notices/{i}/ok", lambda m, b, r: s.notice_ok(m[1]), PUBLIC),   # „Die Waschmaschine ist fertig“
+        ("POST", rf"/api/rooms/{i}/light", lambda m, b, r: s.switch_room_light(m[1], b), PUBLIC),   # „Licht an“ / „aus“
+        ("POST", rf"/api/rooms/{i}/light/dim", lambda m, b, r: s.dim_room_light(m[1], b), PUBLIC),  # „heller“ / „dunkler“
+        ("POST", rf"/api/lights/{x}/switch", lambda m, b, r: s.switch_light(m[1], b), PUBLIC),     # one lamp
         ("GET", rf"/api/rooms/{i}/history/(\d{{4}}-\d{{2}}-\d{{2}})",   # Verlauf of one day
          lambda m, b, r: s.history_view("room", m[1], m[2]), PUBLIC),
         ("GET", rf"/api/heaters/{h}/history/(\d{{4}}-\d{{2}}-\d{{2}})",
@@ -86,6 +93,9 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("PUT", rf"/api/plugs/{i}/name", lambda m, b, r: s.rename_plug(m[1], b), SETUP),
         ("PUT", rf"/api/plugs/{i}/appliance", lambda m, b, r: s.set_plug_appliance(m[1], b), SETUP),   # „Angeschlossen“
         ("POST", rf"/api/plugs/{i}/switch", lambda m, b, r: s.switch_plug(m[1], b), SETUP),   # on and off, to test
+        ("PUT", rf"/api/lights/{x}/name", lambda m, b, r: s.rename_light(m[1], b), SETUP),   # Geräte › Licht
+        ("PUT", rf"/api/lights/{x}/room", lambda m, b, r: s.set_light_room(m[1], b), SETUP),
+        ("PUT", rf"/api/lights/{x}/color", lambda m, b, r: s.set_light_color(m[1], b), SETUP),   # „Lichtfarbe“
         ("GET", rf"/api/plugs/{i}/energy/(\d{{4}}-\d{{2}}-\d{{2}})",   # „Strom“: one day in quarter hours
          lambda m, b, r: s.energy_view(m[1], m[2]), SETUP),
         ("GET", r"/api/energy/(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})",   # „Als Tabelle“: all plugs, for Excel
@@ -240,10 +250,11 @@ def make_handler(service: Service, password: str | None = None, access: SetupAcc
         def _log(self, method: str, seconds: float) -> None:
             """One entry per request: changes and failures always, the polling of the page only in the detailed log."""
             status = self._status
+            path = urlparse(self.path).path[:200]
             level = logging.WARNING if status is None or status >= 500 else \
-                logging.DEBUG if method in ("GET", "HEAD") and status < 400 else logging.INFO
+                logging.DEBUG if (method in ("GET", "HEAD") or QUIET.fullmatch(path)) and status < 400 else logging.INFO
             if log.isEnabledFor(level):
-                log.log(level, "%s %s → %s (%d ms, von %s)", method, urlparse(self.path).path[:200], status or "abgebrochen",
+                log.log(level, "%s %s → %s (%d ms, von %s)", method, path, status or "abgebrochen",
                         round(seconds * 1000), self._client())
 
         def _handle(self, method: str) -> None:

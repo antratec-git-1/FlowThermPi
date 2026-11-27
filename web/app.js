@@ -39,10 +39,10 @@ let sensorSearch = null; // „Fühler suchen“ in "Geräte": {running, waiting
 let plugSearch = null;   // „Steckdosen suchen“ in "Geräte": {running, data: {networks, seconds, plugs}, error}
 let sensorForm = null;   // sensor form in "Geräte": {mode: "new"|"edit", id, pill, channel, name, room, placeholder}
 let addFlow = null;      // „+ Gerät hinzufügen“ in "Geräte": {step: "what"|"find"|"where", kind, before: Set of Zigbee
-                         // addresses before the search, where: {type: "heater"|"plug", id}, room, name, heater}
+                         // addresses before the search, where: {type: "heater"|"plug"|"light", id}, room, name, heater}
 let pillForm = null;     // „Einrichten“ of a Pill: {pill, at: "search"|sensor id, mode}
 const calibHours = {};   // Kalibrierlauf: sensor id -> duration (hours) chosen before „starten“
-let deviceTab = ["sensors", "plugs"].includes(localStorage.getItem("heizung.deviceTab"))   // sub-tab of "Geräte": heaters, sensors, plugs
+let deviceTab = ["sensors", "plugs", "lights"].includes(localStorage.getItem("heizung.deviceTab"))   // sub-tab of "Geräte"
   ? localStorage.getItem("heizung.deviceTab") : "heaters";
 const pillRestart = {};  // Pill id -> true while it restarts after „Einrichten“
 const UPDATE_MAX_MS = 6 * 60 * 1000;   // stop waiting for an update after 6 minutes
@@ -683,7 +683,7 @@ function sensorName(s, list) {  // „Fühler“, „Fühler „Fensterbank“�
     : /Fühler/.test(s.name) ? esc(s.name) : `Fühler ${esc(s.name)}`;   // "pill-1 · Fühler 2" names itself
 }
 
-const ICONS = {   // drawn for this app: a radiator (heaters and thermostats) and a thermometer (sensors)
+const ICONS = {   // drawn for this app: a radiator (heaters and thermostats), a thermometer (sensors), a plug, a bulb
   heater: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3.4" y="4.5" width="3.2" height="14" rx="1.6"/>' +
     '<rect x="8.1" y="4.5" width="3.2" height="14" rx="1.6"/><rect x="12.8" y="4.5" width="3.2" height="14" rx="1.6"/>' +
     '<rect x="17.5" y="4.5" width="3.2" height="14" rx="1.6"/><path d="M2 7.5h20M2 15.5h20M5 18.5v2M19.1 18.5v2" ' +
@@ -694,6 +694,9 @@ const ICONS = {   // drawn for this app: a radiator (heaters and thermostats) an
   plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
     'stroke-linejoin="round"><path d="M9 2.8v4.7M15 2.8v4.7"/><path d="M6.5 7.5h11v3.8a5.5 5.5 0 0 1-11 0z"/>' +
     '<path d="M12 16.8v4.5"/></svg>',
+  light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
+    'stroke-linejoin="round"><path d="M9.2 17.5h5.6M10 20.8h4"/><path d="M12 2.8a6.2 6.2 0 0 0-3.7 11.2c.6.5 ' +
+    '.9 1.2.9 1.9v.3h5.6v-.3c0-.7.3-1.4.9-1.9A6.2 6.2 0 0 0 12 2.8z"/></svg>',
 };
 
 function deviceIcon(h, label = false) {
@@ -756,13 +759,55 @@ function tilePlugsHTML(g) {
   }).join("")}</ul>`;
 }
 
-function plugTile(g) {   // a room without heaters, with plugs: its name, a fresh sensor's temperature, its plugs
+function roomLights(g) {   // the lamps of a room (a heater without room has none)
+  return g.kind === "room" ? (state.lights || []).filter(l => l.room === g.id) : [];
+}
+
+function tileLightsHTML(g) {
+  // the light of the room: „Licht einschalten“ / „Licht ausschalten“ for all its lamps, „dunkler“ and „heller“ while it
+  // is on – and with several lamps each one on its own
+  const lamps = roomLights(g);
+  if (!lamps.length) return "";
+  const key = "light:" + g.id, sending = busy.has(key);
+  const on = lamps.filter(l => l.state === "ON" && !l.lost);
+  const dim = on.filter(l => l.dim && l.brightness != null);
+  const level = dim.length ? Math.round(avg(dim.map(l => l.brightness))) : null;
+  const lost = lamps.filter(l => l.lost);
+  const say = on.length ? `an${level != null && lamps.length === 1 ? ` · ${level} %` : ""}`
+    : lost.length === lamps.length ? "keine Verbindung" : "aus";
+  const head = `<div class="light-head"><span class="dico${on.length ? " on" : lost.length === lamps.length ? " offline"
+    : ""}" aria-hidden="true">${ICONS.light}</span><span class="light-title">Licht</span><span class="pstate${on.length
+    ? "" : " off"}">${say}</span></div>`;
+  const toggle = `<button class="big-btn${on.length ? "" : " primary"}" data-action="light-room" data-on="${on.length ? 0 : 1}"
+    ${sending ? "disabled" : ""}>${sending ? "wird gesendet …" : on.length ? "Licht ausschalten" : "Licht einschalten"}</button>`;
+  const dimmer = !dim.length ? "" : `<div class="tile-set light-set">
+      <button class="step" data-action="light-dim" data-step="-1" ${sending ? "disabled" : ""} aria-label="Dunkler"><span class="sym">−</span><span class="word">dunkler</span></button>
+      <div class="set-val"><span class="set-temp">${level} %</span><span class="set-label">Helligkeit</span></div>
+      <button class="step" data-action="light-dim" data-step="1" ${sending ? "disabled" : ""} aria-label="Heller"><span class="sym">+</span><span class="word">heller</span></button>
+    </div>`;
+  const rows = lamps.length < 2 ? "" : `<ul class="tile-lights">${lamps.map(l => {
+    const lkey = "lamp:" + l.id, isOn = l.state === "ON" && !l.lost;
+    const words = l.lost ? "keine Verbindung" : isOn ? `an${l.brightness != null ? ` · ${l.brightness} %` : ""}`
+      : l.state === "OFF" ? "aus" : "–";
+    return `<li data-light="${esc(l.id)}"><span class="dico${isOn ? " on" : l.lost ? " offline" : ""}" role="img"
+      aria-label="Lampe">${ICONS.light}</span><span class="dname">${esc(l.name)}<small>${esc(words)}</small></span>
+      <button class="small" data-action="light-one" data-on="${isOn ? 0 : 1}" ${busy.has(lkey) || sending ? "disabled" : ""}>${
+        busy.has(lkey) ? "schaltet …" : isOn ? "Ausschalten" : "Einschalten"}</button></li>`;
+  }).join("")}</ul>`;
+  const note = !lost.length ? "" : `<p class="tile-note">${lamps.length === 1 ? "Die Lampe antwortet nicht."
+    : `${esc(lost.map(l => l.name).join(", "))} ${lost.length === 1 ? "antwortet" : "antworten"} nicht.`} Ist der
+    Lichtschalter an der Wand an?</p>`;
+  return `<div class="tile-light">${head}${toggle}${dimmer}${rows}${note}</div>`;
+}
+
+function plainTile(g) {   // a room without heaters: its name, a fresh sensor's temperature, its plugs and its light
   const felt = roomTemp(g);
-  return `<article class="tile cool" data-kind="${g.kind}" data-id="${esc(g.id)}"${felt != null ? ` style="--tint:${
-    tileTint(felt)}"` : ""}>
+  return `<article class="tile cool${busy.has("light:" + g.id) ? " busy" : ""}" data-kind="${g.kind}" data-id="${esc(g.id)}"${
+    felt != null ? ` style="--tint:${tileTint(felt)}"` : ""}>
     <div class="tile-head"><h2>${esc(g.name)}</h2></div>
     ${felt == null ? "" : `<div class="tile-now"><span class="now-temp">${degBig(felt)}</span><span class="now-label">im Raum</span></div>`}
     ${tilePlugsHTML(g)}
+    ${tileLightsHTML(g)}
   </article>`;
 }
 
@@ -832,6 +877,7 @@ function homeTile(g) {
     ${tilePlugsHTML(g)}
     ${tileHistoryHTML(g)}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
+    ${tileLightsHTML(g)}
     ${heating && !isOff ? WAVE : ""}
   </article>`;
 }
@@ -844,9 +890,9 @@ function renderHome() {
   if (!state) return;
   renderHelp();
   renderLogFoot();
-  const gs = groups().filter(g => g.heaters.length || roomPlugs(g).length);   // a room with only plugs: a tile too
-  const tiles = document.getElementById("tiles");
-  const html = gs.length ? gs.map(g => g.heaters.length ? homeTile(g) : plugTile(g)).join("")
+  const gs = groups().filter(g => g.heaters.length || roomPlugs(g).length || roomLights(g).length);   // only plugs or
+  const tiles = document.getElementById("tiles");                                                   // light: a tile too
+  const html = gs.length ? gs.map(g => g.heaters.length ? homeTile(g) : plainTile(g)).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>';
   if (html !== tiles._html)   // new tiles: their heat waves go on where the old ones were, instead of starting over
     document.documentElement.style.setProperty("--wave-delay", `-${(performance.now() % 8000 / 1000).toFixed(2)}s`);
@@ -877,6 +923,30 @@ function noticeOk(id) {   // „OK“ on „Die Waschmaschine ist fertig“ – 
   act("notice:" + id, async () => {
     try { await api("POST", `api/notices/${encodeURIComponent(id)}/ok`); }
     catch (e) { if (!/nicht mehr/.test(e.message)) throw e; }   // gone already (someone else tapped it)
+  });
+}
+
+function lightRoom(g, on) {   // „Licht einschalten“ / „Licht ausschalten“: every lamp of the room – anyone may
+  if (!g) return;
+  act("light:" + g.id, async () => {
+    const res = await api("POST", `api/rooms/${encodeURIComponent(g.id)}/light`, { on });
+    toast(`${g.name}: ${res.message}`, !!res.warning);
+  });
+}
+
+function lightDim(g, step) {   // „heller“ / „dunkler“: the number on the tile says it – a note only if something is up
+  if (!g) return;
+  act("light:" + g.id, async () => {
+    const res = await api("POST", `api/rooms/${encodeURIComponent(g.id)}/light/dim`, { step });
+    if (res.warning || !/^Helligkeit/.test(res.message)) toast(`${g.name}: ${res.message}`, !!res.warning);
+  });
+}
+
+function lightOne(id, on) {   // one lamp on its own – on the tile (several lamps in the room) and in Geräte › Licht
+  if (!id) return;
+  act("lamp:" + id, async () => {
+    const res = await api("POST", `api/lights/${encodeURIComponent(id)}/switch`, { on });
+    toast(res.message, !!res.warning);
   });
 }
 
@@ -2694,6 +2764,122 @@ async function removePlug(id) {   // „Entfernen …“: a WLAN plug the app fo
   act("plug:" + id, async () => toast((await api("DELETE", `api/plugs/${encodeURIComponent(id)}`)).message));
 }
 
+// ------------------------------------------------------------------ Geräte › Licht
+const LIGHT_COLOR_WORDS = { warm: "warmweiß", neutral: "neutralweiß", kalt: "kaltweiß" };   // Service.LIGHT_COLORS
+
+function lightFacts(l) {   // "an · 70 %"
+  return l.lost ? "keine Verbindung" : l.state === "ON" ? `an${l.brightness != null ? ` · ${l.brightness} %` : ""}`
+    : l.state === "OFF" ? "aus" : "";
+}
+
+function lightSwitchHTML(l) {   // on and off – as on the start page
+  if (busy.has("lamp:" + l.id)) return '<span class="muted">schaltet …</span>';
+  const on = '<button class="small" data-action="light-one" data-on="1">Einschalten</button>';
+  const off = '<button class="small" data-action="light-one" data-on="0">Ausschalten</button>';
+  return l.lost ? `${on} ${off}` : l.state === "ON" ? `an ${off}` : l.state === "OFF" ? `aus ${on}` : `${on} ${off}`;
+}
+
+function lightColorHTML(l) {   // the colour the app gives the lamp whenever it switches it on – or as it had it last
+  if (!l.colors.length) return '<span class="muted">Diese Lampe hat nur eine Lichtfarbe.</span>';
+  const sending = busy.has("lightcolor:" + l.id);
+  const button = (value, label) => `<button class="${(l.color || "") === value ? "active" : ""}" data-action="light-color"
+    data-color="${value}" aria-pressed="${(l.color || "") === value}" ${sending ? "disabled" : ""}>${label}</button>`;
+  return `<div class="segmented chips" role="group" aria-label="Lichtfarbe von ${esc(l.name)}">${button("", "wie zuletzt")}${
+    l.colors.map(c => button(c, LIGHT_COLOR_WORDS[c])).join("")}</div><div class="segmented-text muted">${sending
+    ? "wird gesendet …" : l.color ? "Die App stellt sie bei jedem Einschalten ein." : "Die Lampe bleibt, wie sie zuletzt war."}</div>`;
+}
+
+function lightTileHTML(l) {
+  const removing = zigbeeNetPending === l.id, z = zigbeeDevice(l.id);
+  return `<div class="device ${removing ? "busy" : ""}" data-light="${esc(l.id)}">
+    <div class="device-head"><span class="dot ${l.lost ? "offline" : "ok"}"></span><strong class="dname">${esc(l.name)}</strong>
+      ${radioTag(true)}<span class="muted">${esc(lightFacts(l))}</span>
+      <button class="small" data-action="light-remove" ${removing ? "disabled" : ""}>${removing ? "entferne …" : "Entfernen …"}</button></div>
+    <dl>
+      <dt>Name</dt><dd>${esc(l.name)} <button class="small" data-action="light-rename">Ändern …</button></dd>
+      <dt>Raum</dt><dd><select data-action="light-room-set" aria-label="Raum von ${esc(l.name)}" ${
+        busy.has("lightroom:" + l.id) ? "disabled" : ""}>${plugRoomOptions(l.room)}</select>${l.room ? ""
+        : ' <span class="muted">– ohne Raum nicht auf der Startseite</span>'}</dd>
+      <dt>Schalten</dt><dd>${lightSwitchHTML(l)}</dd>
+      <dt>Lichtfarbe</dt><dd>${lightColorHTML(l)}</dd>
+      <dt>Gerät</dt><dd>${esc([l.model, z && zigbeeSignal(z.signal)].filter(Boolean).join(" · ") || "–")}</dd>
+      <dt>Zigbee-Adresse</dt><dd>${esc(l.id)}</dd>
+      ${l.lost ? '<dt>Zustand</dt><dd><span class="error-text">Hat beim letzten Schalten nicht geantwortet. Ist der ' +
+        "Lichtschalter an der Wand an?</span></dd>" : ""}
+    </dl></div>`;
+}
+
+function lightsCardHTML() {
+  const lamps = state.lights || [];
+  return `<article class="card"><div class="card-head"><h2>Licht</h2></div>
+    <p class="hint">Lampen mit Zigbee – Hue, IKEA, Innr und andere – hängen direkt am Pi, ohne Bridge. Wähle für jede
+      Lampe ihren Raum: Auf der Startseite schalten die Bewohner dann das Licht des Raums ein und aus, heller und dunkler.
+      Damit die Lampen immer Strom haben, bleibt der Lichtschalter an der Wand an.</p>
+    ${lamps.map(lightTileHTML).join("")}
+    ${lamps.length ? "" : '<p class="empty">Noch keine Lampe in der App. Eine neue lernst du mit „+ Gerät hinzufügen“ an.</p>'}
+  </article>`;
+}
+
+async function setLightRoom(id, room, quiet = false) {   // the room of a lamp – true when saved
+  const key = "lightroom:" + id;
+  if (busy.has(key)) return false;
+  busy.add(key);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  let ok = false;
+  try {
+    const res = await api("PUT", `api/lights/${encodeURIComponent(id)}/room`, { room: room || null });
+    if (!quiet) toast(res.message || "Gespeichert.");
+    ok = true;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
+  return ok;
+}
+
+function setLightColor(id, color) {   // „Lichtfarbe“: a lamp that is on gets it at once
+  act("lightcolor:" + id, async () => {
+    const res = await api("PUT", `api/lights/${encodeURIComponent(id)}/color`, { color });
+    toast(res.message, !!res.warning);
+  });
+}
+
+async function renameLight(id, quiet = false, name = null) {   // „Ändern …“ at the name – it stays in the app
+  const l = (state.lights || []).find(x => x.id === id);
+  if (!l) return false;
+  const fallback = `Lampe ${id.slice(-4).toUpperCase()}`;   // as the server names it
+  if (name !== null) {   // from „+ Gerät hinzufügen“
+    try { const res = await api("PUT", `api/lights/${encodeURIComponent(id)}/name`, { name }); if (!quiet) toast(res.message); }
+    catch (e) { toast(e.message, true); return false; }
+    return true;
+  }
+  const done = await ask({ title: "Lampe umbenennen", text: `Leer lassen: „${fallback}“.`,
+    fields: [{ id: "name", label: "Name", type: "text", value: l.name === fallback ? "" : l.name, placeholder: fallback }],
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Speichern", value: "submit", cls: "primary" }],
+    onSubmit: async v => {
+      try { toast((await api("PUT", `api/lights/${encodeURIComponent(id)}/name`, { name: v.name })).message); return null; }
+      catch (e) { return e.message; }
+    } });
+  if (done) { invalidate(); await refresh(); }
+  return !!done;
+}
+
+async function removeLight(id) {   // „Entfernen …“: the Pi unpairs it – the lamp itself stays as it is
+  const l = (state.lights || []).find(x => x.id === id);
+  if (!l) return;
+  const yes = await ask({ title: "Lampe entfernen?",
+    text: `Der Pi meldet ${l.name} im Zigbee-Netz ab. Die Lampe selbst bleibt, wie sie ist – an oder aus. Später kannst ` +
+      "du sie mit „+ Gerät hinzufügen“ wieder anlernen.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  await zigbeeUnpair(id, "die Lampe", "sie");
+  return refresh();
+}
+
 function sensorTileHTML(s, roomOptions) {
   const editingThis = sensorForm && sensorForm.mode === "edit" && sensorForm.id === s.id;
   const setupThis = !editingThis && pillForm && pillForm.at === s.id;
@@ -3233,13 +3419,15 @@ function sensorsCardHTML(roomOptions) {
   </article>`;
 }
 
-function zigbeeOthersHTML() {   // in the Zigbee network, but neither a thermostat nor a plug of the app: being paired, failed, unknown
+function zigbeeOthersHTML() {   // in the Zigbee network, but no thermostat, plug or lamp of the app: being paired, failed, unknown
   if (!(state.app && state.app.zigbee)) return "";
-  const shown = new Set(state.heaters.map(h => h.id).concat((state.plugs || []).map(p => p.id)));
+  const shown = new Set(state.heaters.map(h => h.id).concat((state.plugs || []).map(p => p.id),
+                                                            (state.lights || []).map(l => l.id)));
   const others = ((zigbee && zigbee.net && zigbee.net.devices) || []).filter(d => !shown.has(d.ieee));
   if (!others.length) return "";
   return `<article class="card"><div class="card-head"><h2>Weitere Zigbee-Geräte</h2></div>
-    <p class="hint">Diese Geräte sind im Zigbee-Netz, aber (noch) kein Thermostat und keine Steckdose der App.</p>
+    <p class="hint">Diese Geräte sind im Zigbee-Netz, aber (noch) kein Thermostat, keine Steckdose und keine Lampe der
+      App.</p>
     <ul class="net-list zigbee-list">${others.map(zigbeeDeviceHTML).join("")}</ul>
   </article>`;
 }
@@ -3254,12 +3442,14 @@ function renderDevices(el) {   // every device by its kind – new ones come wit
   if (addFlow) return setHTML(el, addFlowHTML(roomOptions));
   const subtab = (id, label, count) => `<button data-subtab="${id}" role="tab" aria-selected="${deviceTab === id}">${label}
       <span class="count">${count}</span></button>`;
+  const lamps = !!(state.app && state.app.zigbee) || (state.lights || []).length > 0;   // light needs Zigbee
+  if (deviceTab === "lights" && !lamps) deviceTab = "heaters";
   const bar = `<div class="devices-bar"><div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizungen",
       state.heaters.length)}${subtab("sensors", "Raumfühler", (state.sensors || []).length)}${subtab("plugs", "Steckdosen",
-      (state.plugs || []).length)}</div>
+      (state.plugs || []).length)}${lamps ? subtab("lights", "Licht", (state.lights || []).length) : ""}</div>
     <button class="primary" data-action="add-open">+ Gerät hinzufügen</button></div>`;
   const list = deviceTab === "plugs" ? plugsCardHTML() : deviceTab === "sensors" ? sensorsCardHTML(roomOptions)
-    : heatersCardHTML(roomOptions);
+    : deviceTab === "lights" ? lightsCardHTML() : heatersCardHTML(roomOptions);
   setHTML(el, bar + list + zigbeeOthersHTML());
 }
 
@@ -3277,6 +3467,14 @@ const SHELLY_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung
   "Mit dem Handy in dieses WLAN gehen, im Browser 192.168.33.1 öffnen und dort das Heim-WLAN mit seinem Passwort eintragen.",
   "Das Handy wieder ins Heim-WLAN bringen und hierher zurückkommen – die App sucht dann von selbst. Bei der Steckdose " +
   "„Übernehmen“ drücken; ist sie noch nicht dabei, „Erneut suchen“."];
+const LIGHT_STEPS = ["Die Lampe einschalten – der Lichtschalter an der Wand bleibt an. Beim Anlernen sollte sie nicht " +
+  "weit vom Pi weg sein.",
+  "Die Lampe zurücksetzen, dann sucht sie ein neues Netz:<ul class=\"maker-steps\">" +
+  "<li><b>Hue:</b> in der Hue-App löschen. Ohne Hue-App: 5-mal hintereinander 2 Sekunden aus und 8 Sekunden an.</li>" +
+  "<li><b>IKEA FLOALT:</b> 6-mal kurz hintereinander aus- und wieder einschalten.</li>" +
+  "<li><b>IKEA JETSTRÖM:</b> die Reset-Taste am Netzteil unter der Abdeckung drücken.</li>" +
+  "<li><b>Innr:</b> so, wie es in der Anleitung von Innr steht.</li></ul>",
+  "Warten: Nach etwa einer Minute erscheint sie hier."];
 const SONOFF_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.",
   "Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.",
   "Warten: Nach etwa einer Minute erscheint sie hier."];
@@ -3294,7 +3492,8 @@ function addKinds() {   // what can be added here: a thermostat only on a Pi wit
   return [["heater", "Heizung", "AeroFlow-Heizung mit FlexiSmart-Pro-Regler – im WLAN"]]
     .concat(zig ? [["thermostat", "Thermostat", "SONOFF-Thermostat für einen Heizkörper – funkt über Zigbee"]] : [])
     .concat([["sensor", "Raumfühler", "Shelly Pill mit Temperaturfühler – im WLAN"],
-             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder ein anderes Gerät – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]]);
+             ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder ein anderes Gerät – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]])
+    .concat(zig ? [["light", "Lampe", "Zigbee-Lampe von Hue, IKEA, Innr und anderen – direkt am Pi, ohne Bridge"]] : []);
 }
 
 function addStep() {   // 0 … 3 for the steps above the guide
@@ -3338,15 +3537,17 @@ function zigbeeSearchStateHTML() {   // the Zigbee network open for new devices:
 
 function addZigbeeItemHTML(d) {   // a device that joined: being paired, ready („Weiter“), failed or unknown („Entfernen …“)
   const heater = state.heaters.find(h => h.id === d.ieee), plug = (state.plugs || []).find(p => p.id === d.ieee);
-  const ready = d.interview === "done" && d.supported && !!(heater || plug);
+  const lamp = (state.lights || []).find(l => l.id === d.ieee);
+  const ready = d.interview === "done" && d.supported && !!(heater || plug || lamp);
   const [dot, words] = zigbeeDeviceState(d);
-  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : "Unbekanntes Gerät");
-  const title = heater ? heater.name : plug ? plug.name : model;
+  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose"
+    : d.light ? "Lampe" : "Unbekanntes Gerät");
+  const title = heater ? heater.name : plug ? plug.name : lamp ? lamp.name : model;
   const bad = d.interview === "failed" || (d.interview === "done" && !d.supported);
   return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${ready ? "ok" : dot}"></span><span class="hname"><b>${esc(title)}</b>${
       title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
       <span class="muted zigbee-facts">${esc(ready ? "✓ angelernt" : words)}</span></span>
-    ${ready ? `<button class="small primary" data-action="add-next" data-type="${heater ? "heater" : "plug"}">Weiter</button>`
+    ${ready ? `<button class="small primary" data-action="add-next" data-type="${heater ? "heater" : plug ? "plug" : "light"}">Weiter</button>`
       : bad ? `<button class="small" data-action="zigbee-forget" ${zigbeeNetPending ? "disabled" : ""}>${
         zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button>` : ""}</li>`;
 }
@@ -3374,9 +3575,9 @@ function addFindHTML() {   // steps 2 and 3: the guide and what the search found
         "Die App sucht im Heimnetz. Beim Fühler „Übernehmen“ drücken, dann Name und Raum wählen."])
       + (sensorSearch ? sensorPanelHTML() : "");
   }
-  if (f.kind === "thermostat") {
+  if (f.kind === "thermostat" || f.kind === "light") {
     if (!zigbee) return `<p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p>`;
-    return zigbeeReady() ? addZigbeeHTML(THERMOSTAT_STEPS) : zigbeeMissingHTML();
+    return zigbeeReady() ? addZigbeeHTML(f.kind === "light" ? LIGHT_STEPS : THERMOSTAT_STEPS) : zigbeeMissingHTML();
   }
   // a plug: Shelly in the WLAN – and with Zigbee a SONOFF too; both searches run at once
   const zig = state.app && state.app.zigbee;
@@ -3391,6 +3592,17 @@ function addWhereHTML(roomOptions) {   // step 4: the room – for a plug the he
   const f = addFlow, w = f.where, saving = busy.has("addflow") || busy.has("plugheater:" + w.id);
   const done = `<div class="row"><button class="primary" data-action="add-finish" ${saving ? "disabled" : ""}>${
     saving ? "speichere …" : "Fertig"}</button></div>`;
+  if (w.type === "light") {
+    const l = (state.lights || []).find(x => x.id === w.id);
+    return `<p><b>${esc(l ? l.name : "Die Lampe")}</b> ist in der App. Wie soll sie heißen, und in welchem Raum ist sie?</p>
+      <div class="device-form">
+        <label>Name<input data-afield="name" value="${esc(f.name)}" placeholder="${esc(l ? l.name : "")}" maxlength="40"
+          autocomplete="off"></label>
+        <label>Raum<select data-afield="room">${roomOptions(f.room)}</select></label>
+        <p class="hint">${state.rooms.length ? "" : "Noch kein Raum angelegt – Räume legst du im Tab „Räume“ über „+ Raum“ an. "
+          }Im Raum erscheint die Lampe auf der Startseite: mit „Licht einschalten“, „heller“ und „dunkler“.</p>
+      </div>${done}`;
+  }
   if (w.type === "plug") {
     const p = (state.plugs || []).find(x => x.id === w.id);
     const named = `<b>${esc(p ? p.name : "Die Steckdose")}</b> ist in der App.`;
@@ -3482,8 +3694,9 @@ async function addZigbeeSearch() {   // open the Zigbee network – „Abbrechen
 function addWhere(type, id) {   // step 4
   const h = type === "heater" ? state.heaters.find(x => x.id === id) : null;
   const p = type === "plug" ? (state.plugs || []).find(x => x.id === id) : null;
+  const l = type === "light" ? (state.lights || []).find(x => x.id === id) : null;
   addFlow = Object.assign(addFlow || { kind: type }, { step: "where", where: { type, id }, name: "",
-    room: (h && h.room) || "", heater: (p && p.heater) || "", appliance: (p && p.appliance) || "sonstiges" });
+    room: (h && h.room) || (l && l.room) || "", heater: (p && p.heater) || "", appliance: (p && p.appliance) || "sonstiges" });
   invalidate();
   render();
 }
@@ -3496,6 +3709,16 @@ async function addFinish() {   // „Fertig“: save the room (and a thermostat'
     if (!heater && p && f.appliance !== p.appliance && !(await setPlugAppliance(w.id, f.appliance, true))) return;
     if (heater ? !(await setPlugHeater(w.id, heater, true)) : f.room && !(await setPlugRoom(w.id, f.room, true))) return;
     deviceTab = "plugs";
+  } else if (w.type === "light") {   // its name (if one was typed) and its room
+    busy.add("addflow");
+    render();
+    try {
+      if (String(f.name || "").trim() && !(await renameLight(w.id, true, String(f.name).trim()))) return;
+      if (f.room && !(await setLightRoom(w.id, f.room, true))) return;
+    } finally {
+      busy.delete("addflow");
+    }
+    deviceTab = "lights";
   } else {
     const body = {};
     if (f.room) body.room = f.room;
@@ -4391,9 +4614,11 @@ async function zigbeeRemoveDevice(ieee, force) {   // null when done, else the e
 async function zigbeeForget(ieee) {
   const d = ((zigbee && zigbee.net && zigbee.net.devices) || []).find(x => x.ieee === ieee);
   if (!d) return;
-  const it = d.thermostat ? "das Thermostat" : d.plug ? "die Steckdose" : "das Gerät", pron = d.plug ? "sie" : "es";
+  const it = d.thermostat ? "das Thermostat" : d.plug ? "die Steckdose" : d.light ? "die Lampe" : "das Gerät";
+  const pron = d.plug || d.light ? "sie" : "es";
   const owner = d.plug && ((state && state.heaters) || []).find(h => h.plug && h.plug.id === ieee);
-  const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : d.plug ? "Steckdose entfernen?" : "Gerät entfernen?",
+  const yes = await ask({ title: d.thermostat ? "Thermostat entfernen?" : d.plug ? "Steckdose entfernen?" : d.light
+    ? "Lampe entfernen?" : "Gerät entfernen?",
     text: `Der Pi meldet ${it} im Zigbee-Netz ab.${owner ? ` Sie gehört dann auch nicht mehr zu ${owner.name}.` : ""} Willst du ${
       pron} später wieder nutzen, lernst du ${pron} einfach neu an.`,
     buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
@@ -4551,7 +4776,7 @@ function zigbeeSignal(q) { return q == null ? "" : q >= 100 ? "Funk gut" : q >= 
 
 function zigbeeDeviceState(d) {   // [dot, words]
   if (d.interview === "pending" || d.interview === "running") return ["on", "wird angelernt …"];
-  if (d.interview === "failed") return ["offline", "Anlernen hat nicht geklappt – bitte noch einmal suchen und am Gerät wieder die Taste drücken (Thermostat: mittlere Taste 2 Sekunden, Steckdose: 5 Sekunden)"];
+  if (d.interview === "failed") return ["offline", "Anlernen hat nicht geklappt – bitte noch einmal suchen und am Gerät wieder die Taste drücken (Thermostat: mittlere Taste 2 Sekunden, Steckdose: 5 Sekunden; eine Lampe noch einmal zurücksetzen)"];
   if (!d.supported) return ["offline", "wird von Zigbee2MQTT nicht unterstützt"];
   return ["ok", "bereit"];
 }
@@ -4560,16 +4785,19 @@ function plugName(ieee) { return "Steckdose " + ieee.slice(-4).toUpperCase(); } 
 
 function zigbeeDeviceHTML(d) {
   const [dot, words] = zigbeeDeviceState(d);
-  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : "Unbekanntes Gerät");
+  const model = [d.vendor, d.model].filter(Boolean).join(" ") || (d.thermostat ? "Thermostat" : d.plug ? "Steckdose"
+    : d.light ? "Lampe" : "Unbekanntes Gerät");
   const heaters = (state && state.heaters) || [];
   const named = heaters.find(h => h.id === d.ieee && h.custom_name);   // its name in the app
+  const lamp = d.light && ((state && state.lights) || []).find(l => l.id === d.ieee);
   const keep = s => s.replace(/ /g, " ");   // "20,5 °C" and the like stay on one line
   const plug = d.plug && d.interview === "done" && d.supported;   // a plug that is ready: its switch, power and day's energy
   const facts = [words, d.battery != null ? keep(`Batterie ${Math.round(d.battery)} %`) : "",
     plug && d.switch ? (d.switch === "ON" ? "an" : "aus") : "", plug && d.power_w != null ? keep(wattText(d.power_w)) : "",
-    plug && d.energy_today != null ? keep(`heute ${kwhText(d.energy_today)}`) : "", keep(zigbeeSignal(d.signal)),
+    plug && d.energy_today != null ? keep(`heute ${kwhText(d.energy_today)}`) : "",
+    lamp && !lamp.lost && lamp.state ? keep(lightFacts(lamp)) : "", keep(zigbeeSignal(d.signal)),
     d.temperature != null ? keep(deg(d.temperature)) : ""].filter(Boolean).join(" · ");
-  const title = named ? named.custom_name : d.plug ? plugName(d.ieee) : model;
+  const title = named ? named.custom_name : d.plug ? plugName(d.ieee) : lamp ? lamp.name : model;
   return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${dot}"></span><span class="hname"><b>${esc(title)}</b>${
       title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
       ${d.new ? `<span class="tag ok">neu</span>` : ""}
@@ -4623,6 +4851,9 @@ document.addEventListener("click", e => {
     case "home-plan": return homeMode(groupFor(tile), "auto", "läuft wieder nach Plan");
     case "home-boost-off": return homeMode(groupFor(tile), "boost_off", "volle Kraft beendet");
     case "plug-on": return plugOn(groupFor(tile), t.dataset.heater);
+    case "light-room": return lightRoom(groupFor(tile), t.dataset.on === "1");
+    case "light-dim": return lightDim(groupFor(tile), Number(t.dataset.step));
+    case "light-one": return lightOne(t.closest("[data-light]").dataset.light, t.dataset.on === "1");
     case "notice-ok": return noticeOk(t.dataset.notice);
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
@@ -4709,6 +4940,9 @@ document.addEventListener("click", e => {
     case "plug-rename": return renamePlug(t.closest("[data-plug]").dataset.plug);
     case "plug-switch": return switchPlug(t.closest("[data-plug]").dataset.plug, t.dataset.on === "1");
     case "plug-energy": return openPlugEnergy(t.closest("[data-plug]").dataset.plug);
+    case "light-rename": return renameLight(t.closest("[data-light]").dataset.light);
+    case "light-color": return t.classList.contains("active") ? undefined : setLightColor(t.closest("[data-light]").dataset.light, t.dataset.color);
+    case "light-remove": return removeLight(t.closest("[data-light]").dataset.light);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
     case "sensor-edit": return openSensorForm(t.closest(".device").dataset.sensor);
@@ -4798,6 +5032,7 @@ document.addEventListener("change", e => {
     case "plug-heater": return setPlugHeater(t.closest("[data-plug]").dataset.plug, t.value);
     case "plug-room": return setPlugRoom(t.closest("[data-plug]").dataset.plug, t.value);
     case "plug-appliance": return setPlugAppliance(t.closest("[data-plug]").dataset.plug, t.value);
+    case "light-room-set": return setLightRoom(t.closest("[data-light]").dataset.light, t.value);
     case "crun-hours": calibHours[t.closest(".device").dataset.sensor] = Number(t.value); t.blur(); return;
   }
 });

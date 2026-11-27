@@ -12,7 +12,14 @@ with a fresh last_seen; …/get brings the state, too. A thermostat in `asleep` 
 
 Its plugs behave like the SONOFF S60ZBTPF (plug with power metering, a router): …/set takes state (ON, OFF, TOGGLE)
 and power_on_behavior (off, on, toggle, previous); switched off, it measures nothing. What it measures is made up –
-report() sets it, as if a heater behind it heated. join_kind says what joins during a search: a thermostat or a plug.
+report() sets it, as if a heater behind it heated. join_kind says what joins during a search: a thermostat, a plug or
+a lamp (light_kind: which one).
+
+Its lamps behave as Zigbee2MQTT's light converters describe them (zigbee-herdsman-converters, read on 27.11.2026):
+…/set takes state (ON, OFF, TOGGLE), brightness (0–254; it switches the lamp on, 0 off), brightness_step and
+color_temp (in mired, kept within the lamp's range) and publishes the new state. Models after Zigbee2MQTT's device pages
+(IKEA FLOALT, Innr RCL 240 T, Hue); their ranges of colour temperature are made up. A lamp in `asleep` has no power and
+answers nothing.
 
 A firmware update (bridge/request/device/ota_update/update) goes as the Zigbee2MQTT guide describes it (read on
 25.11.2026): the device reports its progress `ota_steps` times, `ota_every` seconds apart; only at the end comes the
@@ -335,6 +342,50 @@ def plug(ieee: str, interview: str = "SUCCESSFUL") -> dict:
             "interview_completed": done, "interview_state": interview, "endpoints": {}}
 
 
+# three lamps as bridge/devices lists them: model id, maker, description, colour temperatures (mired), colour or not
+LIGHTS = {"floalt": ("L1529", "IKEA", "FLOALT LED light panel, dimmable, white spectrum (60x60 cm)", (250, 454), False),
+          "innr": ("RCL 240 T", "Innr", "Round ceiling light, white spectrum", (200, 454), False),
+          "hue": ("9290012573A", "Philips", "Hue white and color ambiance E26/E27/E14", (153, 500), True)}
+LIGHT_MODELS = {model for model, *_ in LIGHTS.values()}
+
+
+def light_state(on: bool = False, brightness: int = 203, color_temp: int = 370) -> dict:
+    """A lamp's state as Zigbee2MQTT publishes it."""
+    return {"state": "ON" if on else "OFF", "brightness": brightness, "color_temp": color_temp, "color_mode": "color_temp",
+            "power_on_behavior": "previous", "linkquality": 141,
+            "update": {"state": "idle", "installed_version": 16777287, "latest_version": 16777287}}
+
+
+def light(ieee: str, kind: str = "floalt", interview: str = "SUCCESSFUL") -> dict:
+    """A lamp as bridge/devices lists it – a router on mains power, the definition only once it is interviewed."""
+    model, vendor, description, (low, high), color = LIGHTS[kind]
+    done = interview == "SUCCESSFUL"
+    features = [{"type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON",
+                 "value_off": "OFF", "value_toggle": "TOGGLE"},
+                {"type": "numeric", "name": "brightness", "property": "brightness", "access": 7, "value_min": 0,
+                 "value_max": 254},
+                {"type": "numeric", "name": "color_temp", "property": "color_temp", "access": 7, "unit": "mired",
+                 "value_min": low, "value_max": high}]
+    if color:
+        features.append({"type": "composite", "name": "color_xy", "property": "color", "access": 7, "features": [
+            {"type": "numeric", "name": "x", "property": "x", "access": 7},
+            {"type": "numeric", "name": "y", "property": "y", "access": 7}]})
+    return {"ieee_address": ieee, "type": "Router", "network_address": 0x2C31, "supported": done,
+            "friendly_name": ieee, "disabled": False, "description": None,
+            "definition": {"source": "native", "model": model, "vendor": vendor, "description": description,
+                           "exposes": [{"type": "light", "features": features},
+                                       {"type": "enum", "name": "effect", "property": "effect", "access": 2,
+                                        "values": ["blink", "breathe", "okay", "finish_effect", "stop_effect"]},
+                                       {"type": "enum", "name": "power_on_behavior", "property": "power_on_behavior",
+                                        "values": ["off", "on", "toggle", "previous"], "access": 7},
+                                       {"type": "numeric", "name": "linkquality", "property": "linkquality",
+                                        "access": 1}],
+                           "supports_ota": True, "options": []} if done else None,
+            "power_source": "Mains (single phase)", "software_build_id": "1.0.21" if done else None,
+            "model_id": model, "manufacturer": vendor, "interviewing": interview == "IN_PROGRESS",
+            "interview_completed": done, "interview_state": interview, "endpoints": {}}
+
+
 class FakeZ2M:
     """Zigbee2MQTT 2.x as the app sees it over MQTT. join_after: seconds after permit_join until a thermostat joins
     (None: nobody comes); interview: seconds its interview takes."""
@@ -364,7 +415,8 @@ class FakeZ2M:
         self.ota_error: str | None = None   # why a firmware update fails (e.g. the device does not take part)
         self.ota_firmware = "1.1.4"         # the firmware (software_build_id) after an update
         self.ota_forgets = {"smart_temperature_control": "OFF", "system_mode": "off"}   # … and what it forgets then
-        self.join_kind = "thermostat"       # what joins during a search: "thermostat" or "plug"
+        self.join_kind = "thermostat"       # what joins during a search: "thermostat", "plug" or "light" …
+        self.light_kind = "floalt"          # … which lamp (see LIGHTS)
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
         broker.hooks.append(self._command)
@@ -407,12 +459,16 @@ class FakeZ2M:
         self.broker.publish(f"{self.BASE}/bridge/event", {"type": kind, "data": data})
 
     def _fresh(self, ieee: str) -> dict:
-        """The state a device starts with – a plug's or a thermostat's."""
-        return plug_state() if self._is_plug(ieee) else trv_state()
+        """The state a device starts with – a plug's, a lamp's or a thermostat's."""
+        model = self._model(ieee)
+        return plug_state() if model == PLUG_MODEL else light_state() if model in LIGHT_MODELS else trv_state()
+
+    def _model(self, ieee: str) -> str | None:
+        with self.lock:
+            return next((d["model_id"] for d in self.devices if d["ieee_address"] == ieee), None)
 
     def _is_plug(self, ieee: str) -> bool:
-        with self.lock:
-            return any(d["ieee_address"] == ieee and d["model_id"] == PLUG_MODEL for d in self.devices)
+        return self._model(ieee) == PLUG_MODEL
 
     def _values(self, ieee: str) -> None:
         """The device's whole state, retained – as after every message from it."""
@@ -473,6 +529,35 @@ class FakeZ2M:
             state.update(new)
         self._values(ieee)
 
+    def _apply_light(self, ieee: str, body: dict, device: dict) -> None:
+        """What the light converters do with a set: state, brightness (switches on; 0 off), brightness_step and
+        color_temp (within the lamp's range); transition is taken and ignored. Then the lamp's new state comes back."""
+        temp = next(f for f in device["definition"]["exposes"][0]["features"] if f["property"] == "color_temp")
+        number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
+        with self.lock:
+            state = self.states.setdefault(ieee, light_state())
+            new = dict(state)
+            for key, value in body.items():
+                if key == "state" and isinstance(value, str) and value.upper() in ("ON", "OFF", "TOGGLE"):
+                    value = value.upper()
+                    new["state"] = ("OFF" if new["state"] == "ON" else "ON") if value == "TOGGLE" else value
+                elif key == "brightness" and number(value) and 0 <= value <= 254:
+                    new["brightness"], new["state"] = (round(value), "ON") if value else (new["brightness"], "OFF")
+                elif key == "brightness_step" and number(value):
+                    level = max(0, min(254, new["brightness"] + round(value)))
+                    new["brightness"], new["state"] = (level, "ON") if level else (new["brightness"], "OFF")
+                elif key == "color_temp" and number(value):
+                    new["color_temp"] = min(max(round(value), temp["value_min"]), temp["value_max"])
+                    new["color_mode"] = "color_temp"
+                elif key != "transition":
+                    self.refused.append(f"No converter available for '{key}'" if key not in
+                                        ("state", "brightness", "brightness_step", "color_temp")
+                                        else f"Invalid value {value} for {key}")
+                    return
+            state.clear()
+            state.update(new)
+        self._values(ieee)
+
     def _apply(self, ieee: str, body: dict) -> None:
         """What the TRV-ZBT's converters do with a set: check each value, write it, then publish the state."""
         with self.lock:
@@ -481,6 +566,8 @@ class FakeZ2M:
             return
         if device["model_id"] == PLUG_MODEL:
             return self._apply_plug(ieee, body)
+        if device["model_id"] in LIGHT_MODELS:
+            return self._apply_light(ieee, body, device)
         with self.lock:
             state = self.states.setdefault(ieee, trv_state())
             plans = self.plans.setdefault(ieee, {g: {d: state[f"weekly_schedule_{d}"] for d in DAYS} for g in "123"})
@@ -656,9 +743,11 @@ class FakeZ2M:
         later(self.ota_every, lambda: step(0))
 
     def _join(self) -> None:
-        """A thermostat whose middle button was held for 2 s (or a plug whose button was held for 5 s): it joins, is
-        interviewed, reports its values."""
-        make = plug if self.join_kind == "plug" else thermostat
+        """A thermostat whose middle button was held for 2 s (a plug whose button was held for 5 s, a lamp that was
+        reset): it joins, is interviewed, reports its values."""
+        kind = self.light_kind
+        make = plug if self.join_kind == "plug" else (lambda i, *a: light(i, kind, *a)) if self.join_kind == "light" \
+            else thermostat
         with self.lock:
             if not (self.online and self.permit_end and self.permit_end > time.time()):
                 return
