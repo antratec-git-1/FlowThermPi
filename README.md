@@ -92,22 +92,37 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 ## Funktionen der Einrichtung
 
 - **Räume:** Heizungen zu Räumen zusammenfassen und gemeinsam steuern
-  (Solltemperatur, Manuell / Automatik / Boost / Aus). Im Tab „Räume“ oben **+ Raum**, auf jeder
-  Raum-Kachel **Bearbeiten**: Name und die Heizungen des Raums ankreuzen (eine Heizung, die schon in
-  einem anderen Raum ist, wechselt dabei den Raum); dort auch „Raum löschen“. Kommt eine Heizung
-  neu in einen Raum, zeigt die Kachel an, dass der Heizplan noch gesendet werden muss. Unten auf jeder Raum-Kachel
-  steht ab 0.4.11 eine Liste aller Geräte des Raums mit **Ist** und **Soll**: Heizungen und Thermostate (mit Hinweisen
-  wie Automatik, Boost, „Fenster offen“ oder „Batterie schwach“) und Fühler (mit der Uhrzeit ihrer letzten Messung).
-  Die große „Raumtemperatur“ kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat. Ab 0.4.12 mit
-  Symbol vor jedem Gerät (der Heizkörper ist warm gefärbt, solange er heizt, und rot ohne Verbindung) und unter jeder
-  Heizung der Abweichung zum Fühler.
+  (Solltemperatur, Manuell / Automatik / Boost / Aus). Ab 0.4.25 ist der Tab „Räume“ eine **Liste**: je Raum Name,
+  Temperatur und kleine Schilder – was er hat („2 Heizungen“, „Fühler“, „1 Steckdose“, „Licht · 2 Lampen“,
+  „1 Schalter“, „Bewegungsmelder“) und was nachzusehen ist („keine Verbindung“ rot, „Batterie bald wechseln“ gelb).
+  Ganz unten „Ohne Raum“ mit den Geräten, die noch keinen haben; oben **+ Raum**. Ein Tipp öffnet die
+  **Raum-Ansicht** mit allem, was zum Raum gehört:
+  - oben „‹ Alle Räume“ (auch die Zurück-Taste des Handys führt zur Liste), der Name mit **Bearbeiten** (Name, Farbe,
+    die Heizungen des Raums ankreuzen – eine Heizung aus einem anderen Raum wechselt dabei –, „Raum löschen“) und
+    **+ Gerät hinzufügen**: Bei „Wohin?“ ist der Raum schon gewählt, nach „Fertig“ geht es zurück in den Raum;
+  - die Abschnitte **Heizen**, **Raumfühler**, **Steckdosen** und **Licht** – jeder mit seiner Anzahl, nur wenn der
+    Raum so ein Gerät hat, und zum Zuklappen (das Handy merkt es sich). Darin stehen dieselben Karten wie unter
+    *Geräte*;
+  - unter Heizen: Solltemperatur, Modus, Heizplan mit **Senden**, die Liste der Geräte mit **Ist** und **Soll**
+    (Heizungen und Thermostate mit Hinweisen wie Automatik, Boost, „Fenster offen“ oder „Batterie schwach“ und der
+    Abweichung zum Fühler, dann die Fühler mit ihrer letzten Messung) und **Verlauf**. Die große „Raumtemperatur“
+    kommt wie auf der Startseite vom Fühler, wenn er frisch gemessen hat. Kommt eine Heizung neu in einen Raum, steht
+    da, dass der Heizplan noch gesendet werden muss;
+  - unter Licht: Lampen, Schalter, Bewegungsmelder und „Licht bei Bewegung“.
+
+  Wählt man an einem Gerät einen anderen Raum, verschwindet es aus der Ansicht, und eine Meldung sagt, wo es jetzt
+  ist. Ein Raum ohne Heizung bekommt keine Heizknöpfe. Der Tab *Geräte* bleibt: alle Geräte nach Art.
+- **Farbe je Raum** (ab 0.4.25): unter **Bearbeiten** eine von 24 Farben oder mit **Eigene Farbe …** jede andere. Sie
+  steht als Streifen in der Raumliste, als Punkt vor dem Namen in der Raum-Ansicht und als schmaler Streifen links an
+  der Kachel des Raums auf der Startseite. Ab Werk hat kein Raum eine Farbe (`data.json`: `rooms.<id>.color`;
+  Schnittstelle: `color` bei `POST /api/rooms` und `PATCH /api/rooms/<id>`, `"#rrggbb"` oder `null`).
 - **Strom** (Tab, ab 0.4.19): was jedes Gerät an einer Steckdose mit Strommessung braucht und kostet – Tag, Woche
   oder Monat, mit der Woche bzw. dem Monat davor, dazu die Bereitschaft (Standby) jedes Geräts. Siehe
   [Strom: was jedes Gerät braucht](#strom-was-jedes-gerät-braucht).
 - **Strom und Kosten** (ab 0.4.13 im Tab „Räume“, ab 0.4.19 im Tab „Strom“, jeweils ganz unten): einen Strompreis für
   den Haushalt (ct/kWh) und die Leistung jeder AeroFlow in Watt eintragen (steht auf dem Typenschild); ein Schalter
   zeigt Strom und Kosten der Heizungen auch auf der Startseite (ab Werk aus), ab 0.4.19 ein zweiter den Strom der
-  Steckdosen (ab Werk aus; „Strom heute“, ab 0.4.20 auch Watt und kWh an den Kacheln). Jede Raum-Kachel zeigt „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
+  Steckdosen (ab Werk aus; „Strom heute“, ab 0.4.20 auch Watt und kWh an den Kacheln). Jeder Raum zeigt unter „Heizen“ „Heute … geheizt · etwa … kWh · … €“ und hat den Knopf
   **Verlauf**. Siehe [Verlauf und Kosten](#verlauf-und-kosten). Hängt eine AeroFlow an einer Steckdose mit
   Strommessung ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung), ab
   0.4.14), steht hier, was sie misst, und **Übernehmen** trägt die beim Heizen gemessene Leistung ein. Welche
@@ -869,11 +884,12 @@ wieder aus, wenn eine Weile nichts mehr los ist – auch mehrere Melder im selbe
   Zigbee2MQTT.
 - **Über den Pi:** Anders als die Schalter koppelt die App einen Melder nicht direkt mit den Lampen – das Licht
   schaltet die App. Ist der Pi aus, geht das Licht bei Bewegung nicht an.
-- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Bewegungsmelder“. Hue: die Setup-Taste hinten 3 bis
+- **Anlernen:** *Einrichtung › Geräte* (oder im Raum) › **+ Gerät hinzufügen** › „Bewegungsmelder“. Hue: die Setup-Taste hinten 3 bis
   5 Sekunden halten, bis das Licht rot blinkt (der ältere SML001: danach noch einmal halten, bis es orange blinkt);
   VALLHORN: die Kopplungstaste 4-mal kurz drücken. Im letzten Schritt „Wohin?“ bekommt der Melder Name und Raum; der
   Haken „Dort das Licht bei Bewegung einschalten“ (vorgewählt) schaltet es für den Raum ein.
-- **Licht bei Bewegung** (*Geräte › Licht*, je Raum mit Melder, ab Werk aus):
+- **Licht bei Bewegung** (je Raum mit Melder, ab Werk aus; ab 0.4.25 in der Raum-Ansicht im Abschnitt „Licht“ –
+  unter *Geräte › Licht* steht nur noch der Weg dorthin):
   - **Aus**, wenn sich 1 bis 120 Minuten nichts bewegt hat (ab Werk 10).
   - **Tagsüber** Helligkeit und Lichtfarbe (ab Werk 100 %, neutralweiß), **nachts gedämpft** von–bis (ab Werk 22 bis
     6 Uhr mit 20 %, warmweiß) – jede Lampe nur, soweit sie es kann.
@@ -1081,7 +1097,7 @@ echter Melder sich verhält, prüfen die Tests nicht.
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
-- Eine Raum-Ansicht: ein Raum mit allen seinen Geräten auf einer Seite, dort auch zu bearbeiten.
+- Raum-Ansicht, Teil 2: von der Startseite in den Raum (nach PIN); der Strom des Raums (heute, Woche).
 - Licht: ein Schalter nur für einzelne Lampen eines Raums; das Sicherheitsnetz in der Lampe (`on_time`) nach einem
   Test mit einer echten Lampe.
 - Regelung über einen Raumfühler.

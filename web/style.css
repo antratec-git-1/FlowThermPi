@@ -160,6 +160,65 @@ input[type="number"] { width: 72px; }
 .room-form .row { margin-top: 0; }
 .card-head > button { margin-left: 4px; }
 
+/* rooms tab: a short list – a tap opens the room with everything in it */
+.room-item { position: relative; overflow: hidden; display: grid; gap: 8px; width: 100%; margin: 0; padding: 14px 14px 14px 16px;
+             border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); text-align: left;
+             font: inherit; color: inherit; touch-action: manipulation; }
+.room-item:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+.room-item.none { background: transparent; border-style: dashed; }
+.room-item.colored { padding-left: 22px; }
+/* the colour of a room: a stripe at the left of its entry in the list and of its tile on the start page */
+.room-item.colored::before, .tile.colored::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 7px;
+                                                    background: var(--room); }
+.room-item-head { display: flex; align-items: center; gap: 10px; }
+.room-item-name { flex: 1; min-width: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.room-item-temp { font-size: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.room-item .go { font-size: 26px; line-height: 1; color: var(--muted); }
+.room-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.room-chips span { padding: 1px 9px; border-radius: 99px; font-size: 13px; color: var(--muted); background: var(--bg);
+                   box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; }
+.room-chips .warn { background: var(--hint); color: var(--on-hint); box-shadow: none; font-weight: 600; }
+.room-chips .bad { background: var(--bad); color: var(--on-bad); box-shadow: none; font-weight: 600; }
+
+/* a room on its own page: „‹ Alle Räume“, its name, then Heizen · Raumfühler · Steckdosen · Licht */
+.room-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: -6px; }
+.room-bar .link-btn { padding-left: 0; }
+.room-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.room-title h2 { flex: 1; font-size: 24px; overflow-wrap: anywhere; }
+.room-dot { flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--room); }
+.room-hint { margin: -6px 0 0; }
+.room-sec { display: grid; gap: 10px; }
+.sec-head { margin: 0; font-size: 17px; }
+.sec-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin: 0; padding: 0; border: 0;
+              border-radius: 8px; background: none; font: inherit; font-weight: 700; color: inherit; text-align: left;
+              touch-action: manipulation; }
+.sec-toggle:hover:not(:disabled) { border-color: transparent; }
+.sec-toggle:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+.sec-toggle .count { font-size: 13px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sec-toggle .state { margin-left: auto; font-weight: 400; box-shadow: inset 0 0 0 1px var(--line); }
+.sec-toggle .state.heating { font-weight: 600; box-shadow: none; }
+.sec-toggle .chev { width: 26px; height: 26px; margin-left: auto; }
+.sec-toggle .state + .chev { margin-left: 0; }
+.room-sec.closed .chev { transform: none; }
+.room-sec .card > .device:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.room-sec .card > .temps:first-child { margin-top: 0; }
+.sec-sub { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--line); font-size: 16px; }
+.sec-sub:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.sec-sub + .device { border-top: 0; margin-top: 2px; padding-top: 0; }
+
+/* the colour of a room, chosen in its form */
+.room-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.room-swatch { flex: none; width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid var(--card);
+               background: var(--room); box-shadow: 0 0 0 1px var(--line); }
+.room-swatch:hover:not(:disabled) { border-color: var(--card); box-shadow: 0 0 0 1px var(--muted); }
+.room-swatch.none { background: linear-gradient(135deg, transparent 46%, var(--muted) 46% 54%, transparent 54%), var(--bg); }
+.room-swatch.chosen, .room-swatch.chosen:hover:not(:disabled) { box-shadow: 0 0 0 3px var(--text); }
+.room-swatch:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+.room-form label.room-own { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.room-own input[type="color"] { flex: none; width: 46px; height: 34px; padding: 2px; border-radius: 8px; cursor: pointer; }
+.room-own.chosen input[type="color"] { box-shadow: 0 0 0 3px var(--text); }
+.room-colors .hint { margin: 0; }
+
 /* devices */
 .filter { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
 .chip { border-radius: 99px; padding: 5px 12px; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }

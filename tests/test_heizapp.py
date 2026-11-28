@@ -395,6 +395,31 @@ class ApiTest(unittest.TestCase):
         self.assertFalse(next(r for r in state["rooms"] if r["id"] == r1)["plan_outdated"])
         self.assertIsNone(next(h for h in state["heaters"] if h["id"] == "92220002")["room"])
 
+    def test_room_color(self):
+        # the colour that marks a room in the app: set when it is made, changed, wrong ones refused, taken away again
+        def color(room_id):
+            return next(x for x in self.call("GET", "/api/state")["rooms"] if x["id"] == room_id)["color"]
+
+        r = self.call("POST", "/api/rooms", {"name": "Flur", "color": " #3B6FD6 "})["id"]
+        self.assertEqual(color(r), "#3b6fd6")
+        self.assertIsNone(color(self.call("POST", "/api/rooms", {"name": "Bad"})["id"]))
+        count = len(self.call("GET", "/api/state")["rooms"])
+        self.call("POST", "/api/rooms", {"name": "x", "color": "rot"}, expect=400)
+        self.assertEqual(len(self.call("GET", "/api/state")["rooms"]), count)   # refused before it was made
+
+        self.call("PATCH", f"/api/rooms/{r}", {"name": "Diele", "color": "#8d5a3b"})
+        self.assertEqual(color(r), "#8d5a3b")
+        for bad in ("blau", "#12345", "#1234567", "#gggggg", "8d5a3b", 7, ["#8d5a3b"]):
+            self.call("PATCH", f"/api/rooms/{r}", {"color": bad}, expect=400)
+        self.call("PATCH", f"/api/rooms/{r}", {"name": "Diele", "heaters": []})   # without „color“ it stays
+        self.assertEqual(color(r), "#8d5a3b")
+        self.call("PATCH", f"/api/rooms/{r}", {"color": None})
+        self.assertIsNone(color(r))
+        self.call("PATCH", f"/api/rooms/{r}", {"color": "#4caf50"})
+        self.call("PATCH", f"/api/rooms/{r}", {"color": ""})
+        self.assertIsNone(color(r))
+        self.assertNotIn("color", self.service.store.data["rooms"][r])
+
     def test_add_edit_delete_heater(self):
         conf = Path(self.service.config_path)
         c = FakeHeater(idu="97000001")

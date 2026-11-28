@@ -1640,12 +1640,24 @@ class Service:
             log.exception("Automatische Netzsuche fehlgeschlagen")
 
     # ------------------------------------------------------------------ rooms, heaters, plans
+    @staticmethod
+    def _room_color(value) -> str | None:
+        """The colour that marks a room in the app (room list, room view, its tile): "#rrggbb" – None: no colour."""
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value.strip()):
+            raise ActionError("Die Farbe muss so aussehen: #3b6fd6")
+        return value.strip().lower()
+
     def create_room(self, body: dict) -> dict:
         name = self._clean_name(body.get("name"))
         members = self._heater_entries(body["heaters"]) if "heaters" in body else None
+        color = self._room_color(body.get("color"))
         room_id = new_id("r")
         with self.store.edit() as d:
             d["rooms"][room_id] = {"name": name, "plan": None}
+            if color:
+                d["rooms"][room_id]["color"] = color
             if members is not None:
                 self._assign(d, room_id, members)
         log.info("Raum angelegt: %s%s", name, f" mit {', '.join(self._name(e) for e in members)}" if members else "")
@@ -1658,18 +1670,24 @@ class Service:
         if plan_id and plan_id not in self.store.data["plans"]:
             raise ActionError("Heizplan nicht gefunden", 404)
         members = self._heater_entries(body["heaters"]) if "heaters" in body else None
+        color = self._room_color(body["color"]) if "color" in body else None
         with self.store.edit() as d:
             room = d["rooms"][room_id]
-            old_name = room["name"]
+            old_name, old_color = room["name"], room.get("color")
             if name is not None:
                 room["name"] = name
             if "plan" in body:
                 room["plan"] = plan_id
             if members is not None:
                 self._assign(d, room_id, members)
+            if color:
+                room["color"] = color
+            elif "color" in body:
+                room.pop("color", None)
         changed = ([f"Name „{name}“"] if name is not None and name != old_name else []) \
             + ([f"Plan „{self.store.data['plans'][plan_id]['name']}“" if plan_id else "kein Plan"] if "plan" in body else []) \
-            + ([f"Heizungen: {', '.join(self._name(e) for e in members) or 'keine'}"] if members is not None else [])
+            + ([f"Heizungen: {', '.join(self._name(e) for e in members) or 'keine'}"] if members is not None else []) \
+            + ([f"Farbe {color or 'keine'}"] if "color" in body and color != old_color else [])
         log.info("Raum %s geändert: %s", old_name, " · ".join(changed) or "nichts")
         return {}
 
@@ -4101,6 +4119,7 @@ class Service:
             rooms.append({
                 "id": room_id,
                 "name": room["name"],
+                "color": room.get("color"),   # marks the room in the app – None: no colour
                 "plan": room.get("plan") if plan else None,
                 "plan_name": plan["name"] if plan else None,
                 "plan_sent_at": sent.get("at") if same_plan else None,
