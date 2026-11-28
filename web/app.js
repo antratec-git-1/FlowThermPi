@@ -394,15 +394,19 @@ function renderAbout(el) {  // "Über": logo, what the app does, version, licenc
   const app = state.app || {};
   setHTML(el, `<div class="card about">
     <img class="about-logo" src="logo.jpg" width="800" height="800" alt="HoLiTherm-Logo">
-    <p class="about-lead"><b>${esc(app.name)}</b> steuert Thermotec-Heizungen (AeroFlow mit FlexiSmart-Pro-Regler)
-      direkt im eigenen WLAN – ohne Cloud und ohne Konto beim Hersteller. Alle Daten bleiben im Haus.</p>
+    <p class="about-lead"><b>${esc(app.name)}</b> steuert Licht und Heizung im eigenen Zuhause und zeigt, wie viel Strom
+      die Geräte verbrauchen. Es arbeitet mit Thermotec-Heizungen (AeroFlow mit FlexiSmart-Pro-Regler),
+      Heizkörper-Thermostaten, Raumfühlern, Lampen, Schaltern, Bewegungsmeldern und Steckdosen mit Strommessung. Alles
+      läuft direkt im Heimnetz – ohne Cloud und ohne Konto beim Hersteller. Alle Daten bleiben im Haus.</p>
     <dl class="about-facts">
       <dt>Version</dt><dd>${esc(app.version)}</dd>
       ${app.device ? `<dt>Gerätenummer</dt><dd>${esc(app.device)}</dd>` : ""}
       <dt>Lizenz</dt><dd>${esc(app.license)} – freie Software, ${esc(app.copyright)}</dd>
       <dt>Quellcode</dt><dd><a href="${esc(app.repo)}" target="_blank" rel="noopener">${esc(String(app.repo).replace(/^https:\/\//, ""))}</a></dd>
     </dl>
-    <p class="muted">HoLiTherm ist ein unabhängiges Projekt und kein Produkt der Thermotec AG.</p>
+    <p class="muted">HoLiTherm ist ein unabhängiges Projekt und kein Produkt von Thermotec, SONOFF, Shelly, IKEA,
+      Philips Hue, Raspberry Pi oder anderen Herstellern, deren Geräte es nutzt. Die genannten Marken gehören ihren
+      Inhabern.</p>
   </div>
   ${updateCardHTML(app)}
   ${logsCardHTML()}`);

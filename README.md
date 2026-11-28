@@ -1,14 +1,18 @@
-# HoLiTherm – lokale Steuerung für Thermotec AeroFlow (FlexiSmart Pro)
+# HoLiTherm – Licht und Heizung steuern, Strom im Blick
 
 <img src="web/logo.jpg" width="300" alt="HoLiTherm-Logo: Licht, Heizung, Power">
 
-Kleine Web-App, die Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler** direkt im
-Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek). Nur die
+Kleine Web-App, die Licht und Heizung direkt im Heimnetz steuert und zeigt, wie viel Strom die Geräte verbrauchen:
+Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler**, Heizkörper-Thermostate, Raumfühler, Lampen, Schalter,
+Bewegungsmelder und Steckdosen mit Strommessung – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur
+Python-Standardbibliothek). Nur die
 freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale, und die
 [Zigbee-Thermostate](#zigbee-thermostate-in-arbeit) (in Arbeit) brauchen Zusatzprogramme, die die App auf Knopfdruck
 installiert.
 
-Inoffizielles Projekt – kein Produkt von Thermotec und nicht von Thermotec unterstützt.
+Inoffizielles Projekt – kein Produkt von Thermotec, SONOFF, Shelly, IKEA, Philips Hue, Raspberry Pi oder anderen
+Herstellern, deren Geräte es nutzt, und von keinem dieser Hersteller unterstützt. Die genannten Marken gehören ihren
+Inhabern.
 
 Bis Version 0.4.25 hieß das Projekt FlowThermPi. Ordner, Dienste und Netznamen auf dem Pi (`flowthermpi`) und
 die Adresse auf GitHub heißen noch so, damit Updates auf vorhandenen Geräten weiter funktionieren.
