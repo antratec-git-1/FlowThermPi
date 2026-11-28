@@ -13,7 +13,10 @@ Eine Steckdose gilt als Steckdose, wenn sie einen Schalter (state) und eine Leis
 SONOFF S60ZBTPF; die App ordnet sie einer AeroFlow zu (heizapp.service). Eine Lampe ist, was Zigbee2MQTT als Licht
 („light“) mit einem Schalter (state) beschreibt – Hue, IKEA FLOALT und JETSTRÖM, Innr und andere, ohne Liste der
 Modelle; dazu, ob sie sich dimmen lässt (brightness) und welche Lichtfarben sie kann (color_temp, in Mired). Die App
-hält von ihr LIGHT_KEYS.
+hält von ihr LIGHT_KEYS. Ein Schalter (IKEA RODRET, Hue Smart Button, Hue Dimmschalter …) ist, was Tastendrücke meldet
+(action) und sonst nichts schaltet; jeden frischen Tastendruck gibt die App an on_action weiter – nie einen gespeicherten
+(retained), der nach einem Neustart noch einmal ankommt. Für die Schalter legt die App Zigbee-Gruppen an
+(bridge/request/group/…, bridge/groups) und koppelt einen Schalter direkt mit einer Gruppe (bridge/request/device/bind).
 
 „Firmware einspielen“ bittet Zigbee2MQTT darum (bridge/request/device/ota_update/update). Zigbee2MQTT antwortet erst,
 wenn das Update vorbei ist – nach 10 bis 100 Minuten. Bis dahin meldet das Gerät alle 30 Sekunden, wie weit es ist
@@ -46,8 +49,10 @@ NEW = 15 * 60              # seconds a device that has just joined is marked as 
 MAX_LOGIN = 4096
 MAX_DEVICES = 200
 IEEE = re.compile(r"0x[0-9a-f]{16}")
-TOPICS = [f"{BASE}/bridge/state", f"{BASE}/bridge/info", f"{BASE}/bridge/devices", f"{BASE}/bridge/event",
-          f"{BASE}/bridge/response/#", f"{BASE}/+"]
+BIND_WAIT = 30.0           # seconds Zigbee2MQTT has to couple a switch: it waits for the switch's answer
+MAX_GROUPS = 100
+TOPICS = [f"{BASE}/bridge/state", f"{BASE}/bridge/info", f"{BASE}/bridge/devices", f"{BASE}/bridge/groups",
+          f"{BASE}/bridge/event", f"{BASE}/bridge/response/#", f"{BASE}/+"]
 INTERVIEW = {"PENDING": "pending", "IN_PROGRESS": "running", "SUCCESSFUL": "done", "FAILED": "failed"}
 # what the app keeps of a thermostat's state (the names of the TRV-ZBT in Zigbee2MQTT, see heizapp.trv)
 THERMOSTAT_KEYS = frozenset({
@@ -65,7 +70,9 @@ PLUG_KEYS = frozenset({"state", "power", "current", "voltage", "energy", "energy
 # … and of a lamp (the names Zigbee2MQTT uses for every light: brightness 0–254, color_temp in mired)
 LIGHT_KEYS = frozenset({"state", "brightness", "color_temp", "color_mode", "power_on_behavior", "linkquality", "update",
                         "last_seen"})
-KEPT_KEYS = THERMOSTAT_KEYS | PLUG_KEYS | LIGHT_KEYS
+# … and of a switch (its battery; what was pressed, action, is not kept: it is news only once)
+BUTTON_KEYS = frozenset({"battery", "voltage", "linkquality", "update", "last_seen"})
+KEPT_KEYS = THERMOSTAT_KEYS | PLUG_KEYS | LIGHT_KEYS | BUTTON_KEYS
 MIRED = (50, 1000)         # colour temperatures accepted from a lamp, in mired (20000 K to 1000 K)
 MAX_POWER = 50000          # W accepted from a plug (the S60ZBTPF takes up to 4000 W)
 MAX_ENERGY = 10 ** 7       # kWh accepted from a plug's meter
@@ -189,6 +196,15 @@ def _light(exposes: list) -> dict | None:
     return None
 
 
+def _button(exposes: list) -> list[str] | None:
+    """A switch: what its buttons report (the values of action, e.g. on, off, brightness_move_up). None: no switch."""
+    for e in exposes:
+        if isinstance(e, dict) and e.get("type") == "enum" and e.get("property") == "action":
+            values = e.get("values") if isinstance(e.get("values"), list) else []
+            return [v for v in values if isinstance(v, str) and 0 < len(v) <= 40][:60]
+    return None
+
+
 def _definition(item: dict, device: dict) -> None:
     """Model, maker and what the device can do – from bridge/devices or the event of a finished interview."""
     definition = item.get("definition") if isinstance(item.get("definition"), dict) else None
@@ -197,11 +213,13 @@ def _definition(item: dict, device: dict) -> None:
     exposes = definition.get("exposes") if isinstance(definition.get("exposes"), list) else []
     thermostat = any(isinstance(e, dict) and e.get("type") == "climate" for e in exposes)
     light = None if thermostat else _light(exposes)
+    plug = not thermostat and light is None and _measuring_plug(exposes)
+    actions = None if thermostat or light is not None or plug else _button(exposes)
     device.update(model=_text(definition.get("model"), 60) or device.get("model"),
                   vendor=_text(definition.get("vendor"), 60) or device.get("vendor"),
                   description=_text(definition.get("description"), 160),
-                  thermostat=thermostat, plug=not thermostat and light is None and _measuring_plug(exposes),
-                  light=light is not None, light_caps=light)
+                  thermostat=thermostat, plug=plug, light=light is not None, light_caps=light,
+                  button=actions is not None, button_actions=actions)
     if isinstance(item.get("supported"), bool):
         device["supported"] = item["supported"]
 
@@ -229,6 +247,10 @@ class ZigbeeNet:
         self._joined: dict[str, float] = {}   # ieee -> when it joined
         self._permit_end: float | None = None   # time.time() at which the network closes again
         self._waiting: dict[str, dict | None] = {}   # transaction -> Zigbee2MQTT's answer, None until it comes
+        self._groups: dict[str, dict] = {}    # friendly name -> {id, members: [ieee]} – the groups in Zigbee2MQTT
+        self._groups_known = False            # … once Zigbee2MQTT said them (bridge/groups)
+        self._pressed: dict[str, tuple[str, float]] = {}   # ieee -> (action, time.time()): a switch's last press
+        self.on_action = None                 # on_action(ieee, action): a fresh press – it must not wait (MQTT thread)
         # ieee -> firmware update: {transaction, started, firmware (before), seen (last progress report), progress,
         # result: None until it is over, then {ok, message, at}}
         self._ota: dict[str, dict] = {}
@@ -327,12 +349,14 @@ class ZigbeeNet:
             self._take_info(_json(payload))
         elif name == "bridge/devices":
             self._take_devices(_json(payload))
+        elif name == "bridge/groups":
+            self._take_groups(_json(payload))
         elif name == "bridge/event":
             self._take_event(_json(payload))
         elif name.startswith("bridge/response/"):
             self._take_answer(_json(payload))
         elif "/" not in name and name != "bridge":
-            self._take_values(name, _json(payload))
+            self._take_values(name, _json(payload), retained)
 
     def _take_state(self, state: str | None) -> None:
         with self._lock:
@@ -378,7 +402,8 @@ class ZigbeeNet:
                       "type": item.get("type") if item.get("type") in ("Router", "EndDevice") else None,
                       "model": _text(item.get("model_id"), 60), "vendor": _text(item.get("manufacturer"), 60),
                       "description": None, "supported": item.get("supported") is True, "thermostat": False,
-                      "plug": False, "light": False, "light_caps": None, "interview": state,
+                      "plug": False, "light": False, "light_caps": None, "button": False, "button_actions": None,
+                      "interview": state,
                       "power": _text(item.get("power_source"), 40),
                       "firmware": _text(item.get("software_build_id"), 40)}
             _definition(item, device)
@@ -389,6 +414,22 @@ class ZigbeeNet:
                 self._states.pop(ieee, None)
                 self._ota.pop(ieee, None)
             self._devices = devices
+
+    def _take_groups(self, data) -> None:
+        if not isinstance(data, list):
+            return
+        groups: dict[str, dict] = {}
+        for item in data[:MAX_GROUPS]:
+            name = _text(item.get("friendly_name"), 80) if isinstance(item, dict) else None
+            gid = _number(item.get("id"), 1, 65535) if name else None
+            if gid is None:
+                continue
+            members = item.get("members") if isinstance(item.get("members"), list) else []
+            groups[name] = {"id": int(gid), "members": [m["ieee_address"] for m in members[:MAX_DEVICES] if isinstance(m, dict)
+                                                        and isinstance(m.get("ieee_address"), str)
+                                                        and IEEE.fullmatch(m["ieee_address"])]}
+        with self._lock:
+            self._groups, self._groups_known = groups, True
 
     def _take_event(self, data) -> None:
         if not (isinstance(data, dict) and isinstance(data.get("data"), dict)):
@@ -404,7 +445,8 @@ class ZigbeeNet:
                 device = self._devices[ieee] = {
                     "ieee": ieee, "name": _text(info.get("friendly_name"), 80) or ieee, "type": None, "model": None,
                     "vendor": None, "description": None, "supported": False, "thermostat": False, "plug": False,
-                    "light": False, "light_caps": None, "interview": "pending", "power": None, "firmware": None}
+                    "light": False, "light_caps": None, "button": False, "button_actions": None, "interview": "pending",
+                    "power": None, "firmware": None}
             if kind == "device_joined":
                 self._joined[ieee] = time.time()
                 said = f"neues Gerät {ieee} meldet sich an"
@@ -451,7 +493,7 @@ class ZigbeeNet:
                                                    f"meldet: {detail}", _ota_failure(detail))
         self._ota_log(*said)
 
-    def _take_values(self, name: str, data) -> None:
+    def _take_values(self, name: str, data, retained: bool = False) -> None:
         if not isinstance(data, dict):
             return
         values = {"battery": _number(data.get("battery"), 0, 100), "signal": _number(data.get("linkquality"), 0, 255),
@@ -480,6 +522,13 @@ class ZigbeeNet:
             self._seq += 1
             state["heard"], state["seq"] = max(state["heard"], heard), self._seq
             self._news.notify_all()
+            action = data.get("action")   # a press – only a fresh one: a retained message is old news
+            pressed = (not retained and isinstance(action, str) and 0 < len(action) <= 40
+                       and (self._devices.get(ieee) or {}).get("button") is True)
+            if pressed:
+                self._pressed[ieee] = (action, now)
+        if pressed and self.on_action:
+            self.on_action(ieee, action)
 
     # ------------------------------------------------------------------ the actions
     def search(self, on: bool) -> None:
@@ -671,6 +720,72 @@ class ZigbeeNet:
             return {"device": dict(device) if device else None, "values": dict(state["values"]),
                     "heard": state["heard"], "seq": state["seq"], "boost_since": state["boost_since"]}
 
+    # ------------------------------------------------------------------ the switches and groups (heizapp.service)
+    def buttons(self) -> list[dict]:
+        """The paired switches (interview done), in the order of pairing: {ieee, model (maker and model), model_id
+        (Zigbee2MQTT's model, e.g. E2201), actions}."""
+        with self._lock:
+            return [{"ieee": ieee, "model": " ".join(filter(None, (d["vendor"], d["model"]))) or None,
+                     "model_id": d["model"], "actions": list(d["button_actions"] or [])}
+                    for ieee, d in self._devices.items() if d.get("button") and d["interview"] == "done"]
+
+    def button(self, ieee: str) -> dict | None:
+        """What a switch said last: {battery (%), pressed: (action, time) of its last press or None, heard, seq} – None
+        if it is not paired as a switch (any more)."""
+        with self._lock:
+            device = self._devices.get(ieee)
+            if not (device and device.get("button") and device["interview"] == "done"):
+                return None
+            state = self._states.get(ieee) or {"values": {}, "heard": 0.0, "seq": 0}
+            return {"battery": _number(state["values"].get("battery"), 0, 100), "pressed": self._pressed.get(ieee),
+                    "heard": state["heard"] or None, "seq": state["seq"]}
+
+    def joined(self, ieee: str) -> float | None:
+        """When the device joined the network (time.time()) – since the app runs; a switch that was reset joins anew."""
+        with self._lock:
+            return self._joined.get(ieee)
+
+    def groups(self) -> dict[str, dict] | None:
+        """The groups in Zigbee2MQTT: friendly name -> {id, members: [ieee]} – None until Zigbee2MQTT said them."""
+        with self._lock:
+            if not self._groups_known:
+                return None
+            return {name: {"id": g["id"], "members": list(g["members"])} for name, g in self._groups.items()}
+
+    def _group_changed(self, name: str, change) -> None:   # as Zigbee2MQTT will say it in bridge/groups
+        with self._lock:
+            change(self._groups, name)
+
+    def add_group(self, name: str) -> None:
+        """A new group (Zigbee2MQTT picks its number)."""
+        data = self._request("group/add", {"friendly_name": name}, self.answer)
+        gid = _number(data.get("id"), 1, 65535)
+        self._group_changed(name, lambda groups, n: groups.setdefault(n, {"id": int(gid or 0), "members": []}))
+        log.info("Zigbee: Gruppe %s angelegt", name)
+
+    def remove_group(self, name: str) -> None:
+        self._request("group/remove", {"id": name, "force": True}, self.answer)
+        self._group_changed(name, lambda groups, n: groups.pop(n, None))
+        log.info("Zigbee: Gruppe %s entfernt", name)
+
+    def group_member(self, name: str, ieee: str, add: bool) -> None:
+        """A device into the group or out of it – the device must be awake (a lamp always is)."""
+        self._request(f"group/members/{'add' if add else 'remove'}", {"group": name, "device": ieee}, self.answer)
+
+        def change(groups: dict, n: str) -> None:
+            members = groups.setdefault(n, {"id": 0, "members": []})["members"]
+            if add and ieee not in members:
+                members.append(ieee)
+            elif not add and ieee in members:
+                members.remove(ieee)
+        self._group_changed(name, change)
+
+    def bind(self, ieee: str, group: str) -> dict:
+        """Couple a switch directly with a group – on and off (genOnOff), brighter and darker (genLevelCtrl). A switch
+        that sleeps must have been pressed just before. Returns Zigbee2MQTT's answer: clusters, failed."""
+        return self._request("device/bind", {"from": ieee, "to": group, "clusters": ["genOnOff", "genLevelCtrl"]},
+                             BIND_WAIT)
+
     def send(self, ieee: str, payload: dict, what: str = "set") -> int | None:
         """A command (set) or a question (get) to a device. Returns the number of the latest message so far – wait()
         waits for a newer one – or None if it cannot go out (no connection, Zigbee2MQTT not running)."""
@@ -758,8 +873,9 @@ class ZigbeeNet:
         thermostats = sum(1 for d in v["devices"] if d["thermostat"])
         plugs = sum(1 for d in v["devices"] if d["plug"])
         lights = sum(1 for d in v["devices"] if d["light"])
-        kinds = [f"{thermostats} Thermostat(e)"] + [f"{n} {what}" for n, what in ((plugs, "Steckdose(n)"),
-                                                                                    (lights, "Lampe(n)")) if n]
+        buttons = sum(1 for d in v["devices"] if d.get("button"))
+        kinds = [f"{thermostats} Thermostat(e)"] + [f"{n} {what}" for n, what in (
+            (plugs, "Steckdose(n)"), (lights, "Lampe(n)"), (buttons, "Schalter")) if n]
         return (f"Zigbee2MQTT {v.get('version') or '?'} läuft · Kanal {v.get('channel') or '?'} · "
                 f"{len(v['devices'])} Gerät(e), davon " + (", ".join(kinds[:-1]) + " und " if len(kinds) > 1 else "")
                 + kinds[-1] + (f" · Suche läuft noch {v['search']['left']} s" if v["search"]["active"] else ""))

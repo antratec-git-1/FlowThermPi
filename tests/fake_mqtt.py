@@ -386,6 +386,42 @@ def light(ieee: str, kind: str = "floalt", interview: str = "SUCCESSFUL") -> dic
             "interview_completed": done, "interview_state": interview, "endpoints": {}}
 
 
+# four switches as bridge/devices lists them: Zigbee model id, Zigbee2MQTT's model, maker, description, the values of
+# action (as on the device pages of Zigbee2MQTT)
+DIMMER_ACTIONS = [f"{b}_{a}" for b in ("on", "off", "up", "down")
+                  for a in ("press", "hold", "press_release", "hold_release")] + ["recall_0", "recall_1"]
+BUTTONS = {"rodret": ("RODRET Dimmer", "E2201", "IKEA", "RODRET wireless dimmer/power switch",
+                      ["on", "off", "brightness_move_up", "brightness_move_down", "brightness_stop"]),
+           "smart": ("ROM001", "8718699693985", "Philips", "Hue smart button", ["on", "off", "press", "hold", "release"]),
+           "dimmer": ("RWL022", "929002398602", "Philips", "Hue dimmer switch gen 2", DIMMER_ACTIONS),
+           "sonoff": ("SNZB-01P", "SNZB-01P", "SONOFF", "Wireless button", ["single", "double", "long"])}
+BUTTON_MODELS = {model_id for model_id, *_ in BUTTONS.values()}
+
+
+def button_state(battery: int = 90) -> dict:
+    """A switch's state as Zigbee2MQTT publishes it (without action: that comes with a press)."""
+    return {"battery": battery, "voltage": 2900, "linkquality": 120}
+
+
+def button(ieee: str, kind: str = "rodret", interview: str = "SUCCESSFUL") -> dict:
+    """A switch as bridge/devices lists it – an end device on a battery that sleeps."""
+    model_id, model, vendor, description, actions = BUTTONS[kind]
+    done = interview == "SUCCESSFUL"
+    return {"ieee_address": ieee, "type": "EndDevice", "network_address": 0x5D21, "supported": done,
+            "friendly_name": ieee, "disabled": False, "description": None,
+            "definition": {"source": "native", "model": model, "vendor": vendor, "description": description,
+                           "exposes": [{"type": "numeric", "name": "battery", "property": "battery", "access": 1,
+                                        "unit": "%", "value_min": 0, "value_max": 100},
+                                       {"type": "enum", "name": "action", "property": "action", "access": 1,
+                                        "values": actions},
+                                       {"type": "numeric", "name": "linkquality", "property": "linkquality",
+                                        "access": 1}],
+                           "supports_ota": True, "options": []} if done else None,
+            "power_source": "Battery", "software_build_id": "1.0.57" if done else None,
+            "model_id": model_id, "manufacturer": vendor, "interviewing": interview == "IN_PROGRESS",
+            "interview_completed": done, "interview_state": interview, "endpoints": {}}
+
+
 class FakeZ2M:
     """Zigbee2MQTT 2.x as the app sees it over MQTT. join_after: seconds after permit_join until a thermostat joins
     (None: nobody comes); interview: seconds its interview takes."""
@@ -417,8 +453,17 @@ class FakeZ2M:
         self.ota_error: str | None = None   # why a firmware update fails (e.g. the device does not take part)
         self.ota_firmware = "1.1.4"         # the firmware (software_build_id) after an update
         self.ota_forgets = {"smart_temperature_control": "OFF", "system_mode": "off"}   # … and what it forgets then
-        self.join_kind = "thermostat"       # what joins during a search: "thermostat", "plug" or "light" …
+        self.join_kind = "thermostat"       # what joins during a search: "thermostat", "plug", "light", "button" …
         self.light_kind = "floalt"          # … which lamp (see LIGHTS)
+        self.button_kind = "rodret"         # … which switch (see BUTTONS)
+        self.groups: dict[str, dict] = {}   # friendly name -> {id, members: [ieee]}
+        self.next_group = 1
+        self.binds: dict[str, set[str]] = {}   # switch -> the groups it is coupled with
+        self.awake: dict[str, float] = {}   # switch -> until when (monotonic) it is awake after a press
+        self.awake_for = 3.0                # seconds a switch stays awake after a press (real: a few)
+        self.bind_wait = 0.2                # seconds Zigbee2MQTT waits for a sleeping switch before it gives up
+        self.turns: dict[str, str] = {}     # switch -> what it sent last by turns (Hue Smart Button, Dimmschalter)
+        self.hears_on_off = True            # False: coupled, the Smart Button no longer tells the stick on / off
         self.lock = threading.RLock()
         broker.hooks.append(self._request)
         broker.hooks.append(self._command)
@@ -432,6 +477,7 @@ class FakeZ2M:
         self.broker.publish(f"{self.BASE}/bridge/state", {"state": "online"}, retain=True)
         self._info()
         self._devices()
+        self._groups()
         for device in self.devices:
             if device["interview_state"] == "SUCCESSFUL":
                 self._values(device["ieee_address"])
@@ -457,13 +503,21 @@ class FakeZ2M:
             devices = [self.COORDINATOR, *self.devices]
         self.broker.publish(f"{self.BASE}/bridge/devices", devices, retain=True)
 
+    def _groups(self) -> None:
+        with self.lock:
+            groups = [{"id": g["id"], "friendly_name": name, "scenes": [],
+                       "members": [{"ieee_address": m, "endpoint": 1} for m in g["members"]]}
+                      for name, g in self.groups.items()]
+        self.broker.publish(f"{self.BASE}/bridge/groups", groups, retain=True)
+
     def _event(self, kind: str, data: dict) -> None:
         self.broker.publish(f"{self.BASE}/bridge/event", {"type": kind, "data": data})
 
     def _fresh(self, ieee: str) -> dict:
         """The state a device starts with – a plug's, a lamp's or a thermostat's."""
         model = self._model(ieee)
-        return plug_state() if model == PLUG_MODEL else light_state() if model in LIGHT_MODELS else trv_state()
+        return (plug_state() if model == PLUG_MODEL else light_state() if model in LIGHT_MODELS
+                else button_state() if model in BUTTON_MODELS else trv_state())
 
     def _model(self, ieee: str) -> str | None:
         with self.lock:
@@ -489,6 +543,58 @@ class FakeZ2M:
         with self.lock:
             self.states.setdefault(ieee, self._fresh(ieee)).update(values)
         self._values(ieee)
+
+    # a person at a switch
+    def press(self, ieee: str, button: str = "") -> None:
+        """Someone presses a switch (it wakes up for awake_for seconds): it tells the lamps of the groups it is coupled
+        with by itself, and Zigbee2MQTT publishes what was pressed (action) – retained, as with retain: true.
+        RODRET: button on, off, up (held: brightness_move_up … brightness_stop), down. Hue Smart Button: press, release,
+        then on or off by turns. Hue Dimmschalter: on (on_press, on or off by turns, on_press_release), up, down.
+        SONOFF SNZB-01P: single – coupled it does nothing."""
+        with self.lock:
+            self.awake[ieee] = time.monotonic() + self.awake_for
+            model = self._model(ieee)
+        kind = next(k for k, b in BUTTONS.items() if b[0] == model)
+
+        def turn() -> str:
+            with self.lock:
+                self.turns[ieee] = "OFF" if self.turns.get(ieee, "OFF") == "ON" else "ON"
+                return self.turns[ieee]
+        if kind == "rodret":
+            if button in ("on", "off"):
+                self._tell(ieee, button, {"state": button.upper()})
+            else:
+                self._tell(ieee, f"brightness_move_{button}", {"brightness_step": 40 if button == "up" else -40,
+                                                               **({"state": "ON"} if button == "up" else {})})
+                self._tell(ieee, "brightness_stop", None)
+        elif kind == "smart":
+            self._tell(ieee, "press", None)
+            self._tell(ieee, "release", None)
+            said = turn()
+            self._tell(ieee, said.lower() if self.hears_on_off else None, {"state": said})
+        elif kind == "dimmer":   # the command goes out when the button is let go (a short press, not a hold)
+            self._tell(ieee, f"{button}_press", None)
+            self._tell(ieee, f"{button}_press_release", {"state": turn()} if button == "on" else
+                       {"brightness_step": 30 if button == "up" else -30} if button in ("up", "down") else None)
+        else:
+            self._tell(ieee, "single", None)
+
+    def _tell(self, ieee: str, action: str | None, command: dict | None) -> None:
+        """One message of a press: the action to the stick, the command to the lamps of the switch's groups – their
+        reports of the new state come after."""
+        if action:
+            with self.lock:
+                state = self.states.setdefault(ieee, button_state())
+                state["last_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                payload = {**state, "action": action}
+            self.broker.publish(f"{self.BASE}/{ieee}", payload, retain=True)
+        with self.lock:
+            lamps = [m for g in sorted(self.binds.get(ieee, ())) for m in (self.groups.get(g) or {}).get("members", [])]
+            devices = {d["ieee_address"]: d for d in self.devices}
+        if command and self._model(ieee) != "SNZB-01P":   # the SNZB-01P's coupling does nothing
+            for lamp in lamps:
+                if lamp not in self.asleep and lamp in devices:
+                    later(self.delay, lambda lamp=lamp: self._apply_light(lamp, dict(command), devices[lamp]))
 
     # commands to a thermostat
     def _command(self, topic: str, payload: bytes) -> None:
@@ -679,6 +785,8 @@ class FakeZ2M:
             self.requests.append((what, body))
         if what == "device/ota_update/update":
             return self._ota(body)
+        if what in ("device/bind", "device/unbind"):
+            return self._bind(what, body)
         answer: dict = {"data": {}, "status": "ok"}
         if what == "permit_join":
             seconds = body.get("time")
@@ -705,11 +813,85 @@ class FakeZ2M:
                 answer["data"] = {"id": ieee, "block": False, "force": force}
                 self.broker.publish(f"{self.BASE}/{ieee}", b"", retain=True)
                 self._devices()
+        elif what.startswith("group/"):
+            answer = self._group_request(what, body)
         else:
             answer = {"data": {}, "status": "error", "error": f"Unknown request '{what}'"}
         if "transaction" in body:
             answer["transaction"] = body["transaction"]
         self.broker.publish(f"{self.BASE}/bridge/response/{what}", answer)
+
+    def _group_request(self, what: str, body: dict) -> dict:
+        """group/add, group/remove, group/members/add, group/members/remove – a lamp that is asleep (no power) cannot
+        be put into a group or taken out."""
+        with self.lock:
+            if what == "group/add":
+                name = body.get("friendly_name")
+                if not isinstance(name, str) or name in self.groups:
+                    return {"data": {}, "status": "error", "error": f"friendly_name '{name}' is already in use"}
+                gid = body.get("id") or self.next_group
+                self.next_group = max(self.next_group, gid) + 1
+                self.groups[name] = {"id": gid, "members": []}
+                data = {"id": gid, "friendly_name": name}
+            elif what == "group/remove":
+                name = body.get("id")
+                if name not in self.groups:
+                    return {"data": {}, "status": "error", "error": f"Group '{name}' does not exist"}
+                self.groups.pop(name)
+                data = {"id": name, "force": body.get("force") is True}
+            elif what in ("group/members/add", "group/members/remove"):
+                name, device = body.get("group"), body.get("device")
+                if name not in self.groups:
+                    return {"data": {}, "status": "error", "error": f"Group '{name}' does not exist"}
+                if not any(d["ieee_address"] == device for d in self.devices):
+                    return {"data": {}, "status": "error", "error": f"Device '{device}' does not exist"}
+                if device in self.asleep:
+                    return {"data": {}, "status": "error", "error": f"Failed to {what.rsplit('/', 1)[1]} '{device}' "
+                                                                     f"(Delivery failed for '{device}')"}
+                members = self.groups[name]["members"]
+                if what.endswith("add") and device not in members:
+                    members.append(device)
+                elif what.endswith("remove") and device in members:
+                    members.remove(device)
+                data = {"device": device, "endpoint": "default", "group": name}
+            else:
+                return {"data": {}, "status": "error", "error": f"Unknown request '{what}'"}
+        self._groups()
+        return {"data": data, "status": "ok"}
+
+    def _bind(self, what: str, body: dict) -> None:
+        """device/bind and device/unbind of a switch with a group: it takes it only while it is awake – pressed just
+        before, or within bind_wait seconds after the request."""
+        src, target, clusters = body.get("from"), body.get("to"), body.get("clusters") or ["genOnOff", "genLevelCtrl"]
+        verb = what.split("/")[1]
+        topic = f"{self.BASE}/bridge/response/{what}"
+        extra = {"transaction": body["transaction"]} if "transaction" in body else {}
+        with self.lock:
+            known = any(d["ieee_address"] == src for d in self.devices)
+            group = target in self.groups
+        if not known:
+            return self.broker.publish(topic, {"data": {}, "status": "error", "error": f"Source device '{src}' does not exist", **extra})
+        if not group:
+            return self.broker.publish(topic, {"data": {}, "status": "error", "error": f"Target '{target}' does not exist", **extra})
+
+        def finish() -> None:
+            with self.lock:
+                awake = self.awake.get(src, 0) > time.monotonic()
+                if awake:
+                    coupled = self.binds.setdefault(src, set())
+                    (coupled.add if verb == "bind" else coupled.discard)(target)
+            if awake:
+                return self.broker.publish(topic, {"data": {"from": src, "from_endpoint": "default", "to": target,
+                                                            "clusters": clusters, "failed": []}, "status": "ok", **extra})
+            self.broker.publish(topic, {"data": {}, "status": "error", **extra, "error":
+                                        f"Failed to {verb} cluster '{clusters[0]}' from '{src}' to '{target}' "
+                                        f"(Error: Delivery failed for '{src}')"})
+        with self.lock:
+            awake = self.awake.get(src, 0) > time.monotonic()
+        if awake:
+            finish()
+        else:
+            later(self.bind_wait, finish)
 
     def _ota(self, body: dict) -> None:
         """A firmware update: the device reports its progress (update.progress, update.remaining); Zigbee2MQTT answers
@@ -757,9 +939,9 @@ class FakeZ2M:
     def _join(self) -> None:
         """A thermostat whose middle button was held for 2 s (a plug whose button was held for 5 s, a lamp that was
         reset): it joins, is interviewed, reports its values."""
-        kind = self.light_kind
+        kind, switch = self.light_kind, self.button_kind
         make = plug if self.join_kind == "plug" else (lambda i, *a: light(i, kind, *a)) if self.join_kind == "light" \
-            else thermostat
+            else (lambda i, *a: button(i, switch, *a)) if self.join_kind == "button" else thermostat
         with self.lock:
             if not (self.online and self.permit_end and self.permit_end > time.time()):
                 return

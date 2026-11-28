@@ -59,7 +59,9 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   eine Lampe nicht, steht dort „… antwortet nicht. Ist der Lichtschalter an der Wand an?“. Alles ohne PIN.
   **Einstellen ›** (ab 0.4.22) öffnet ein Fenster mit jeder Lampe des Raums für sich: an und aus, **Helligkeit**,
   **Lichtfarbe** von Kerzenlicht bis Tageslicht und bei Farblampen **Farbe** – nur, was die Lampe kann. Siehe
-  [Einstellen je Lampe](#licht-zigbee-lampen).
+  [Einstellen je Lampe](#licht-zigbee-lampen). Ab 0.4.23 schalten auch [Funk-Schalter](#licht-schalter) das Licht
+  eines Raums; ist die Batterie eines Schalters fast leer, steht oben „Die Batterie im Schalter „Flur“ ist fast leer
+  (12 %) – bitte bald wechseln.“ mit **OK** (ohne PIN).
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -789,8 +791,8 @@ bleibt an, geschaltet wird in der App.
 - **Keine Antwort:** Hat eine Lampe keinen Strom (Lichtschalter an der Wand aus), antwortet sie nicht. Die App sagt
   das, und die Lampe steht auf „keine Verbindung“, bis sie sich wieder meldet; „heller“ und „dunkler“ lassen sie so
   lange aus. Antwortet keine Lampe des Raums, kommt eine Fehlermeldung.
-- **Noch nicht:** Die Lampen eines Raums als Zigbee-Gruppe und die Schalter (Hue Smart Button, Hue Dimmschalter)
-  kommen mit 0.4.23, der Bewegungsmelder und das Licht im Flur mit 0.4.24.
+- **Schalter:** ab 0.4.23, siehe [Licht: Schalter](#licht-schalter). Der Bewegungsmelder und das Licht im Flur kommen
+  mit 0.4.24.
 - **Protokoll:** Wann jemand das Licht schaltet, steht nur im
   [ausführlichen Protokoll](#protokoll-wenn-etwas-schiefgeht); wenn eine Lampe nicht antwortet, steht es immer drin.
 - **Nur simuliert geprüft:** mit nachgebauten Lampen in `tests/fake_mqtt.py` (`tests/test_light.py`) und in der Demo
@@ -805,6 +807,46 @@ bleibt an, geschaltet wird in der App.
   (`{"level": 40}` oder `null` für wie zuletzt). In `GET /api/state` steht `lights`: je Lampe `id`, `name`, `model`,
   `room`, `state`, `brightness` (in %), `kelvin` (`null`, solange sie eine Farbe zeigt), `hue`, `dim`, `kelvins`
   (ihr Bereich), `colors`, `hues` (kann Farben), `color`, `level`, `lost` und `heard`.
+
+## Licht: Schalter
+
+Ab 0.4.23. Funk-Schalter mit Zigbee schalten das Licht eines Raums – auch mehrere Schalter im selben Raum, wie bei
+einer Wechselschaltung.
+
+- **Welche:** gebaut für IKEA RODRET, Hue Smart Button und Hue Dimmschalter (beide Generationen). Diese koppelt die
+  App direkt mit den Lampen: Jeder Schalter bekommt im Zigbee-Netz eine eigene Gruppe (`schalter-<IEEE-Adresse>`) mit
+  den Lampen seines Raums und schaltet sie dann selbst – auch, wenn der Pi aus ist. Andere Schalter, die Zigbee2MQTT
+  mit Tastendrücken kennt, schalten über die App (an, aus, umschalten, heller, dunkler) – nur, solange der Pi läuft.
+- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Schalter“. Die App sagt je Hersteller, wie der
+  Schalter in den Anlern-Modus kommt – RODRET: die kleine Taste unter der hinteren Abdeckung 4-mal drücken; Smart
+  Button: die Taste unter der hinteren Abdeckung kurz drücken (10 Sekunden halten setzt ihn zurück); Dimmschalter: die
+  Setup-Taste unter der Batterieklappe 10 Sekunden halten. Im letzten Schritt „Wohin?“ bekommt der Schalter seinen
+  Namen und seinen Raum.
+- **Koppeln:** Ein Schalter schläft, um Batterie zu sparen, und nimmt die Kopplung nur kurz nach einem Tastendruck an.
+  Darum koppelt ihn die App beim nächsten Druck; bis dahin – und bei diesem Druck – schaltet die App das Licht. Ein
+  anderer Raum oder „kein Licht“ gilt sofort, ohne Druck: Die App ändert nur, welche Lampen in seiner Gruppe sind, und
+  die Lampen haben immer Strom. Kommt eine Lampe in einen anderen Raum, wechselt sie mit; eine Lampe ohne Strom kommt
+  später dazu (die App schaut alle 5 Minuten nach). Wird ein Schalter zurückgesetzt und neu angelernt, koppelt ihn die
+  App beim nächsten Druck neu.
+- **Abwechselnd an und aus:** Hue Smart Button und Hue Dimmschalter (2. Generation) senden beim Drücken abwechselnd
+  „an“ und „aus“ – sie wissen nicht, ob das Licht gerade brennt. Hat inzwischen die App oder ein anderer Schalter
+  geschaltet, geht ein Druck ins Leere. Läuft der Pi, merkt die App das und schaltet um, etwa eine Sekunde später
+  (beim Dimmschalter fragt sie dafür die Lampen). Für zwei Schalter im selben Raum passt der IKEA RODRET besser: Er hat
+  eigene Tasten für an und aus.
+- **Batterie:** Hat ein Schalter 15 % oder weniger, steht auf der Startseite „Die Batterie im Schalter „…“ ist fast
+  leer“ mit **OK**. Nach OK kommt die Meldung erst wieder, wenn eine neue Batterie drin war (mindestens 40 %).
+- **Einrichtung:** *Geräte › Licht* › „Schalter“ – je Schalter Name, **Schaltet das Licht im Raum**, Zustand
+  (gekoppelt, noch nicht gekoppelt, über die App – und warum Koppeln nicht geklappt hat), Batterie, wann zuletzt
+  gedrückt, und **Entfernen …** (kurz vorher eine Taste drücken, damit er wach ist). Name, Raum und Kopplung stehen nur
+  in der App (`data.json`: `button_names`, `button_rooms`, `button_bound`, `button_battery_ok`).
+- **Nur simuliert geprüft:** mit nachgebauten Schaltern in `tests/fake_mqtt.py` (`tests/test_button.py`) und in der
+  Demo (`uebergabe/demo_server.py … licht`). Mit echten Schaltern noch nicht – offen ist vor allem, ob ein gekoppelter
+  Schalter dem Pi seine Tastendrücke noch meldet (sonst kann die App einen Druck ins Leere nicht nachholen) und wie
+  die echten Schalter abwechseln.
+- **Schnittstelle:** mit PIN `PUT /api/buttons/<IEEE-Adresse>/name` (`{"name": "…"}`, leer für keinen) und `…/room`
+  (`{"room": "<Raum>"}`, `null` für keinen); ohne PIN `POST /api/notices/batterie-<IEEE-Adresse>/ok`. In `GET
+  /api/state` steht `buttons`: je Schalter `id`, `name`, `model`, `kind`, `room`, `direct` (kann direkt gekoppelt
+  werden), `coupled`, `error`, `battery`, `pressed` und `heard`.
 
 ## Verlauf und Kosten
 
@@ -963,13 +1005,17 @@ Gerät, das nie ruht, und das „fertig“ mit OK. Wie die Waschmaschine oder de
 prüfen die Tests nicht. Das Licht prüft `tests/test_light.py` mit Lampen, die `tests/fake_mqtt.py` wie eine IKEA
 FLOALT, eine Innr und eine Hue nachbaut (ihre Farbbereiche sind erfunden) – auch eine Lampe ohne Strom, eine, die ihre
 Helligkeit erst auf Nachfrage sagt, Helligkeit, Lichtfarbe und Farben je Lampe, „Beim Einschalten“ und das Protokoll;
-wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht.
+wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht. Die Schalter prüft
+`tests/test_button.py` mit Schaltern, die `tests/fake_mqtt.py` wie IKEA RODRET, Hue Smart Button, Hue Dimmschalter und
+einen SONOFF-Taster nachbaut – Koppeln beim nächsten Druck, ein Raumwechsel ohne Druck, Lampen, die den Raum wechseln,
+ein Druck ins Leere, eine Kopplung, die nicht klappt, ein alter Tastendruck nach einem Neustart und die
+Batterie-Meldung; wie echte Schalter sich verhalten, prüfen die Tests nicht.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
-- Licht, Teil 2 (0.4.23): die Lampen eines Raums als Zigbee-Gruppe, die Schalter (Hue Smart Button, Hue
-  Dimmschalter); danach (0.4.24) der Bewegungsmelder und das Licht im Flur mit einstellbaren Zeiten und Helligkeit.
+- Licht, Teil 3 (0.4.24): der Bewegungsmelder (auch mehrere je Raum) und das Licht im Flur mit einstellbaren Zeiten
+  und Helligkeit; später ein Schalter nur für einzelne Lampen eines Raums.
 - Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.

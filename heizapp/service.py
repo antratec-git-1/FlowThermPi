@@ -54,9 +54,20 @@ LIGHT_STEP = 10         # per cent „heller“ and „dunkler“ change the bri
 LIGHT_MIN = 10          # … down to this: „dunkler“ never switches the light off
 LIGHT_ASK = 60.0        # seconds before the app asks a lamp again for what it has not said (twice as long each time)
 NOT_SAID = "Die Lampe hat ihre Helligkeit noch nicht gemeldet – bitte gleich noch einmal versuchen."
-# what data.json keeps of a plug or a lamp, by its IEEE address – forgotten when it leaves the Zigbee network
+GROUP_PREFIX = "schalter-"   # the Zigbee group of a switch, with the lamps of its room: schalter-<its address>
+GROUP_RETRY = 300.0       # seconds before the app tries again to put a lamp into a group or take it out (it did not answer)
+GROUP_TEND = 300.0        # seconds between two looks at the groups and the switches' batteries
+BUTTON_PRESS = 1.5        # seconds within which the messages of a switch belong to one press (press, release, on …)
+BUTTON_SAID = 5.0         # seconds the app goes by what a switch told the lamps rather than by their last report
+BUTTON_CALM = 2.0         # seconds after the app switched a room in which a switch's press is not made good
+BUTTON_AFTER = 0.5        # seconds after a press before the app makes it good – the switch's own command is through
+BUTTON_ASK = 1.0          # seconds after a press of the Hue Dimmschalter before the app asks the lamps what they are
+BUTTON_STALE = 5.0        # seconds after a press within which the switch is still awake for coupling
+BUTTON_LOW = 15           # per cent: from here the start page says the battery of a switch is nearly empty …
+BUTTON_NEW = 40           # … until it has at least this much again (a new battery)
+# what data.json keeps of a plug, a lamp or a switch, by its IEEE address – forgotten when it leaves the Zigbee network
 LAMP_AND_PLUG_KEYS = ("plug_rooms", "plug_names", "plug_appliances", "light_names", "light_rooms", "light_colors",
-                      "light_levels")
+                      "light_levels", "button_names", "button_rooms", "button_bound", "button_battery_ok")
 
 
 def host_clock_synced() -> bool:
@@ -231,6 +242,15 @@ class Service:
         self._light_lost: dict[str, int] = {}   # lamp -> number of its last message when it did not answer
         self._light_asked: dict[str, tuple[int, float]] = {}   # lamp -> (times asked, when last: monotonic)
         self._light_hue: dict[str, str] = {}   # lamp -> the colour (LIGHT_HUES) the app gave it last
+        self._buttons = ThreadPoolExecutor(max_workers=1, thread_name_prefix="schalter")   # one press after the other
+        self._coupler = ThreadPoolExecutor(max_workers=1, thread_name_prefix="koppeln")   # groups and couplings, in turn
+        self._coupling: set[str] = set()   # switches waiting there to be coupled
+        self._button_error: dict[str, str] = {}   # switch -> why coupling it failed last time
+        self._button_press: dict[str, tuple[dict, float]] = {}   # switch -> (its room's lamps at the start of the
+                                                                 # press: ON | OFF | None, when: monotonic)
+        self._room_said: dict[str, tuple[str, float]] = {}   # room -> (ON | OFF, when) a coupled switch told its lamps
+        self._room_switched: dict[str, float] = {}   # room -> when the app switched its light (monotonic)
+        self._group_failed: dict[tuple, float] = {}   # (group, lamp, add) -> when it failed (monotonic)
         self._restore_lock = threading.Lock()
         self._last_daily_sync = None
         self._clock_trusted = False
@@ -279,9 +299,12 @@ class Service:
     def _run(self) -> None:
         self.poll_all(full=True)
         self.sync_clocks(only_drifted=True)
-        summarized = time.monotonic()
+        summarized, tended = time.monotonic(), 0.0
         while not self._stop.wait(self.poll_interval):
             try:
+                if self.zigbee and time.monotonic() - tended >= GROUP_TEND:
+                    tended = time.monotonic()
+                    self._coupler.submit(self._tend_buttons)
                 self.poll_all()
                 self._heal()
                 self.poll_sensors()
@@ -329,6 +352,7 @@ class Service:
     def attach_zigbee(self, net) -> None:
         """The connection to Zigbee2MQTT (heizapp.zigbee_net.ZigbeeNet): from now on its thermostats are heaters."""
         self.zigbee = net
+        net.on_action = self._on_button   # a press of a switch
         self._sync_thermostats()
 
     def _sync_thermostats(self) -> None:
@@ -371,8 +395,10 @@ class Service:
                 for key in LAMP_AND_PLUG_KEYS:
                     (d.get(key) or {}).pop(ieee, None)
         self.cycles.forget(ieee)
-        for memory in (self._light_lost, self._light_asked, self._light_hue):
+        for memory in (self._light_lost, self._light_asked, self._light_hue, self._button_error, self._button_press):
             memory.pop(ieee, None)
+        if self.zigbee:   # a lamp leaves the groups of the switches, a switch's group goes
+            self._coupler.submit(self._tend_buttons, ieee)
         if thermostat:
             log.info("Thermostat %s aus der App entfernt", ieee)
         for hid in owners:
@@ -1641,10 +1667,12 @@ class Service:
             for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
                 if meta.get("room") == room_id:
                     meta["room"] = None
-            for key in ("plug_rooms", "light_rooms"):
+            for key in ("plug_rooms", "light_rooms", "button_rooms"):
                 for pid, room in list((d.get(key) or {}).items()):
                     if room == room_id:
                         d[key].pop(pid)
+        if self.zigbee:   # the groups of its switches empty
+            self._coupler.submit(self._tend_buttons)
         with self._calib_lock:   # a calibration of the room ends with it
             gone = [sid for sid, run in self._calib_runs.items() if run.get("room") == room_id]
             for sid in gone:
@@ -2793,6 +2821,7 @@ class Service:
         """Start page „Licht an“ / „Licht aus“: every lamp of the room."""
         on = self._on_from(body)
         lamps = self._room_lights(room_id, self.store.snapshot())
+        self._room_switched[room_id] = time.monotonic()
         missed = self._send_lights({x["id"]: self._light_switch(x, on) for x in lamps})
         return self._light_result(lamps, missed, "Das Licht ist an." if on else "Das Licht ist aus.")
 
@@ -2917,6 +2946,8 @@ class Service:
                 (d.get("light_rooms") or {}).pop(light_id, None)
             else:
                 d.setdefault("light_rooms", {})[light_id] = room_id
+        if self.zigbee:   # the lamp into the groups of the switches of its new room, out of the old ones
+            self._coupler.submit(self._tend_buttons)
         if room_id is None:
             log.info("%s ist in keinem Raum mehr", lamp["name"])
             return {"message": f"„{lamp['name']}“ ist in keinem Raum mehr."}
@@ -2958,6 +2989,337 @@ class Service:
         word = f"{level} %" if level else "wie zuletzt"
         log.info("%s: Helligkeit beim Einschalten %s", lamp["name"], word)
         return {"message": f"„{lamp['name']}“: Helligkeit beim Einschalten {word}."}
+
+    # ------------------------------------------------------------------ switches (Zigbee)
+    # A switch paired in the Zigbee network (IKEA RODRET, Hue Smart Button, Hue Dimmschalter …) switches the light of one
+    # room (data.json "button_rooms"; its name: "button_names"). A switch the app knows (BUTTON_MODELS) it couples
+    # directly with a Zigbee group of its own (GROUP_PREFIX + its address) that holds the lamps of its room: then it
+    # switches them by itself, even when the Pi is off – and another room is only other lamps in its group, at once. A
+    # switch sleeps and takes the coupling only right after a press: the app couples it at its next press and switches
+    # the light itself until then; a switch it does not know it always switches through the app. The Hue Smart Button
+    # and the Hue Dimmschalter send on and off by turns: a press that changed nothing (the light was already as the
+    # switch said) the app makes good. What the app coupled: "button_bound" ({at}); a switch that joined the network
+    # again since (reset) has lost its coupling. A battery nearly empty: a notice on the start page.
+    BUTTON_MODELS = {   # Zigbee2MQTT's model -> its name, what its buttons mean (Zigbee2MQTT's action values) and with
+                        # which of them a press starts ("starts" – without: each message is a press of its own)
+        "E2201": {"name": "IKEA RODRET", "on": {"on"}, "off": {"off"}, "up": {"brightness_move_up"},
+                  "down": {"brightness_move_down"}},
+        # coupled, the Smart Button sends on and off by turns – what it sent comes as action on / off
+        "8718699693985": {"name": "Hue Smart Button", "toggle": {"press"}, "said": {"on": "ON", "off": "OFF"},
+                          "starts": {"press"}},
+        # coupled, the Dimmschalter's power button sends on or off – the app does not hear which: it asks the lamps
+        "929002398602": {"name": "Hue Dimmschalter", "toggle": {"on_press_release"}, "ask": {"on_press_release"},
+                         "up": {"up_press", "up_hold"}, "down": {"down_press", "down_hold"},
+                         "starts": {"on_press", "off_press", "up_press", "down_press"}},
+        "324131092621": {"name": "Hue Dimmschalter (1. Generation)", "on": {"on_press"}, "off": {"off_press"},
+                         "up": {"up_press", "up_hold"}, "down": {"down_press", "down_hold"}},
+    }
+    BUTTON_WORDS = {"on": {"on", "on_press"}, "off": {"off", "off_press"}, "toggle": {"toggle", "single"},
+                    "up": {"brightness_move_up", "brightness_up_click", "brightness_step_up"},
+                    "down": {"brightness_move_down", "brightness_down_click", "brightness_step_down"}}   # others
+
+    @staticmethod
+    def _button_default_name(bid: str) -> str:
+        return f"Schalter {bid[-4:].upper()}"
+
+    def _button_name(self, bid: str, data: dict | None = None) -> str:
+        d = data if data is not None else self.store.data
+        return _device_title((d.get("button_names") or {}).get(bid)) or self._button_default_name(bid)
+
+    def _button_meaning(self, model_id: str | None, action: str) -> str | None:
+        """What a press means: on, off, toggle, up (heller), down (dunkler) – None: nothing for the light."""
+        kind = self.BUTTON_MODELS.get(model_id or "") or self.BUTTON_WORDS
+        return next((m for m in ("on", "off", "toggle", "up", "down") if action in kind.get(m, ())), None)
+
+    @staticmethod
+    def _group(bid: str) -> str:
+        return GROUP_PREFIX + bid
+
+    @staticmethod
+    def _button_room(bid: str, data: dict) -> str | None:
+        room = (data.get("button_rooms") or {}).get(bid)
+        return room if room in data["rooms"] else None
+
+    def _bound(self, bid: str, data: dict) -> bool:
+        """Whether the app coupled the switch with its group – not if it joined the network again since (a reset)."""
+        bound = (data.get("button_bound") or {}).get(bid)
+        if not isinstance(bound, dict):
+            return False
+        joined = self.zigbee.joined(bid) if self.zigbee else None
+        return not (joined and joined > (bound.get("at") or 0))
+
+    def _button_item(self, bid: str) -> dict | None:
+        return next((b for b in (self.zigbee.buttons() if self.zigbee else []) if b["ieee"] == bid), None)
+
+    def _button_list(self, data: dict) -> list[dict]:
+        """Every switch in the Zigbee network, for Geräte › Licht: its room, whether the app coupled it with the room's
+        lamps (direct: it can be coupled; coupled: it is), why coupling failed, its battery, its last press."""
+        out = []
+        for item in self.zigbee.buttons() if self.zigbee else []:
+            bid = item["ieee"]
+            v = self.zigbee.button(bid) or {}
+            room = self._button_room(bid, data)
+            direct = item["model_id"] in self.BUTTON_MODELS
+            pressed = v.get("pressed")
+            out.append({"id": bid, "name": self._button_name(bid, data), "model": item["model"],
+                        "kind": (self.BUTTON_MODELS.get(item["model_id"]) or {}).get("name"), "room": room,
+                        "direct": direct, "coupled": direct and room is not None and self._bound(bid, data),
+                        "error": self._button_error.get(bid) if room else None, "battery": v.get("battery"),
+                        "pressed": self._iso(pressed[1]) if pressed else None, "heard": self._iso(v.get("heard"))})
+        return out
+
+    def _find_button(self, bid: str, data: dict) -> dict:
+        b = next((x for x in self._button_list(data) if x["id"] == bid), None)
+        if b is None:
+            raise ActionError("Dieser Schalter ist nicht (mehr) im Zigbee-Netz.", 404)
+        return b
+
+    def rename_button(self, bid: str, body: dict) -> dict:
+        """Geräte › Licht „Name ändern“ of a switch: the name stays in the app. Empty: „Schalter 1A2B“ again."""
+        raw = body.get("name")
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError("name muss Text sein")
+        name = _device_title(raw)
+        data = self.store.snapshot()
+        before = self._find_button(bid, data)["name"]
+        with self.store.edit() as d:
+            if name:
+                d.setdefault("button_names", {})[bid] = name
+            else:
+                (d.get("button_names") or {}).pop(bid, None)
+        if self._button_name(bid) != before:
+            log.info("%s heißt jetzt „%s“", before, self._button_name(bid))
+        return {"message": f"Der Schalter heißt jetzt „{self._button_name(bid)}“."}
+
+    def set_button_room(self, bid: str, body: dict) -> dict:
+        """Geräte › Licht „Schaltet“: the room whose light the switch switches (room "" or None: none). A switch the
+        app knows gets the room's lamps into its group – coupled already, it switches them at once; else the app couples
+        it now if it is still awake (just paired), or at its next press."""
+        room_id = body.get("room") or None
+        if room_id is not None and not isinstance(room_id, str):
+            raise ValueError("room muss eine Kennung sein")
+        data = self.store.snapshot()
+        b = self._find_button(bid, data)
+        if room_id is not None and room_id not in data["rooms"]:
+            raise ActionError("Raum nicht gefunden", 404)
+        with self.store.edit() as d:
+            if room_id is None:
+                (d.get("button_rooms") or {}).pop(bid, None)
+            else:
+                d.setdefault("button_rooms", {})[bid] = room_id
+        self._button_error.pop(bid, None)
+        if b["direct"]:   # just paired, it may still be awake – asleep, it says nothing: the next press couples it
+            self._coupler.submit(self._couple_now, bid, True)
+        if room_id is None:
+            log.info("%s schaltet kein Licht mehr", b["name"])
+            return {"message": f"„{b['name']}“ schaltet kein Licht mehr."}
+        room = data["rooms"][room_id]["name"]
+        log.info("%s schaltet jetzt das Licht im Raum %s", b["name"], room)
+        said = f"„{b['name']}“ schaltet jetzt das Licht im Raum „{room}“"
+        if not b["direct"]:
+            return {"message": f"{said} – über die App."}
+        if self._bound(bid, data):
+            return {"message": f"{said}."}
+        return {"message": f"{said}. Drück einmal eine Taste am Schalter – dann koppelt ihn die App mit den Lampen."}
+
+    def _on_button(self, bid: str, action: str) -> None:
+        """A press (heizapp.zigbee_net, in its MQTT thread – nothing here may wait): what the room's lamps were at the
+        start of the press, then the rest in the switch thread, one press after the other."""
+        try:
+            now = time.monotonic()
+            last = self._button_press.get(bid)
+            item = self._button_item(bid)
+            starts = (self.BUTTON_MODELS.get(item["model_id"] or "") or {}).get("starts") if item else None
+            if last is None or now - last[1] > BUTTON_PRESS or starts is None or action in starts:   # a new press
+                data = self.store.snapshot()
+                room = self._button_room(bid, data)
+                said = self._room_said.get(room or "")
+                lamps = [lid for lid, r in (data.get("light_rooms") or {}).items()
+                         if room and r == room and lid not in self._light_lost]
+                if said and now - said[1] < BUTTON_SAID and said[1] > self._room_switched.get(room or "", 0.0):
+                    before = {lid: said[0] for lid in lamps}   # the lamps' reports of the press before may be on the way
+                else:
+                    before = {lid: (self.zigbee.light(lid) or {}).get("state") for lid in lamps}
+                self._button_press[bid] = (before, now)
+            else:
+                self._button_press[bid] = (last[0], now)
+            self._buttons.submit(self._pressed, bid, action, now)
+        except Exception:   # never into Zigbee's thread
+            log.exception("Fehler beim Tastendruck von %s", bid)
+
+    def _pressed(self, bid: str, action: str, at: float) -> None:
+        """A press, in the switch thread: a switch the app knows but has not coupled yet is coupled now (it is awake);
+        a coupled one switched the lamps itself – a press that changed nothing is made good; else the app switches."""
+        try:
+            data = self.store.snapshot()
+            item = self._button_item(bid)
+            if item is None:
+                return
+            room = self._button_room(bid, data)
+            name, kind = self._button_name(bid, data), self.BUTTON_MODELS.get(item["model_id"] or "")
+            log.debug("%s: Taste %s", name, action)
+            coupled = kind is not None and self._bound(bid, data)
+            if kind is not None and room and not coupled and bid not in self._coupling \
+                    and time.monotonic() - at < BUTTON_STALE:   # from its next press on it switches the lamps itself –
+                self._coupling.add(bid)                        # this one the app does
+                self._coupler.submit(self._couple_now, bid)
+            if room is None:
+                return
+            before = (self._button_press.get(bid) or ({}, 0.0))[0]
+            if coupled:
+                if action in (kind.get("said") or {}):
+                    self._made_good(name, room, before, kind["said"][action], at)
+                elif action in (kind.get("ask") or ()):
+                    self._asked_good(name, room, before, at)
+                return
+            meaning = self._button_meaning(item["model_id"], action)
+            if meaning is None:
+                return
+            lamps = self._room_lights(room, data)
+            on = [x for x in lamps if x["state"] == "ON" and not x["lost"]]
+            if meaning == "toggle":
+                meaning = "off" if on else "on"
+            if meaning in ("on", "off"):
+                self.switch_room_light(room, {"on": meaning == "on"})
+            elif meaning == "up" and not on:   # brighter from off: on (as the switch does it itself)
+                self.switch_room_light(room, {"on": True})
+            elif on:
+                self.dim_room_light(room, {"step": 1 if meaning == "up" else -1})
+            log.debug("%s: Licht im Raum %s über die App (%s)", name, room, meaning)
+        except ActionError as exc:
+            log.info("%s: %s", self._button_name(bid), exc)
+        except Exception:
+            log.exception("Fehler beim Tastendruck von %s", bid)
+
+    def _made_good(self, name: str, room: str, before: dict, said: str, at: float) -> None:
+        """The Hue Smart Button said on or off to the lamps: if they all were that already, the press went into the void
+        – the app switches the other way."""
+        self._room_said[room] = (said, time.monotonic())
+        states = set(before.values())
+        if states != {said} or self._room_switched.get(room, 0.0) > at - BUTTON_CALM:
+            return   # it changed something – or the lamps were not known, or the app switched just now
+        time.sleep(max(0.0, BUTTON_AFTER - (time.monotonic() - at)))
+        if self._room_switched.get(room, 0.0) > at:
+            return
+        log.debug("%s: der Druck ging ins Leere (Licht war schon %s) – die App schaltet um", name,
+                  "an" if said == "ON" else "aus")
+        self.switch_room_light(room, {"on": said == "OFF"})
+        self._room_said[room] = ("OFF" if said == "ON" else "ON", time.monotonic())
+
+    def _asked_good(self, name: str, room: str, before: dict, at: float) -> None:
+        """The Hue Dimmschalter's power button sent on or off – which, the app does not hear: it asks the lamps. If
+        none changed, the press went into the void – the app switches the other way."""
+        states = set(before.values())
+        if len(states) != 1 or None in states or self._room_switched.get(room, 0.0) > at - BUTTON_CALM:
+            return
+        time.sleep(max(0.0, BUTTON_ASK - (time.monotonic() - at)))
+        asked = {lid: self.zigbee.send(lid, {"state": ""}, "get") for lid in before}
+        deadline, now = time.monotonic() + LIGHT_ANSWER, {}
+        for lid, after in asked.items():
+            v = None if after is None else self.zigbee.wait(lid, after, lambda x: x.get("state") in ("ON", "OFF"),
+                                                            max(0.0, deadline - time.monotonic()))
+            if v is None:
+                return   # a lamp did not answer: better nothing than the wrong thing
+            now[lid] = v["state"]
+        if now != before or self._room_switched.get(room, 0.0) > at:
+            return
+        was = states.pop()
+        log.debug("%s: der Druck ging ins Leere (Licht war schon %s) – die App schaltet um", name,
+                  "an" if was == "ON" else "aus")
+        self.switch_room_light(room, {"on": was == "OFF"})
+
+    def _couple_now(self, bid: str, quiet: bool = False) -> None:   # in the coupling thread
+        try:
+            self._couple(bid, quiet)
+        except Exception:
+            log.exception("Fehler beim Koppeln von %s", bid)
+        finally:
+            self._coupling.discard(bid)
+
+    def _couple(self, bid: str, quiet: bool = False) -> bool:
+        """The switch's group with exactly the lamps of its room – and the switch coupled with it if it is not yet
+        (only right after a press does a switch that sleeps take it). True: it is coupled. quiet: a switch that does
+        not answer is no error (it sleeps – at its next press)."""
+        data = self.store.snapshot()
+        room, name = self._button_room(bid, data), self._button_name(bid, data)
+        where = f" im Raum {data['rooms'][room]['name']}" if room else ""
+        try:
+            groups = self.zigbee.groups()
+            if groups is None:
+                raise ActionError("Zigbee2MQTT hat seine Gruppen noch nicht gemeldet – gleich noch einmal.")
+            if room or self._group(bid) in groups:
+                self._switch_group(bid, room, data, groups)
+            if room and not self._bound(bid, data):
+                answer = self.zigbee.bind(bid, self._group(bid))
+                with self.store.edit() as d:
+                    d.setdefault("button_bound", {})[bid] = {"at": time.time()}
+                failed = answer.get("failed") if isinstance(answer.get("failed"), list) else []
+                log.info("%s ist jetzt mit dem Licht%s gekoppelt – er schaltet die Lampen direkt%s", name, where,
+                         " (nur an und aus)" if "genLevelCtrl" in failed else "")
+        except ActionError as exc:
+            if quiet and (exc.status == 504 or "nicht geantwortet" in str(exc)):
+                log.info("%s schläft – die App koppelt ihn beim nächsten Tastendruck", name)
+                return False
+            self._button_error[bid] = str(exc)
+            log.warning("%s: Koppeln mit dem Licht%s hat nicht geklappt – %s", name, where, exc)
+            return False
+        self._button_error.pop(bid, None)
+        return self._bound(bid, self.store.snapshot())
+
+    def _switch_group(self, bid: str, room: str | None, data: dict, groups: dict) -> None:
+        """The switch's group: there, with exactly the lamps of its room in it – none without a room (a lamp that does
+        not answer: later)."""
+        name = self._group(bid)
+        if name not in groups:
+            self.zigbee.add_group(name)
+            members: list[str] = []
+        else:
+            members = groups[name]["members"]
+        lamps = {x["id"] for x in self._light_list(data) if room and x["room"] == room}
+        gone = {x for x in members if (self.zigbee.thermostat(x) or {}).get("device") is None}   # no longer paired:
+        for lid, add in ([(x, True) for x in sorted(lamps - set(members))]                    # nothing to take out
+                         + [(x, False) for x in sorted(set(members) - lamps - gone)]):
+            key = (name, lid, add)
+            if time.monotonic() - self._group_failed.get(key, -GROUP_RETRY) < GROUP_RETRY:
+                continue
+            try:
+                self.zigbee.group_member(name, lid, add)
+                self._group_failed.pop(key, None)
+            except ActionError as exc:
+                self._group_failed[key] = time.monotonic()
+                log.warning("%s %s der Gruppe von %s: hat nicht geklappt – %s", self._light_name(lid, data),
+                            "in" if add else "aus", self._button_name(bid, data), exc)
+
+    def _tend_buttons(self, gone: str | None = None) -> None:
+        """In the coupling thread, every few minutes and after changes: the group of each switch has exactly the lamps
+        of its room; the group of a switch that was removed (gone) goes; the notice of a battery comes back once a new
+        battery was in."""
+        try:
+            groups = self.zigbee.groups() if self.zigbee and not self.zigbee.problem() else None
+            if groups is None:
+                return
+            if gone and self._group(gone) in groups:
+                self.zigbee.remove_group(self._group(gone))
+            data = self.store.snapshot()
+            for item in self.zigbee.buttons():
+                bid = item["ieee"]
+                if self._group(bid) in groups:
+                    self._switch_group(bid, self._button_room(bid, data), data, groups)
+                elif self._bound(bid, data):   # its group is gone (removed in Zigbee2MQTT): coupled anew at a press
+                    with self.store.edit() as d:
+                        d["button_bound"].pop(bid, None)
+                    log.info("%s: seine Zigbee-Gruppe fehlt – die App koppelt ihn beim nächsten Tastendruck neu",
+                             self._button_name(bid, data))
+            new = [bid for bid in (data.get("button_battery_ok") or {})
+                   if ((self.zigbee.button(bid) or {}).get("battery") or 0) >= BUTTON_NEW]
+            if new:
+                with self.store.edit() as d:
+                    for bid in new:
+                        d["button_battery_ok"].pop(bid, None)
+        except ActionError as exc:
+            log.warning("Zigbee-Gruppen: %s", exc)
+        except Exception:
+            log.exception("Fehler bei den Zigbee-Gruppen")
 
     def history_view(self, kind: str, ident: str, day_text: str) -> dict:
         """Verlauf of a room (or of a heater without one) on one day: the points of the chart and what it cost."""
@@ -3163,9 +3525,9 @@ class Service:
 
     RUN_WHO = {"waschmaschine": "Die Waschmaschine", "trockner": "Der Trockner"}
 
-    def _notice_views(self, data: dict, plugs: list[dict]) -> list[dict]:
+    def _notice_views(self, data: dict, plugs: list[dict], buttons: list[dict] = ()) -> list[dict]:
         """The notices for the start page, „Die Waschmaschine ist fertig – seit 10:42.“ (heizapp.cycles) – only of
-        plugs that still have that device on them."""
+        plugs that still have that device on them –, and „Die Batterie im Schalter … ist fast leer“."""
         kinds = {p["id"]: p["appliance"] for p in plugs}
         alike = Counter(kinds.values())
         out = []
@@ -3177,6 +3539,12 @@ class Service:
                 who += f" ({self._plug_name(n['plug'], data)})"
             out.append({"id": n["id"], "plug": n["plug"], "at": self._iso(n["at"]),
                         "text": f"{who} ist fertig – seit {self._since_text(n['at'])}."})
+        okay = data.get("button_battery_ok") or {}
+        for b in buttons:
+            if b["battery"] is not None and b["battery"] <= BUTTON_LOW and not okay.get(b["id"]):
+                out.append({"id": "batterie-" + b["id"], "button": b["id"], "at": None,
+                            "text": f"Die Batterie im Schalter „{b['name']}“ ist fast leer ({b['battery']} %) – bitte "
+                                    "bald wechseln."})
         return out
 
     def _since_text(self, t: float) -> str:   # „10:42“, „gestern 22:10“, „24.11. 22:10“
@@ -3187,6 +3555,13 @@ class Service:
 
     def notice_ok(self, notice_id: str) -> dict:
         """„OK“ on a notice of the start page – anyone may tap it, without PIN."""
+        if notice_id.startswith("batterie-"):   # a switch's battery: not again until it had a new one
+            bid = notice_id[len("batterie-"):]
+            if not any(b["ieee"] == bid for b in (self.zigbee.buttons() if self.zigbee else [])):
+                raise ActionError("Diesen Hinweis gibt es nicht mehr.", 404)
+            with self.store.edit() as d:
+                d.setdefault("button_battery_ok", {})[bid] = True
+            return {}
         if not self.cycles.ok(notice_id):
             raise ActionError("Diesen Hinweis gibt es nicht mehr.", 404)
         return {}
@@ -3252,11 +3627,12 @@ class Service:
             })
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
-        plugs = self._plug_list(data)
+        plugs, buttons = self._plug_list(data), self._button_list(data)
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
                 "costs": self._costs(data), "plugs": plugs, "power_today": self._power_today(data, plugs),
-                "notices": self._notice_views(data, plugs), "lights": self._light_list(data, ask=True),
+                "notices": self._notice_views(data, plugs, buttons), "lights": self._light_list(data, ask=True),
+                "buttons": buttons,
                 "history": {"recording": self.history.active,
                             "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,
