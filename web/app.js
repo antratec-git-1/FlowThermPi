@@ -3223,7 +3223,7 @@ function lightTileHTML(l) {
         busy.has("lightroom:" + l.id) ? "disabled" : ""}>${plugRoomOptions(l.room)}</select>${l.room ? ""
         : ' <span class="muted">– ohne Raum nicht auf der Startseite</span>'}</dd>
       <dt>Schalten</dt><dd>${lightSwitchHTML(l)}</dd>
-      ${l.dim ? `<dt>Helligkeit</dt><dd>${lampBrightnessHTML(l)}</dd>` : ""}
+      ${l.dim ? `<dt>Helligkeit</dt><dd class="lamp-wide">${lampBrightnessHTML(l)}</dd>` : ""}
       ${l.kelvins ? `<dt>Lichtfarbe</dt><dd>${lampWhiteHTML(l)}</dd>` : ""}
       ${l.hues ? `<dt>Farbe</dt><dd>${lampHueHTML(l)}</dd>` : ""}
       <dt>Beim Einschalten</dt><dd>${lampDefaultsHTML(l)}</dd>
