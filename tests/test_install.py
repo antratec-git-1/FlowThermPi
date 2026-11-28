@@ -95,11 +95,11 @@ class InstallTest(Base):
         for headers, expected in (({"comment": "c" * 40}, "c" * 40), ({"comment": "kein commit"}, None), ({}, None)):
             archive = self.tmp / "a.tar.gz"
             with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT, pax_headers=headers) as tar:
-                tar.add(self.src / "run.py", arcname="FlowThermPi-main/run.py")
+                tar.add(self.src / "run.py", arcname="HoLiTherm-main/run.py")
             out = self.tmp / "out"
             shutil.rmtree(out, ignore_errors=True)
             top, commit = install.extract(archive, out)
-            self.assertEqual((top.name, commit), ("FlowThermPi-main", expected))
+            self.assertEqual((top.name, commit), ("HoLiTherm-main", expected))
 
     def test_planted_links_in_the_data_folder_are_refused(self):
         self.run_install()
@@ -207,7 +207,7 @@ class UpdateFromAppTest(Base):
         commit, error = self.github
         if error:
             raise install.InstallError(error)
-        dest = tmp / "src" / "FlowThermPi-main"
+        dest = tmp / "src" / "HoLiTherm-main"
         shutil.copytree(self.src, dest)
         (dest / "heizapp" / "__init__.py").write_text('__version__ = "1.3.0"\n')
         return dest, commit

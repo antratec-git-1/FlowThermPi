@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HoLiTherm auf einem Raspberry Pi einrichten oder aktualisieren – ein Befehl per SSH:
 
-    curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
+    curl -fsSL https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/main/install.py | sudo python3 -
 
 Updates danach in der App: Einrichtung › Über › „Nach Updates suchen“ – oder derselbe Befehl noch
 einmal. WLAN einrichten: Einrichtung › WLAN (der Pi kann also mit Netzwerkkabel ausgeliefert werden).
@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
-REPO = "antratec-git-1/FlowThermPi"
+REPO = "antratec-git-1/HoLiTherm"
 NAME = "flowthermpi"
 APP_DIR = "/opt/flowthermpi"
 DATA_DIR = "/var/lib/flowthermpi"

@@ -14,8 +14,9 @@ Inoffizielles Projekt – kein Produkt von Thermotec, SONOFF, Shelly, IKEA, Phil
 Herstellern, deren Geräte es nutzt, und von keinem dieser Hersteller unterstützt. Die genannten Marken gehören ihren
 Inhabern.
 
-Bis Version 0.4.25 hieß das Projekt FlowThermPi. Ordner, Dienste und Netznamen auf dem Pi (`flowthermpi`) und
-die Adresse auf GitHub heißen noch so, damit Updates auf vorhandenen Geräten weiter funktionieren.
+Bis Version 0.4.25 hieß das Projekt FlowThermPi. Ordner, Dienste und Netznamen auf dem Pi (`flowthermpi`) heißen
+noch so, damit Updates auf vorhandenen Geräten weiter funktionieren. Die alte Adresse auf GitHub leitet auf die neue
+weiter.
 
 ## Zwei Ansichten: einfach für Bewohner, Einrichtung mit PIN
 
@@ -192,8 +193,8 @@ App 1 Minute, danach jeweils doppelt so lange. Die PIN liegt nur als gesalzener 
 ## Start
 
 ```bash
-git clone https://github.com/antratec-git-1/FlowThermPi.git
-cd FlowThermPi
+git clone https://github.com/antratec-git-1/HoLiTherm.git
+cd HoLiTherm
 python3 run.py                  # http://127.0.0.1:8080 – nur auf diesem Rechner
 ```
 
@@ -213,7 +214,7 @@ Voraussetzung: Raspberry Pi mit aktuellem **Raspberry Pi OS** (Lite reicht), im 
 Heizungen und per SSH erreichbar. Dann **ein Befehl** per SSH auf dem Pi:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
+curl -fsSL https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/main/install.py | sudo python3 -
 ```
 
 Das Skript lädt HoLiTherm von GitHub nach `/opt/flowthermpi`, legt den Dienst `flowthermpi` an
@@ -245,7 +246,7 @@ Adresse an – z. B. `http://flowthermpi.local`.
   # auf dem Mac, im App-Ordner:
   scp heizungen.conf data/data.json BENUTZER@flowthermpi.local:
   # auf dem Pi:
-  curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 - --import ~
+  curl -fsSL https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/main/install.py | sudo python3 - --import ~
   rm ~/heizungen.conf ~/data.json
   ```
   Danach die App auf dem Mac beenden – sonst steuern zwei Apps dieselben Heizungen.

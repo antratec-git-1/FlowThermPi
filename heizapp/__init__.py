@@ -6,10 +6,10 @@ Version 3 (siehe LICENSE).
 import logging
 
 APP_NAME = "HoLiTherm"
-__version__ = "0.4.27"
+__version__ = "0.4.28"
 LICENSE = "GPL-3.0"
 COPYRIGHT = "© 2026 antratec"
-REPO_URL = "https://github.com/antratec-git-1/FlowThermPi"
+REPO_URL = "https://github.com/antratec-git-1/HoLiTherm"
 
 # Where the entries go is decided by whoever starts the app (run.py: logs.setup). Without that – in the tests – they
 # are dropped instead of landing on the console.

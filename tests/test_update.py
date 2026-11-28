@@ -70,8 +70,8 @@ class UpdaterTest(Base):
         self.assertEqual(result["latest"], {"version": "9.9.9", "commit": NEW, "date": "2026-11-21T09:30:00Z",
                                             "message": "Update-Knopf"})
         urls = [r.full_url for r in github.requests]
-        self.assertEqual(urls, ["https://api.github.com/repos/antratec-git-1/FlowThermPi/commits/main",
-                                f"https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/{NEW}/heizapp/__init__.py"])
+        self.assertEqual(urls, ["https://api.github.com/repos/antratec-git-1/HoLiTherm/commits/main",
+                                f"https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/{NEW}/heizapp/__init__.py"])
         self.assertTrue(github.requests[0].get_header("User-agent").startswith("HoLiTherm/"))
 
     def test_check_same_commit_is_up_to_date(self):
