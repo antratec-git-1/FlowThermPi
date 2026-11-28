@@ -21,6 +21,11 @@ color_temp (in mired, kept within the lamp's range) and publishes the new state.
 (IKEA FLOALT, Innr RCL 240 T, Hue); their ranges of colour temperature are made up. A lamp in `asleep` has no power and
 answers nothing.
 
+Its motion sensors behave as the device pages of Zigbee2MQTT describe them (Hue motion sensor 1st and 2nd
+generation, IKEA VALLHORN, read on 28.11.2026): move() is someone moving or no longer – occupancy, with the brightness
+(illuminance, in lux) –; …/set takes motion_sensitivity, led_indication and occupancy_timeout (the Hue) and publishes
+the new state. A sensor in `asleep` answers nothing.
+
 A firmware update (bridge/request/device/ota_update/update) goes as the Zigbee2MQTT guide describes it (read on
 25.11.2026): the device reports its progress `ota_steps` times, `ota_every` seconds apart; only at the end comes the
 answer, with the firmware before and after – or with `ota_error`. When it restarts with the new firmware, the
@@ -422,6 +427,56 @@ def button(ieee: str, kind: str = "rodret", interview: str = "SUCCESSFUL") -> di
             "interview_completed": done, "interview_state": interview, "endpoints": {}}
 
 
+# three motion sensors as bridge/devices lists them: Zigbee model id, Zigbee2MQTT's model, maker, description, the
+# sensitivities it takes (None: none to set) – as on the device pages of Zigbee2MQTT
+DETECTORS = {"hue": ("SML001", "9290012607", "Philips", "Hue motion sensor", ["low", "medium", "high"]),
+             "hue2": ("SML003", "9290030675", "Philips", "Hue motion sensor",
+                      ["low", "medium", "high", "very_high", "max"]),
+             "vallhorn": ("VALLHORN Wireless Motion Sensor", "E2134", "IKEA", "VALLHORN wireless motion sensor", None)}
+DETECTOR_MODELS = {model_id for model_id, *_ in DETECTORS.values()}
+
+
+def detector_state(occupied: bool = False, lux: int = 12, battery: int = 100) -> dict:
+    """A motion sensor's state as Zigbee2MQTT publishes it."""
+    return {"occupancy": occupied, "illuminance": lux, "temperature": 20.4, "battery": battery,
+            "motion_sensitivity": "high", "led_indication": False, "occupancy_timeout": 0, "linkquality": 116}
+
+
+def detector(ieee: str, kind: str = "hue", interview: str = "SUCCESSFUL") -> dict:
+    """A motion sensor as bridge/devices lists it – an end device on a battery that sleeps."""
+    model_id, model, vendor, description, sensitivities = DETECTORS[kind]
+    done = interview == "SUCCESSFUL"
+    read = 5 if kind == "vallhorn" else 1
+    exposes = [{"type": "binary", "name": "occupancy", "property": "occupancy", "access": read, "value_on": True,
+                "value_off": False},
+               {"type": "numeric", "name": "illuminance", "property": "illuminance", "access": 5, "unit": "lx"},
+               {"type": "numeric", "name": "battery", "property": "battery", "access": read, "unit": "%",
+                "value_min": 0, "value_max": 100},
+               {"type": "enum", "name": "identify", "property": "identify", "access": 2, "values": ["identify"]},
+               {"type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1}]
+    if sensitivities:   # the Hue
+        exposes += [{"type": "numeric", "name": "temperature", "property": "temperature", "access": 1, "unit": "°C"},
+                    {"type": "enum", "name": "motion_sensitivity", "property": "motion_sensitivity", "access": 7,
+                     "values": sensitivities},
+                    {"type": "binary", "name": "led_indication", "property": "led_indication", "access": 7,
+                     "value_on": True, "value_off": False},
+                    {"type": "numeric", "name": "occupancy_timeout", "property": "occupancy_timeout", "access": 7,
+                     "value_min": 0, "value_max": 65535, "unit": "s"}]
+    else:               # the VALLHORN
+        exposes += [{"type": "numeric", "name": "voltage", "property": "voltage", "access": 5, "unit": "mV"},
+                    {"type": "enum", "name": "lux_value", "property": "lux_value", "access": 7,
+                     "values": ["always", "only_when_dark"]},
+                    {"type": "numeric", "name": "timer", "property": "timer", "access": 7, "value_min": 10,
+                     "value_max": 65534, "unit": "s"}]
+    return {"ieee_address": ieee, "type": "EndDevice", "network_address": 0x6E32, "supported": done,
+            "friendly_name": ieee, "disabled": False, "description": None,
+            "definition": {"source": "native", "model": model, "vendor": vendor, "description": description,
+                           "exposes": exposes, "supports_ota": True, "options": []} if done else None,
+            "power_source": "Battery", "software_build_id": "2.53.6" if done else None,
+            "model_id": model_id, "manufacturer": vendor, "interviewing": interview == "IN_PROGRESS",
+            "interview_completed": done, "interview_state": interview, "endpoints": {}}
+
+
 class FakeZ2M:
     """Zigbee2MQTT 2.x as the app sees it over MQTT. join_after: seconds after permit_join until a thermostat joins
     (None: nobody comes); interview: seconds its interview takes."""
@@ -456,6 +511,7 @@ class FakeZ2M:
         self.join_kind = "thermostat"       # what joins during a search: "thermostat", "plug", "light", "button" …
         self.light_kind = "floalt"          # … which lamp (see LIGHTS)
         self.button_kind = "rodret"         # … which switch (see BUTTONS)
+        self.detector_kind = "hue"          # … which motion sensor (see DETECTORS)
         self.groups: dict[str, dict] = {}   # friendly name -> {id, members: [ieee]}
         self.next_group = 1
         self.binds: dict[str, set[str]] = {}   # switch -> the groups it is coupled with
@@ -517,7 +573,8 @@ class FakeZ2M:
         """The state a device starts with – a plug's, a lamp's or a thermostat's."""
         model = self._model(ieee)
         return (plug_state() if model == PLUG_MODEL else light_state() if model in LIGHT_MODELS
-                else button_state() if model in BUTTON_MODELS else trv_state())
+                else button_state() if model in BUTTON_MODELS else detector_state() if model in DETECTOR_MODELS
+                else trv_state())
 
     def _model(self, ieee: str) -> str | None:
         with self.lock:
@@ -542,6 +599,17 @@ class FakeZ2M:
         heats, someone pressed the plug's button …)."""
         with self.lock:
             self.states.setdefault(ieee, self._fresh(ieee)).update(values)
+        self._values(ieee)
+
+    # a person at a motion sensor
+    def move(self, ieee: str, occupied: bool = True, lux: int | None = None) -> None:
+        """Someone begins to move in front of the sensor (occupied) – or it says that the motion is over; lux: the
+        brightness it measured with it."""
+        with self.lock:
+            state = self.states.setdefault(ieee, detector_state())
+            state["occupancy"] = occupied
+            if lux is not None:
+                state["illuminance"] = lux
         self._values(ieee)
 
     # a person at a switch
@@ -676,6 +744,24 @@ class FakeZ2M:
             state.update(new)
         self._values(ieee, asked=body)   # what it was told, Zigbee2MQTT knows
 
+    def _apply_detector(self, ieee: str, body: dict, device: dict) -> None:
+        """What a motion sensor's converters do with a set: motion_sensitivity (one of its values), led_indication,
+        occupancy_timeout – as far as it has them; then its new state."""
+        exposes = {e["property"]: e for e in device["definition"]["exposes"]}
+        with self.lock:
+            state = self.states.setdefault(ieee, detector_state())
+            for key, value in body.items():
+                e = exposes.get(key)
+                good = e is not None and e["access"] & 2 and (
+                    value in e["values"] if e["type"] == "enum" else isinstance(value, bool) if e["type"] == "binary"
+                    else isinstance(value, int) and not isinstance(value, bool))
+                if not good:
+                    self.refused.append(f"No converter available for '{key}'" if e is None else
+                                        f"Invalid value {value} for {key}")
+                    return
+                state[key] = value
+        self._values(ieee)
+
     def _apply(self, ieee: str, body: dict) -> None:
         """What the TRV-ZBT's converters do with a set: check each value, write it, then publish the state."""
         with self.lock:
@@ -686,6 +772,8 @@ class FakeZ2M:
             return self._apply_plug(ieee, body)
         if device["model_id"] in LIGHT_MODELS:
             return self._apply_light(ieee, body, device)
+        if device["model_id"] in DETECTOR_MODELS:
+            return self._apply_detector(ieee, body, device)
         with self.lock:
             state = self.states.setdefault(ieee, trv_state())
             plans = self.plans.setdefault(ieee, {g: {d: state[f"weekly_schedule_{d}"] for d in DAYS} for g in "123"})
@@ -939,9 +1027,10 @@ class FakeZ2M:
     def _join(self) -> None:
         """A thermostat whose middle button was held for 2 s (a plug whose button was held for 5 s, a lamp that was
         reset): it joins, is interviewed, reports its values."""
-        kind, switch = self.light_kind, self.button_kind
+        kind, switch, sensor = self.light_kind, self.button_kind, self.detector_kind
         make = plug if self.join_kind == "plug" else (lambda i, *a: light(i, kind, *a)) if self.join_kind == "light" \
-            else (lambda i, *a: button(i, switch, *a)) if self.join_kind == "button" else thermostat
+            else (lambda i, *a: button(i, switch, *a)) if self.join_kind == "button" \
+            else (lambda i, *a: detector(i, sensor, *a)) if self.join_kind == "detector" else thermostat
         with self.lock:
             if not (self.online and self.permit_end and self.permit_end > time.time()):
                 return

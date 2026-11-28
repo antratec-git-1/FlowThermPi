@@ -72,10 +72,15 @@ LIGHT_KEYS = frozenset({"state", "brightness", "color_temp", "color_mode", "powe
                         "last_seen"})
 # … and of a switch (its battery; what was pressed, action, is not kept: it is news only once)
 BUTTON_KEYS = frozenset({"battery", "voltage", "linkquality", "update", "last_seen"})
-KEPT_KEYS = THERMOSTAT_KEYS | PLUG_KEYS | LIGHT_KEYS | BUTTON_KEYS
+# … and of a motion sensor (the names of the Hue motion sensor in Zigbee2MQTT; IKEA, Aqara, SONOFF use the same)
+DETECTOR_KEYS = frozenset({"occupancy", "presence", "illuminance", "temperature", "battery", "voltage",
+                           "motion_sensitivity", "led_indication", "occupancy_timeout", "linkquality", "update",
+                           "last_seen"})
+KEPT_KEYS = THERMOSTAT_KEYS | PLUG_KEYS | LIGHT_KEYS | BUTTON_KEYS | DETECTOR_KEYS
 MIRED = (50, 1000)         # colour temperatures accepted from a lamp, in mired (20000 K to 1000 K)
 MAX_POWER = 50000          # W accepted from a plug (the S60ZBTPF takes up to 4000 W)
 MAX_ENERGY = 10 ** 7       # kWh accepted from a plug's meter
+MAX_LUX = 200000           # lx accepted from a motion sensor (bright sunshine: about 100 000)
 UPDATE_KEYS = ("state", "installed_version", "latest_version", "progress", "remaining")
 OTA = "device/ota_update/update"   # Zigbee2MQTT answers this request only when the firmware update is over
 OTA_START = 10 * 60        # seconds Zigbee2MQTT may take to begin a firmware update before the app gives up on it …
@@ -205,6 +210,26 @@ def _button(exposes: list) -> list[str] | None:
     return None
 
 
+def _detector(exposes: list) -> dict | None:
+    """A motion sensor: what tells that someone moves (occupancy – or presence, of a sensor that also sees people who
+    sit still) – and what it can besides: measure the brightness (lux) and the temperature (temp), how sensitive it is
+    (sensitivity: the values it takes – None: not to be set) and whether its light blinks at a motion (led: to be set).
+    None: no motion sensor."""
+    found = {e["property"]: e for e in exposes if isinstance(e, dict) and isinstance(e.get("property"), str)}
+    prop = next((p for p in ("occupancy", "presence") if (found.get(p) or {}).get("type") == "binary"), None)
+    if prop is None:
+        return None
+
+    def settable(e: dict | None) -> bool:   # access: 1 in the state, 2 to be set (…/set), 4 to be asked (…/get)
+        return bool(e) and isinstance(e.get("access"), int) and not isinstance(e["access"], bool) and e["access"] & 2
+    sens, led = found.get("motion_sensitivity"), found.get("led_indication")
+    values = [v for v in (sens.get("values") if isinstance(sens.get("values"), list) else [])
+              if isinstance(v, str) and 0 < len(v) <= 20][:10] if settable(sens) and sens.get("type") == "enum" else []
+    return {"prop": prop, "lux": (found.get("illuminance") or {}).get("type") == "numeric",
+            "temp": (found.get("temperature") or {}).get("type") == "numeric", "sensitivity": values or None,
+            "led": settable(led) and led.get("type") == "binary"}
+
+
 def _definition(item: dict, device: dict) -> None:
     """Model, maker and what the device can do – from bridge/devices or the event of a finished interview."""
     definition = item.get("definition") if isinstance(item.get("definition"), dict) else None
@@ -214,12 +239,14 @@ def _definition(item: dict, device: dict) -> None:
     thermostat = any(isinstance(e, dict) and e.get("type") == "climate" for e in exposes)
     light = None if thermostat else _light(exposes)
     plug = not thermostat and light is None and _measuring_plug(exposes)
-    actions = None if thermostat or light is not None or plug else _button(exposes)
+    detector = None if thermostat or light is not None or plug else _detector(exposes)
+    actions = None if thermostat or light is not None or plug or detector is not None else _button(exposes)
     device.update(model=_text(definition.get("model"), 60) or device.get("model"),
                   vendor=_text(definition.get("vendor"), 60) or device.get("vendor"),
                   description=_text(definition.get("description"), 160),
                   thermostat=thermostat, plug=plug, light=light is not None, light_caps=light,
-                  button=actions is not None, button_actions=actions)
+                  button=actions is not None, button_actions=actions, detector=detector is not None,
+                  detector_caps=detector)
     if isinstance(item.get("supported"), bool):
         device["supported"] = item["supported"]
 
@@ -251,6 +278,11 @@ class ZigbeeNet:
         self._groups_known = False            # … once Zigbee2MQTT said them (bridge/groups)
         self._pressed: dict[str, tuple[str, float]] = {}   # ieee -> (action, time.time()): a switch's last press
         self.on_action = None                 # on_action(ieee, action): a fresh press – it must not wait (MQTT thread)
+        # ieee -> what a motion sensor said: {occupied (None: not yet), at (time.time() someone moved last – while
+        # occupied the time of its last such word), since (when that motion began), lux, lux_at (when it measured that
+        # brightness: the value changed – None: not known, e.g. from a retained message)}
+        self._motion: dict[str, dict] = {}
+        self.on_motion = None                 # on_motion(ieee, occupied): someone moves – or no longer (MQTT thread)
         # ieee -> firmware update: {transaction, started, firmware (before), seen (last progress report), progress,
         # result: None until it is over, then {ok, message, at}}
         self._ota: dict[str, dict] = {}
@@ -403,7 +435,7 @@ class ZigbeeNet:
                       "model": _text(item.get("model_id"), 60), "vendor": _text(item.get("manufacturer"), 60),
                       "description": None, "supported": item.get("supported") is True, "thermostat": False,
                       "plug": False, "light": False, "light_caps": None, "button": False, "button_actions": None,
-                      "interview": state,
+                      "detector": False, "detector_caps": None, "interview": state,
                       "power": _text(item.get("power_source"), 40),
                       "firmware": _text(item.get("software_build_id"), 40)}
             _definition(item, device)
@@ -413,6 +445,7 @@ class ZigbeeNet:
                 self._values.pop(ieee, None)
                 self._states.pop(ieee, None)
                 self._ota.pop(ieee, None)
+                self._motion.pop(ieee, None)
             self._devices = devices
 
     def _take_groups(self, data) -> None:
@@ -445,8 +478,8 @@ class ZigbeeNet:
                 device = self._devices[ieee] = {
                     "ieee": ieee, "name": _text(info.get("friendly_name"), 80) or ieee, "type": None, "model": None,
                     "vendor": None, "description": None, "supported": False, "thermostat": False, "plug": False,
-                    "light": False, "light_caps": None, "button": False, "button_actions": None, "interview": "pending",
-                    "power": None, "firmware": None}
+                    "light": False, "light_caps": None, "button": False, "button_actions": None, "detector": False,
+                    "detector_caps": None, "interview": "pending", "power": None, "firmware": None}
             if kind == "device_joined":
                 self._joined[ieee] = time.time()
                 said = f"neues Gerät {ieee} meldet sich an"
@@ -464,6 +497,7 @@ class ZigbeeNet:
                 self._values.pop(ieee, None)
                 self._states.pop(ieee, None)
                 self._ota.pop(ieee, None)
+                self._motion.pop(ieee, None)
                 said = f"Gerät {ieee} hat das Netz verlassen"
         if said:
             log.info("Zigbee: %s", said)
@@ -527,8 +561,37 @@ class ZigbeeNet:
                        and (self._devices.get(ieee) or {}).get("button") is True)
             if pressed:
                 self._pressed[ieee] = (action, now)
+            caps = (self._devices.get(ieee) or {}).get("detector_caps")
+            changed = self._take_motion(ieee, data, caps, retained, now, heard) if caps else None
         if pressed and self.on_action:
             self.on_action(ieee, action)
+        if changed is not None and self.on_motion:
+            self.on_motion(ieee, changed)
+
+    def _take_motion(self, ieee: str, data: dict, caps: dict, retained: bool, now: float, heard: float) -> bool | None:
+        """What a motion sensor said (with self._lock held): someone moves or no longer, the brightness. Returns
+        True when someone began to move, False when the motion ended – None: no news (a retained message is old news:
+        it only says how it was when the sensor said it)."""
+        m = self._motion.setdefault(ieee, {"occupied": None, "at": None, "since": None, "lux": None, "lux_at": None})
+        occupied = data.get(caps["prop"]) if isinstance(data.get(caps["prop"]), bool) else None
+        lux = _number(data.get("illuminance"), 0, MAX_LUX) if caps.get("lux") else None
+        if lux is not None:
+            if not retained and lux != m["lux"]:   # Zigbee2MQTT repeats the last value with every message
+                m["lux_at"] = now
+            m["lux"] = lux
+        if occupied is None:
+            return None
+        if retained:
+            if m["occupied"] is None:
+                m.update(occupied=occupied, at=heard if occupied else None, since=heard if occupied else None)
+            return None
+        began, ended = occupied and m["occupied"] is not True, not occupied and m["occupied"] is True
+        if occupied or ended:
+            m["at"] = now
+        if began:
+            m["since"] = now
+        m["occupied"] = occupied
+        return True if began else False if ended else None
 
     # ------------------------------------------------------------------ the actions
     def search(self, on: bool) -> None:
@@ -551,6 +614,7 @@ class ZigbeeNet:
             self._joined.pop(ieee, None)
             self._states.pop(ieee, None)
             self._ota.pop(ieee, None)
+            self._motion.pop(ieee, None)
         log.info("Zigbee: Gerät %s entfernt%s", ieee, " (ohne seine Antwort)" if force else "")
         return device
 
@@ -740,6 +804,32 @@ class ZigbeeNet:
             return {"battery": _number(state["values"].get("battery"), 0, 100), "pressed": self._pressed.get(ieee),
                     "heard": state["heard"] or None, "seq": state["seq"]}
 
+    # ------------------------------------------------------------------ the motion sensors (heizapp.service)
+    def detectors(self) -> list[dict]:
+        """The paired motion sensors (interview done), in the order of pairing: {ieee, model, caps (see _detector)}."""
+        with self._lock:
+            return [{"ieee": ieee, "model": " ".join(filter(None, (d["vendor"], d["model"]))) or None,
+                     "caps": dict(d["detector_caps"])}
+                    for ieee, d in self._devices.items() if d.get("detector") and d["interview"] == "done"]
+
+    def detector(self, ieee: str) -> dict | None:
+        """What a motion sensor said last: {occupied (True: someone moves, None: not said yet), at (when someone
+        moved last, time.time()), since (when that motion began), lux, lux_at (when it measured that brightness), temperature,
+        battery, sensitivity, led, caps, heard, seq} – None if it is not paired as a motion sensor (any more)."""
+        with self._lock:
+            device = self._devices.get(ieee)
+            if not (device and device.get("detector") and device["interview"] == "done"):
+                return None
+            state = self._states.get(ieee) or {"values": {}, "heard": 0.0, "seq": 0}
+            values, m = state["values"], self._motion.get(ieee) or {}
+            sensitivity = values.get("motion_sensitivity")
+            return {"occupied": m.get("occupied"), "at": m.get("at"), "since": m.get("since"), "lux": m.get("lux"),
+                    "lux_at": m.get("lux_at"), "temperature": _number(values.get("temperature"), -40, 99),
+                    "battery": _number(values.get("battery"), 0, 100),
+                    "sensitivity": sensitivity if isinstance(sensitivity, str) else None,
+                    "led": values.get("led_indication") if isinstance(values.get("led_indication"), bool) else None,
+                    "caps": dict(device["detector_caps"]), "heard": state["heard"] or None, "seq": state["seq"]}
+
     def joined(self, ieee: str) -> float | None:
         """When the device joined the network (time.time()) – since the app runs; a switch that was reset joins anew."""
         with self._lock:
@@ -874,8 +964,9 @@ class ZigbeeNet:
         plugs = sum(1 for d in v["devices"] if d["plug"])
         lights = sum(1 for d in v["devices"] if d["light"])
         buttons = sum(1 for d in v["devices"] if d.get("button"))
+        detectors = sum(1 for d in v["devices"] if d.get("detector"))
         kinds = [f"{thermostats} Thermostat(e)"] + [f"{n} {what}" for n, what in (
-            (plugs, "Steckdose(n)"), (lights, "Lampe(n)"), (buttons, "Schalter")) if n]
+            (plugs, "Steckdose(n)"), (lights, "Lampe(n)"), (buttons, "Schalter"), (detectors, "Bewegungsmelder")) if n]
         return (f"Zigbee2MQTT {v.get('version') or '?'} läuft · Kanal {v.get('channel') or '?'} · "
                 f"{len(v['devices'])} Gerät(e), davon " + (", ".join(kinds[:-1]) + " und " if len(kinds) > 1 else "")
                 + kinds[-1] + (f" · Suche läuft noch {v['search']['left']} s" if v["search"]["active"] else ""))

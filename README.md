@@ -61,7 +61,17 @@ Zustand in Worten, z. B. „Nach Plan: 21 °C bis 22 Uhr, danach 17 °C“.
   **Lichtfarbe** von Kerzenlicht bis Tageslicht und bei Farblampen **Farbe** – nur, was die Lampe kann. Siehe
   [Einstellen je Lampe](#licht-zigbee-lampen). Ab 0.4.23 schalten auch [Funk-Schalter](#licht-schalter) das Licht
   eines Raums; ist die Batterie eines Schalters fast leer, steht oben „Die Batterie im Schalter „Flur“ ist fast leer
-  (12 %) – bitte bald wechseln.“ mit **OK** (ohne PIN).
+  (12 %) – bitte bald wechseln.“ mit **OK** (ohne PIN). Ab 0.4.24 schaltet auch ein
+  [Bewegungsmelder](#licht-bewegungsmelder) das Licht.
+- **Kacheln zum Aufklappen** (ab 0.4.24): Ein Tipp auf den Namen eines Raums klappt seine Kachel zu oder auf.
+  Zugeklappt zeigt sie den Namen, die Temperatur und eine Zeile mit kleinen Schildern, etwa „Soll 21 °C“, „heizt“,
+  „Licht an“, „Bewegung vor 5 Min.“; Warnungen wie „Fenster offen“, „Steckdose aus“ oder „Batterie bald wechseln“
+  stehen gelb, „keine Verbindung“ rot. Bei bis zu zwei Kacheln sind sie anfangs offen, bei mehr zu; jedes Handy merkt
+  sich, was dort auf- und zugeklappt ist. Ab drei Kacheln steht darüber **Alle aufklappen** bzw. **Alle zuklappen**.
+- **Bewegung** (ab 0.4.24): Hat ein Raum einen [Bewegungsmelder](#licht-bewegungsmelder), steht auf seiner Kachel
+  „Bewegung gerade“ oder „Bewegung vor 5 Min.“ und beim Licht „An durch Bewegung · aus um 21:45 Uhr“ oder „Geht bei
+  Bewegung an“. Ist die Batterie eines Melders fast leer, steht oben „Die Batterie im Bewegungsmelder „Flur“ ist fast
+  leer (12 %) – bitte bald wechseln.“ mit **OK**.
 - **Steckdose aus** (ab 0.4.14): Hängt eine AeroFlow an einer Steckdose mit Strommessung
   ([Zigbee](#zigbee-steckdosen-mit-strommessung) oder [WLAN](#wlan-steckdosen-mit-strommessung)) und hat jemand die
   Steckdose an ihrer Taste ausgeschaltet, sagt die Kachel „Die Steckdose ist aus – die Heizung hat
@@ -791,8 +801,8 @@ bleibt an, geschaltet wird in der App.
 - **Keine Antwort:** Hat eine Lampe keinen Strom (Lichtschalter an der Wand aus), antwortet sie nicht. Die App sagt
   das, und die Lampe steht auf „keine Verbindung“, bis sie sich wieder meldet; „heller“ und „dunkler“ lassen sie so
   lange aus. Antwortet keine Lampe des Raums, kommt eine Fehlermeldung.
-- **Schalter:** ab 0.4.23, siehe [Licht: Schalter](#licht-schalter). Der Bewegungsmelder und das Licht im Flur kommen
-  mit 0.4.24.
+- **Schalter:** ab 0.4.23, siehe [Licht: Schalter](#licht-schalter). **Bewegungsmelder:** ab 0.4.24, siehe
+  [Licht: Bewegungsmelder](#licht-bewegungsmelder).
 - **Protokoll:** Wann jemand das Licht schaltet, steht nur im
   [ausführlichen Protokoll](#protokoll-wenn-etwas-schiefgeht); wenn eine Lampe nicht antwortet, steht es immer drin.
 - **Nur simuliert geprüft:** mit nachgebauten Lampen in `tests/fake_mqtt.py` (`tests/test_light.py`) und in der Demo
@@ -847,6 +857,59 @@ einer Wechselschaltung.
   (`{"room": "<Raum>"}`, `null` für keinen); ohne PIN `POST /api/notices/batterie-<IEEE-Adresse>/ok`. In `GET
   /api/state` steht `buttons`: je Schalter `id`, `name`, `model`, `kind`, `room`, `direct` (kann direkt gekoppelt
   werden), `coupled`, `error`, `battery`, `pressed` und `heard`.
+
+## Licht: Bewegungsmelder
+
+Ab 0.4.24. Ein Bewegungsmelder mit Zigbee schaltet das Licht seines Raums ein, wenn sich dort jemand bewegt, und
+wieder aus, wenn eine Weile nichts mehr los ist – auch mehrere Melder im selben Raum, etwa an beiden Enden des Flurs.
+
+- **Welche:** jeder Melder, den Zigbee2MQTT mit Bewegung ja/nein (`occupancy`) kennt; nachgebaut sind der Hue
+  Bewegungsmelder (SML001 und SML003) und der IKEA VALLHORN. Was ein Melder sonst noch kann – Helligkeit in Lux,
+  Temperatur, Empfindlichkeit, ein Licht, das bei Bewegung blinkt –, liest die App aus seiner Beschreibung in
+  Zigbee2MQTT.
+- **Über den Pi:** Anders als die Schalter koppelt die App einen Melder nicht direkt mit den Lampen – das Licht
+  schaltet die App. Ist der Pi aus, geht das Licht bei Bewegung nicht an.
+- **Anlernen:** *Einrichtung › Geräte* › **+ Gerät hinzufügen** › „Bewegungsmelder“. Hue: die Setup-Taste hinten 3 bis
+  5 Sekunden halten, bis das Licht rot blinkt (der ältere SML001: danach noch einmal halten, bis es orange blinkt);
+  VALLHORN: die Kopplungstaste 4-mal kurz drücken. Im letzten Schritt „Wohin?“ bekommt der Melder Name und Raum; der
+  Haken „Dort das Licht bei Bewegung einschalten“ (vorgewählt) schaltet es für den Raum ein.
+- **Licht bei Bewegung** (*Geräte › Licht*, je Raum mit Melder, ab Werk aus):
+  - **Aus**, wenn sich 1 bis 120 Minuten nichts bewegt hat (ab Werk 10).
+  - **Tagsüber** Helligkeit und Lichtfarbe (ab Werk 100 %, neutralweiß), **nachts gedämpft** von–bis (ab Werk 22 bis
+    6 Uhr mit 20 %, warmweiß) – jede Lampe nur, soweit sie es kann.
+  - **Nur, wenn es dunkel ist** (ab Werk aus): dunkler als 1 bis 2000 Lux (ab Werk 30). Bei brennendem Licht misst der
+    Melder mehr – darum nimmt die App, was er zuletzt bei ausgeschaltetem Licht gemessen hat (höchstens 2 Stunden alt;
+    bei mehreren Meldern den dunkelsten). Weiß sie es nicht, geht das Licht an.
+  - **Licht, das jemand von Hand eingeschaltet hat,** bleibt an (ab Werk) oder geht auch aus. Schaltet jemand ein Licht
+    von Hand ein, das die Bewegung eingeschaltet hatte, gilt es als von Hand eingeschaltet.
+  - **Von Hand ausgeschaltet:** Schaltet jemand das Licht aus (Startseite, Einrichtung, Schalter oder ein Licht, das
+    plötzlich aus ist), schaltet die App es erst nach einer Pause wieder bei Bewegung ein (ab Werk 1 Minute, 0 bis 30).
+  - **Welche Lampen, welche Melder:** ab Werk alle des Raums – auch später dazugekommene; bei mehreren lassen sie
+    sich einzeln wählen.
+- **Was nicht passiert:** Brennt schon ein Licht im Raum, ändert eine Bewegung nichts daran. Was die App eingeschaltet
+  hat, schaltet sie erst aus, wenn sich die eingestellte Zeit lang nichts bewegt hat. Sagt ein Melder „Bewegung“ und
+  schweigt dann über eine Stunde, zählt das nicht mehr als Bewegung – sonst bliebe das Licht an, wenn sein „vorbei“
+  verloren geht. Welche Lampen die App eingeschaltet hat, merkt sie sich auch über einen Neustart.
+- **Einrichtung:** *Geräte › Licht* › „Bewegungsmelder“ – je Melder Name, Raum, wann zuletzt Bewegung, Helligkeit,
+  Temperatur, Batterie, **Empfindlichkeit** und **blinkt bei Bewegung** (nur, was er kann; er schläft zwischendurch –
+  vorher einmal vor ihm bewegen) und **Entfernen …**. Meldet er sich 6 Stunden nicht, steht das rot dabei. Name, Raum
+  und Einstellungen stehen nur in der App (`data.json`: `detector_names`, `detector_rooms`, `detector_battery_ok`,
+  `motion_light`, `motion_auto`).
+- **Nicht gebaut:** ein Sicherheitsnetz in der Lampe selbst („geht nach 30 Minuten von allein aus“, Zigbee
+  `on_time`). Ein normales „an“ hebt es nicht sicher wieder auf – das Licht könnte ausgehen, während jemand da ist.
+  Erst nach einem Test mit einer echten Lampe.
+- **Nur simuliert geprüft:** mit nachgebauten Meldern in `tests/fake_mqtt.py` (`tests/test_motion.py`) und in der Demo
+  (`uebergabe/demo_server.py … licht`). Mit einem echten Melder noch nicht – offen ist vor allem, wann der echte Hue
+  Melder „vorbei“ meldet und wie oft er die Helligkeit schickt.
+- **Schnittstelle:** mit PIN `PUT /api/detectors/<IEEE-Adresse>/name` (`{"name": "…"}`, leer für keinen), `…/room`
+  (`{"room": "<Raum>"}`, `null` für keinen), `…/settings` (`{"sensitivity": "high"}` – einer der Werte in
+  `sensitivities` – oder `{"led": true}`) und `PUT /api/rooms/<Raum>/motion` mit einem oder mehreren von `on`,
+  `minutes`, `day_level`, `day_color`, `night`, `night_from`, `night_to` (`"22:00"`), `night_level`, `night_color`,
+  `dark_only`, `lux`, `hand_off`, `pause`, `lamps` und `detectors` (Listen von IEEE-Adressen, `null` für alle des
+  Raums); ohne PIN `POST /api/notices/batterie-<IEEE-Adresse>/ok`. In `GET /api/state` steht `detectors`: je Melder
+  `id`, `name`, `model`, `room`, `moving`, `moved`, `lux`, `temperature`, `battery`, `sensitivity`, `sensitivities`,
+  `led`, `led_settable`, `silent` und `heard`; je Raum mit Melder `motion`: die Einstellungen und `auto`, `night_now`,
+  `off_at`, `pause_until`, `moving`, `moved` und `detectors`.
 
 ## Verlauf und Kosten
 
@@ -1009,13 +1072,18 @@ wie schnell und wie zuverlässig echte Lampen antworten, prüfen die Tests nicht
 `tests/test_button.py` mit Schaltern, die `tests/fake_mqtt.py` wie IKEA RODRET, Hue Smart Button, Hue Dimmschalter und
 einen SONOFF-Taster nachbaut – Koppeln beim nächsten Druck, ein Raumwechsel ohne Druck, Lampen, die den Raum wechseln,
 ein Druck ins Leere, eine Kopplung, die nicht klappt, ein alter Tastendruck nach einem Neustart und die
-Batterie-Meldung; wie echte Schalter sich verhalten, prüfen die Tests nicht.
+Batterie-Meldung; wie echte Schalter sich verhalten, prüfen die Tests nicht. Die Bewegungsmelder prüft
+`tests/test_motion.py` mit Meldern, die `tests/fake_mqtt.py` wie zwei Hue-Melder und einen IKEA VALLHORN nachbaut –
+Licht an und nach der Zeit wieder aus, mehrere Melder in einem Raum, tagsüber und nachts, nur wenn es dunkel ist, von
+Hand ein- und ausgeschaltet, Pause, ein Neustart, ein verstummter Melder, Entfernen und die Batterie-Meldung; wie ein
+echter Melder sich verhält, prüfen die Tests nicht.
 
 ## Ideen für später
 
 - Paket für das NAS (Docker); feste Versionen (Git-Tags) für den Update-Knopf; automatische Updates.
-- Licht, Teil 3 (0.4.24): der Bewegungsmelder (auch mehrere je Raum) und das Licht im Flur mit einstellbaren Zeiten
-  und Helligkeit; später ein Schalter nur für einzelne Lampen eines Raums.
+- Eine Raum-Ansicht: ein Raum mit allen seinen Geräten auf einer Seite, dort auch zu bearbeiten.
+- Licht: ein Schalter nur für einzelne Lampen eines Raums; das Sicherheitsnetz in der Lampe (`on_time`) nach einem
+  Test mit einer echten Lampe.
 - Regelung über einen Raumfühler.
 - Verlauf und Kosten, Teil 2: Woche und Monat als Balken, Vergleich, „Als Tabelle speichern“, Aufräumen (0.4.15).
 - Steckdosen, Teil 2: die gemessenen kWh in Verlauf und Kosten statt der Schätzung.

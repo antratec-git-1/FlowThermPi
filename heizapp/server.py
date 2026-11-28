@@ -100,6 +100,10 @@ def _routes(s: Service, u: Updater, w: Wifi, t: Remote, z: Zigbee, p: Support):
         ("PUT", rf"/api/lights/{x}/level", lambda m, b, r: s.set_light_level(m[1], b), SETUP),
         ("PUT", rf"/api/buttons/{x}/name", lambda m, b, r: s.rename_button(m[1], b), SETUP),   # Geräte › Licht › Schalter
         ("PUT", rf"/api/buttons/{x}/room", lambda m, b, r: s.set_button_room(m[1], b), SETUP),
+        ("PUT", rf"/api/detectors/{x}/name", lambda m, b, r: s.rename_detector(m[1], b), SETUP),   # … › Bewegungsmelder
+        ("PUT", rf"/api/detectors/{x}/room", lambda m, b, r: s.set_detector_room(m[1], b), SETUP),
+        ("PUT", rf"/api/detectors/{x}/settings", lambda m, b, r: s.set_detector(m[1], b), SETUP),   # Empfindlichkeit, Licht
+        ("PUT", rf"/api/rooms/{i}/motion", lambda m, b, r: s.set_motion(m[1], b), SETUP),   # „Licht bei Bewegung“
         ("GET", rf"/api/plugs/{i}/energy/(\d{{4}}-\d{{2}}-\d{{2}})",   # „Strom“: one day in quarter hours
          lambda m, b, r: s.energy_view(m[1], m[2]), SETUP),
         ("GET", r"/api/energy/(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})",   # „Als Tabelle“: all plugs, for Excel

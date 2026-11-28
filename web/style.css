@@ -219,8 +219,36 @@ dd { margin: 0; word-break: break-word; }
 .tile.is-off { background: var(--tile-off); }
 .tile.heating { padding-bottom: 32px; }   /* room for the heat wave */
 .tile.busy { opacity: 1; }                /* while sending the label says so – the tile stays readable */
-.tile-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tile-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; }
 .tile-head h2 { flex: 1; font-size: 26px; font-weight: 500; line-height: 1.2; }
+/* the room's name opens and closes its tile – it looks like the name, the arrow shows which way */
+.tile-toggle { display: block; width: 100%; min-height: 44px; margin: 0; padding: 0; border: 0; border-radius: 8px;
+               background: none; font: inherit; color: inherit; text-align: left; overflow-wrap: anywhere; hyphens: auto;
+               touch-action: manipulation; }
+.tile-toggle:hover:not(:disabled) { border-color: transparent; }
+.tile-toggle:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+.chev { flex: none; width: 30px; height: 30px; color: var(--muted); transform: rotate(180deg); transition: transform .2s; }
+.tile.collapsed .chev { transform: none; }
+.mini-temp { font-size: 30px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tile.is-off .mini-temp, .tile.offline .mini-temp { color: var(--on-tile-off); }
+.tile.collapsed { gap: 10px; padding-bottom: 16px; cursor: pointer; }   /* closed: no heat wave, so no room for it */
+/* closed: what the room does in one line of small labels – warnings stand out */
+.tile-sum { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 0; font-size: 16px; }
+.tile-sum span { padding: 3px 11px; border-radius: 99px; background: var(--pill); box-shadow: inset 0 0 0 1px var(--line);
+                 white-space: nowrap; }
+.tile-sum .warn { background: var(--hint); color: var(--on-hint); font-weight: 500; }
+.tile-sum .bad { background: var(--bad); color: var(--on-bad); font-weight: 500; }
+.tiles-tools { display: flex; justify-content: flex-end; margin: -6px 16px 6px; }
+.link-btn { min-height: 44px; padding: 6px 4px; border: 0; background: none; font-size: 17px; color: var(--muted);
+            text-decoration: underline; text-underline-offset: 4px; touch-action: manipulation; }
+.link-btn:hover:not(:disabled) { color: var(--text); }
+/* the motion sensor of the room: when someone moved last */
+.tile-motion { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: center; margin: 0;
+               font-size: 18px; }
+.tile-motion .dico svg { width: 24px; height: 24px; }
+.tile-motion .dico.on { color: var(--accent); }
+.tile-motion small { display: block; font-size: 15px; color: var(--danger); }
+.light-auto { margin: -4px 0 0; font-size: 16px; color: var(--muted); }
 .badge { font-size: 16px; font-weight: 500; padding: 4px 12px; border-radius: 99px; white-space: nowrap;
          background: var(--badge); color: var(--on-badge); }
 .badge.hint { background: var(--hint); color: var(--on-hint); }
@@ -347,11 +375,11 @@ dd { margin: 0; word-break: break-word; }
 .wave { position: absolute; left: 0; bottom: 0; width: 200%; height: 16px; color: var(--wave); pointer-events: none;
         animation: wave 8s linear infinite; animation-delay: var(--wave-delay, 0s); }
 @keyframes wave { to { transform: translateX(-50%); } }
-@media (prefers-reduced-motion: reduce) { .wave, .set-temp.pop { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .wave, .set-temp.pop { animation: none; } .chev { transition: none; } }
 @media (prefers-color-scheme: dark) {   /* no tint at night: the number glows warm or cool */
   .tile { background: var(--card); }
-  .tile.warm .now-temp { color: #ffb37e; }
-  .tile.cool .now-temp { color: #9fc3d6; }
+  .tile.warm .now-temp, .tile.warm .mini-temp { color: #ffb37e; }
+  .tile.cool .now-temp, .tile.cool .mini-temp { color: #9fc3d6; }
 }
 .home-empty { font-size: 19px; color: var(--muted); grid-column: 1 / -1; }
 .view-home #toast { font-size: 18px; padding: 14px 20px; }
@@ -486,6 +514,20 @@ a.ip { color: inherit; text-decoration: underline; text-decoration-thickness: 1p
 .costs-form label.check small { display: block; margin-top: 2px; font-size: 13px; color: var(--muted); }
 .costs-form label.check input { margin-top: 3px; flex: none; }
 .costs-form .row { margin-top: 0; }
+/* Geräte › Licht › „Licht bei Bewegung“: one block for each room with a motion sensor */
+.device dd label.check { display: inline-flex; align-items: center; gap: 8px; }
+.motion-room { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; display: grid; gap: 8px; }
+.motion-head { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
+.motion-head h3 { flex: 1; margin: 0; font-size: 16px; }
+.motion-room label.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
+.motion-room .hint { margin: 0; }
+.motion-form { display: grid; gap: 10px; max-width: 520px; }
+.motion-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.motion-form label small { font-size: 13px; }
+.motion-form select { font-size: 15px; color: var(--text); justify-self: start; max-width: 100%; }
+.motion-form fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin: 0; display: grid;
+                        gap: 8px 12px; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }   /* two side by side */
+.motion-form legend { font-size: 13px; color: var(--muted); padding: 0 4px; }
 .unit-input { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
 .unit-input input { width: 112px; font-size: 15px; color: var(--text); text-align: right; }
 

@@ -212,7 +212,8 @@ class Zigbee:
                 "message": "Das Thermostat ist entfernt." if device["thermostat"]
                 else "Die Steckdose ist entfernt." if device.get("plug")
                 else "Die Lampe ist entfernt." if device.get("light")
-                else "Der Schalter ist entfernt." if device.get("button") else "Das Gerät ist entfernt."}
+                else "Der Schalter ist entfernt." if device.get("button")
+                else "Der Bewegungsmelder ist entfernt." if device.get("detector") else "Das Gerät ist entfernt."}
 
     def _quick(self, action: str, params: dict | None = None) -> dict:
         """A request that the root service answers in seconds; the page waits for it."""

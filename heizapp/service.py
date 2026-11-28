@@ -65,9 +65,18 @@ BUTTON_ASK = 1.0          # seconds after a press of the Hue Dimmschalter before
 BUTTON_STALE = 5.0        # seconds after a press within which the switch is still awake for coupling
 BUTTON_LOW = 15           # per cent: from here the start page says the battery of a switch is nearly empty …
 BUTTON_NEW = 40           # … until it has at least this much again (a new battery)
-# what data.json keeps of a plug, a lamp or a switch, by its IEEE address – forgotten when it leaves the Zigbee network
+MOTION_TICK = 5.0         # seconds between two looks whether a room's light goes off (nobody moved long enough)
+MOTION_STALE = 70 * 60    # seconds „someone moves“ counts without another word from the sensor (it speaks hourly)
+MOTION_SILENT = 6 * 3600  # seconds without a word after which a motion sensor counts as without connection
+LUX_SETTLE = 10.0         # seconds after the lamps went off before the sensor's brightness counts as without them
+LUX_KEEP = 2 * 3600       # seconds such a brightness stays valid
+DETECTOR_ANSWER = 10.0    # seconds a motion sensor has to confirm a setting (it sleeps between its looks for news)
+CLOCK = re.compile(r"([01]\d|2[0-3]):[0-5]\d")   # a time of day, 22:00
+# what data.json keeps of a plug, a lamp, a switch or a motion sensor, by its IEEE address – forgotten when it leaves
+# the Zigbee network
 LAMP_AND_PLUG_KEYS = ("plug_rooms", "plug_names", "plug_appliances", "light_names", "light_rooms", "light_colors",
-                      "light_levels", "button_names", "button_rooms", "button_bound", "button_battery_ok")
+                      "light_levels", "button_names", "button_rooms", "button_bound", "button_battery_ok",
+                      "detector_names", "detector_rooms", "detector_battery_ok")
 
 
 def host_clock_synced() -> bool:
@@ -251,6 +260,13 @@ class Service:
         self._room_said: dict[str, tuple[str, float]] = {}   # room -> (ON | OFF, when) a coupled switch told its lamps
         self._room_switched: dict[str, float] = {}   # room -> when the app switched its light (monotonic)
         self._group_failed: dict[tuple, float] = {}   # (group, lamp, add) -> when it failed (monotonic)
+        self._motion_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bewegung")   # motions and looks
+        self._motion_ticking = False   # a look waits in the motion thread
+        self._motion_pause: dict[str, float] = {}   # room -> until when (time.time()) the automation waits: switched
+                                                    # off by hand
+        self._lamp_on_since: dict[str, float] = {}   # lamp -> since when it is on (time.time()), as the looks saw it
+        self._room_dark: dict[str, float] = {}   # room -> since when its lamps for motion are all off (the looks)
+        self._dark_lux: dict[str, tuple[float, float]] = {}   # motion sensor -> (lux, when): measured while dark
         self._restore_lock = threading.Lock()
         self._last_daily_sync = None
         self._clock_trusted = False
@@ -289,6 +305,7 @@ class Service:
     # ------------------------------------------------------------------ polling
     def start(self) -> None:
         threading.Thread(target=self._run, name="heizung-poller", daemon=True).start()
+        threading.Thread(target=self._motion_clock, name="bewegung-uhr", daemon=True).start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -353,6 +370,7 @@ class Service:
         """The connection to Zigbee2MQTT (heizapp.zigbee_net.ZigbeeNet): from now on its thermostats are heaters."""
         self.zigbee = net
         net.on_action = self._on_button   # a press of a switch
+        net.on_motion = self._on_motion   # someone moves at a motion sensor – or no longer
         self._sync_thermostats()
 
     def _sync_thermostats(self) -> None:
@@ -385,8 +403,11 @@ class Service:
         thermostat = bool(heaters.get(ieee, {}).get("zigbee"))
         owners = [hid for hid, meta in heaters.items() if meta.get("plug") == ieee]
         placed = any(ieee in (self.store.data.get(key) or {}) for key in LAMP_AND_PLUG_KEYS)
+        chosen = any(ieee in (x.get(key) or []) for name, key in (("motion_light", "lamps"), ("motion_light", "detectors"),
+                                                                  ("motion_auto", "lamps"))
+                     for x in (self.store.data.get(name) or {}).values())
         plug_name = self._plug_name(ieee)
-        if thermostat or owners or placed:
+        if thermostat or owners or placed or chosen:
             with self.store.edit() as d:
                 if thermostat:
                     d["heaters"].pop(ieee, None)
@@ -394,8 +415,18 @@ class Service:
                     d["heaters"].get(hid, {}).pop("plug", None)
                 for key in LAMP_AND_PLUG_KEYS:
                     (d.get(key) or {}).pop(ieee, None)
+                for x in (d.get("motion_light") or {}).values():   # chosen for „Licht bei Bewegung“ – no longer
+                    for key in ("lamps", "detectors"):
+                        if isinstance(x.get(key), list) and ieee in x[key]:
+                            x[key].remove(ieee)
+                for room, x in list((d.get("motion_auto") or {}).items()):   # a lamp the automation switched on
+                    if ieee in x.get("lamps", []):
+                        x["lamps"].remove(ieee)
+                        if not x["lamps"]:
+                            d["motion_auto"].pop(room)
         self.cycles.forget(ieee)
-        for memory in (self._light_lost, self._light_asked, self._light_hue, self._button_error, self._button_press):
+        for memory in (self._light_lost, self._light_asked, self._light_hue, self._button_error, self._button_press,
+                       self._lamp_on_since, self._dark_lux):
             memory.pop(ieee, None)
         if self.zigbee:   # a lamp leaves the groups of the switches, a switch's group goes
             self._coupler.submit(self._tend_buttons, ieee)
@@ -1667,10 +1698,14 @@ class Service:
             for meta in list(d["heaters"].values()) + list(d["sensors"].values()):
                 if meta.get("room") == room_id:
                     meta["room"] = None
-            for key in ("plug_rooms", "light_rooms", "button_rooms"):
+            for key in ("plug_rooms", "light_rooms", "button_rooms", "detector_rooms"):
                 for pid, room in list((d.get(key) or {}).items()):
                     if room == room_id:
                         d[key].pop(pid)
+            for key in ("motion_light", "motion_auto"):   # „Licht bei Bewegung“ of the room
+                (d.get(key) or {}).pop(room_id, None)
+        self._motion_pause.pop(room_id, None)
+        self._room_dark.pop(room_id, None)
         if self.zigbee:   # the groups of its switches empty
             self._coupler.submit(self._tend_buttons)
         with self._calib_lock:   # a calibration of the room ends with it
@@ -2822,6 +2857,7 @@ class Service:
         on = self._on_from(body)
         lamps = self._room_lights(room_id, self.store.snapshot())
         self._room_switched[room_id] = time.monotonic()
+        self._motion_hand(room_id, on)
         missed = self._send_lights({x["id"]: self._light_switch(x, on) for x in lamps})
         return self._light_result(lamps, missed, "Das Licht ist an." if on else "Das Licht ist aus.")
 
@@ -2851,6 +2887,7 @@ class Service:
         """One lamp on or off: on the start page (with several lamps in the room) and in Geräte › Licht."""
         on = self._on_from(body)
         lamp = self._find_light(light_id, self.store.snapshot())
+        self._motion_hand(lamp["room"], on, [light_id])
         missed = self._send_lights({light_id: self._light_switch(lamp, on)})
         return self._light_result([lamp], missed, f"„{lamp['name']}“ ist {'an' if on else 'aus'}.")
 
@@ -3166,7 +3203,12 @@ class Service:
             if room is None:
                 return
             before = (self._button_press.get(bid) or ({}, 0.0))[0]
-            if coupled:
+            if coupled:   # it switched the lamps itself – „Licht bei Bewegung“ has to know (the app does not switch)
+                said = (kind.get("said") or {}).get(action)
+                hand = {"ON": True, "OFF": False}.get(said) if said else {"on": True, "off": False}.get(
+                    self._button_meaning(item["model_id"], action) or "")
+                if hand is not None:
+                    self._motion_hand(room, hand)
                 if action in (kind.get("said") or {}):
                     self._made_good(name, room, before, kind["said"][action], at)
                 elif action in (kind.get("ask") or ()):
@@ -3312,14 +3354,447 @@ class Service:
                              self._button_name(bid, data))
             new = [bid for bid in (data.get("button_battery_ok") or {})
                    if ((self.zigbee.button(bid) or {}).get("battery") or 0) >= BUTTON_NEW]
-            if new:
+            fresh = [did for did in (data.get("detector_battery_ok") or {})   # … and of a motion sensor
+                     if ((self.zigbee.detector(did) or {}).get("battery") or 0) >= BUTTON_NEW]
+            if new or fresh:
                 with self.store.edit() as d:
                     for bid in new:
                         d["button_battery_ok"].pop(bid, None)
+                    for did in fresh:
+                        d["detector_battery_ok"].pop(did, None)
         except ActionError as exc:
             log.warning("Zigbee-Gruppen: %s", exc)
         except Exception:
             log.exception("Fehler bei den Zigbee-Gruppen")
+
+    # ------------------------------------------------------------------ motion sensors, light at motion (Zigbee)
+    # A motion sensor paired in the Zigbee network (Hue, IKEA VALLHORN, Aqara, SONOFF …) is in a room (data.json
+    # "detector_rooms"; its name: "detector_names") – a room may have several. „Licht bei Bewegung“ is set per room
+    # ("motion_light", see MOTION_DEFAULTS – nothing of it is fixed): when someone begins to move there, the room's lamps
+    # go on – by day and at night with a brightness and a colour of light of their own –, and they go off again when
+    # nobody moved for so many minutes; every motion starts the minutes anew. The automation switches off only what it
+    # switched on itself ("motion_auto": which lamps, since when – it outlasts a restart): light switched on by hand
+    # stays (unless the room says otherwise); after the light was switched off by hand it waits a little before it
+    # switches on again. „Nur wenn es dunkel ist“ goes by the brightness the sensor measured while the lamps were off.
+    # Who moved where the app writes nowhere – it knows the last time, in memory; the protocol hears only of failures.
+    MOTION_DEFAULTS = {"on": False, "minutes": 10, "day_level": 100, "day_color": "neutral", "night": True,
+                       "night_from": "22:00", "night_to": "06:00", "night_level": 20, "night_color": "warm",
+                       "dark_only": False, "lux": 30, "hand_off": False, "pause": 1, "lamps": None, "detectors": None}
+    MOTION_NUMBERS = {"minutes": (1, 120), "day_level": (1, 100), "night_level": (1, 100), "lux": (1, 2000),
+                      "pause": (0, 30)}
+    SENSITIVITY_WORDS = {"low": "niedrig", "medium": "mittel", "high": "hoch", "very_high": "sehr hoch",
+                         "max": "am höchsten"}
+
+    @staticmethod
+    def _detector_default_name(did: str) -> str:
+        return f"Melder {did[-4:].upper()}"
+
+    def _detector_name(self, did: str, data: dict | None = None) -> str:
+        d = data if data is not None else self.store.data
+        return _device_title((d.get("detector_names") or {}).get(did)) or self._detector_default_name(did)
+
+    @staticmethod
+    def _detector_room(did: str, data: dict) -> str | None:
+        room = (data.get("detector_rooms") or {}).get(did)
+        return room if room in data["rooms"] else None
+
+    @staticmethod
+    def _moving(v: dict, now: float) -> bool:
+        """Whether someone moves at the sensor – its „yes“ counts only while it still speaks (it says something at least
+        once an hour): one gone silent sees nobody."""
+        return v.get("occupied") is True and bool(v.get("heard")) and now - v["heard"] < MOTION_STALE
+
+    def _detector_list(self, data: dict) -> list[dict]:
+        """Every motion sensor in the Zigbee network, for the start page and Geräte › Licht: its room, whether someone
+        moves there now (moving) and when someone moved last (moved), the brightness and the temperature it measures,
+        its battery, its sensitivity and its light – as far as it has them – and silent: no word for hours."""
+        out, now = [], time.time()
+        for item in self.zigbee.detectors() if self.zigbee else []:
+            did = item["ieee"]
+            v = self.zigbee.detector(did) or {}
+            caps, heard = v.get("caps") or item["caps"], v.get("heard")
+            out.append({"id": did, "name": self._detector_name(did, data), "model": item["model"],
+                        "room": self._detector_room(did, data), "moving": self._moving(v, now),
+                        "moved": self._iso(v.get("at")), "lux": v.get("lux") if caps.get("lux") else None,
+                        "temperature": v.get("temperature") if caps.get("temp") else None, "battery": v.get("battery"),
+                        "sensitivity": v.get("sensitivity") if caps.get("sensitivity") else None,
+                        "sensitivities": list(caps.get("sensitivity") or []), "led": v.get("led") if caps.get("led")
+                        else None, "led_settable": bool(caps.get("led")),
+                        "silent": bool(heard) and now - heard > MOTION_SILENT, "heard": self._iso(heard)})
+        return out
+
+    def _find_detector(self, did: str, data: dict) -> dict:
+        d = next((x for x in self._detector_list(data) if x["id"] == did), None)
+        if d is None:
+            raise ActionError("Dieser Bewegungsmelder ist nicht (mehr) im Zigbee-Netz.", 404)
+        return d
+
+    def rename_detector(self, did: str, body: dict) -> dict:
+        """Geräte › Licht „Name ändern“ of a motion sensor: the name stays in the app. Empty: „Melder 1A2B“ again."""
+        raw = body.get("name")
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError("name muss Text sein")
+        name = _device_title(raw)
+        data = self.store.snapshot()
+        before = self._find_detector(did, data)["name"]
+        with self.store.edit() as d:
+            if name:
+                d.setdefault("detector_names", {})[did] = name
+            else:
+                (d.get("detector_names") or {}).pop(did, None)
+        if self._detector_name(did) != before:
+            log.info("%s heißt jetzt „%s“", before, self._detector_name(did))
+        return {"message": f"Der Bewegungsmelder heißt jetzt „{self._detector_name(did)}“."}
+
+    def set_detector_room(self, did: str, body: dict) -> dict:
+        """Geräte › Licht: the room of a motion sensor (room "" or None: none) – „Licht bei Bewegung“ of that room goes
+        by it."""
+        room_id = body.get("room") or None
+        if room_id is not None and not isinstance(room_id, str):
+            raise ValueError("room muss eine Kennung sein")
+        data = self.store.snapshot()
+        d = self._find_detector(did, data)
+        if room_id is not None and room_id not in data["rooms"]:
+            raise ActionError("Raum nicht gefunden", 404)
+        with self.store.edit() as dd:
+            if room_id is None:
+                (dd.get("detector_rooms") or {}).pop(did, None)
+            else:
+                dd.setdefault("detector_rooms", {})[did] = room_id
+        self._dark_lux.pop(did, None)
+        if room_id is None:
+            log.info("%s ist in keinem Raum mehr", d["name"])
+            return {"message": f"„{d['name']}“ ist in keinem Raum mehr."}
+        room = data["rooms"][room_id]["name"]
+        log.info("%s ist jetzt im Raum %s", d["name"], room)
+        return {"message": f"„{d['name']}“ ist jetzt im Raum „{room}“."}
+
+    def set_detector(self, did: str, body: dict) -> dict:
+        """Geräte › Licht at a motion sensor: its sensitivity (sensitivity: one of the values it takes) or whether its
+        light blinks at a motion (led: true or false) – as far as it can. It sleeps between its looks for news: the app
+        waits a few seconds for it to say the new value."""
+        d = self._find_detector(did, self.store.snapshot())
+        if "sensitivity" in body:
+            value = body["sensitivity"]
+            if not isinstance(value, str) or value not in d["sensitivities"]:
+                raise ActionError("Diese Empfindlichkeit kann der Bewegungsmelder nicht.")
+            key, word = "motion_sensitivity", f"Empfindlichkeit {self.SENSITIVITY_WORDS.get(value, value)}"
+        elif "led" in body:
+            value = body["led"]
+            if not isinstance(value, bool):
+                raise ValueError("led muss true oder false sein")
+            if not d["led_settable"]:
+                raise ActionError("Das Licht dieses Bewegungsmelders lässt sich nicht einstellen.")
+            key, word = "led_indication", f"Sein Licht blinkt {'' if value else 'nicht mehr '}bei Bewegung"
+        else:
+            raise ValueError("sensitivity oder led fehlt")
+        problem = self.zigbee.problem() if self.zigbee else "Zigbee ist auf diesem Pi noch nicht eingerichtet."
+        if problem:
+            raise ActionError(problem, 503)
+        after = self.zigbee.send(did, {key: value})
+        if after is None:
+            raise ActionError(self.zigbee.problem() or "Die Nachricht an den Bewegungsmelder ging nicht hinaus.", 503)
+        if self.zigbee.wait(did, after, lambda v: v.get(key) == value, DETECTOR_ANSWER) is None:
+            log.warning("%s hat %s nicht bestätigt", d["name"], word)
+            raise ActionError("Der Bewegungsmelder hat nicht geantwortet. Er schläft zwischendurch – einmal vor ihm "
+                              "bewegen, dann ist er wach, und gleich noch einmal versuchen.", 504)
+        log.info("%s: %s", d["name"], word)
+        return {"message": f"„{d['name']}“: {word}."}
+
+    # „Licht bei Bewegung“ – the settings of a room
+    def _motion_settings(self, room_id: str, data: dict) -> dict:
+        saved = (data.get("motion_light") or {}).get(room_id) or {}
+        return {**self.MOTION_DEFAULTS, **{k: v for k, v in saved.items() if k in self.MOTION_DEFAULTS}}
+
+    def _motion_value(self, key: str, value, room_id: str, data: dict):
+        if key not in self.MOTION_DEFAULTS:
+            raise ValueError(f"Unbekannte Einstellung: {key}")
+        if key in ("on", "night", "dark_only", "hand_off"):
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} muss true oder false sein")
+        elif key in self.MOTION_NUMBERS:
+            low, high = self.MOTION_NUMBERS[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"{key} muss {low} bis {high} sein")
+        elif key in ("day_color", "night_color"):
+            if value not in self.LIGHT_COLORS:
+                raise ValueError(f"{key} muss eine dieser Lichtfarben sein: {', '.join(self.LIGHT_COLORS)}")
+        elif key in ("night_from", "night_to"):
+            if not (isinstance(value, str) and CLOCK.fullmatch(value)):
+                raise ValueError(f"{key} muss eine Uhrzeit wie 22:00 sein")
+        elif value is not None:   # lamps, detectors: None – all of the room
+            if not (isinstance(value, list) and all(isinstance(x, str) for x in value)):
+                raise ValueError(f"{key} muss eine Liste sein")
+            mine = {x["id"] for x in (self._light_list(data) if key == "lamps" else self._detector_list(data))
+                    if x["room"] == room_id}
+            if set(value) - mine:
+                raise ActionError("Dieses Gerät ist nicht in diesem Raum.", 404)
+            value = sorted(set(value))
+        return value
+
+    def set_motion(self, room_id: str, body: dict) -> dict:
+        """Geräte › Licht › „Licht bei Bewegung“ of a room: any of the settings of MOTION_DEFAULTS. Switched off, the
+        automation switches nothing on any more – what it switched on goes off after its minutes all the same."""
+        name = self._room(room_id)["name"]
+        if not isinstance(body, dict) or not body:
+            raise ValueError("Keine Einstellung")
+        data = self.store.snapshot()
+        values = {key: self._motion_value(key, value, room_id, data) for key, value in body.items()}
+        with self.store.edit() as d:
+            d.setdefault("motion_light", {}).setdefault(room_id, {}).update(values)
+        said = self._motion_words(name, self._motion_settings(room_id, self.store.snapshot()), list(values))
+        log.info("%s", said)
+        return {"message": said}
+
+    @staticmethod
+    def _clock_word(t: str) -> str:   # "06:00" -> "6 Uhr", "22:30" -> "22:30 Uhr"
+        h, m = int(t[:2]), t[3:]
+        return f"{h} Uhr" if m == "00" else f"{h}:{m} Uhr"
+
+    def _motion_words(self, name: str, s: dict, keys: list[str]) -> str:
+        """What the page says after a change of „Licht bei Bewegung“."""
+        key = keys[0] if len(keys) == 1 else None
+        color = self.LIGHT_COLORS
+        minutes = lambda n: f"{n} Minute{'' if n == 1 else 'n'}"  # noqa: E731
+        if key == "on":
+            return f"„{name}“: Licht bei Bewegung {'an' if s['on'] else 'aus'}."
+        if key == "minutes":
+            return f"„{name}“: Das Licht geht aus, wenn sich {minutes(s['minutes'])} lang nichts bewegt hat."
+        if key in ("day_level", "day_color"):
+            return f"„{name}“: tagsüber {s['day_level']} %, {color[s['day_color']][0]}."
+        if key in ("night", "night_from", "night_to", "night_level", "night_color"):
+            if not s["night"]:
+                return f"„{name}“: nachts wie tagsüber."
+            return (f"„{name}“: nachts von {self._clock_word(s['night_from'])} bis {self._clock_word(s['night_to'])} "
+                    f"{s['night_level']} %, {color[s['night_color']][0]}.")
+        if key in ("dark_only", "lux"):
+            return (f"„{name}“: Licht bei Bewegung nur, wenn es dunkler ist als {s['lux']} Lux." if s["dark_only"]
+                    else f"„{name}“: Licht bei Bewegung, ob hell oder dunkel.")
+        if key == "hand_off":
+            return (f"„{name}“: Licht, das jemand von Hand eingeschaltet hat, geht auch aus." if s["hand_off"]
+                    else f"„{name}“: Licht, das jemand von Hand eingeschaltet hat, bleibt an.")
+        if key == "pause":
+            return (f"„{name}“: Nach dem Ausschalten von Hand wartet die Automatik {minutes(s['pause'])}."
+                    if s["pause"] else f"„{name}“: Nach dem Ausschalten von Hand wartet die Automatik nicht.")
+        if key == "lamps":
+            return f"„{name}“: Bei Bewegung gehen {'alle Lampen' if s['lamps'] is None else 'die gewählten Lampen'} an."
+        if key == "detectors":
+            return f"„{name}“: Licht bei {'jedem Melder' if s['detectors'] is None else 'den gewählten Meldern'}."
+        return f"„{name}“: gespeichert."
+
+    @staticmethod
+    def _night(s: dict, now: datetime) -> bool:
+        """Whether it is night by the room's settings (from … to …, also over midnight; the same time: never)."""
+        if not s["night"]:
+            return False
+        start, end = (int(t[:2]) * 60 + int(t[3:]) for t in (s["night_from"], s["night_to"]))
+        minute = now.hour * 60 + now.minute
+        return start <= minute < end if start < end else start > end and (minute >= start or minute < end)
+
+    def _motion_lamps(self, room_id: str, s: dict, lamps: list[dict]) -> list[dict]:
+        """The lamps of the room that go on at motion – all, or the ones chosen."""
+        return [x for x in lamps if x["room"] == room_id and (s["lamps"] is None or x["id"] in s["lamps"])]
+
+    @staticmethod
+    def _motion_detectors(room_id: str, data: dict, s: dict) -> list[str]:
+        """The motion sensors of the room that switch its light – all, or the ones chosen."""
+        return [did for did, room in (data.get("detector_rooms") or {}).items()
+                if room == room_id and (s["detectors"] is None or did in s["detectors"])]
+
+    def _last_motion(self, room_id: str, data: dict, s: dict, now: float, every: bool = False) -> float | None:
+        """When someone moved last at the room's sensors (now: someone moves) – those that switch its light, every:
+        all of them. None: not known."""
+        last = None
+        for did in self._motion_detectors(room_id, data, {**s, "detectors": None} if every else s):
+            v = self.zigbee.detector(did) if self.zigbee else None
+            t = (now if self._moving(v, now) else v.get("at")) if v else None
+            if t and (last is None or t > last):
+                last = t
+        return last
+
+    # „Licht bei Bewegung“ – the automation, in the motion thread
+    def _on_motion(self, did: str, occupied: bool) -> None:
+        """Someone began to move at a sensor – or stopped (heizapp.zigbee_net, in its MQTT thread – nothing here may
+        wait). A beginning goes to the motion thread; the end its looks see."""
+        if not occupied:
+            return
+        try:
+            self._motion_pool.submit(self._moved, did)
+        except RuntimeError:   # the app is ending
+            pass
+
+    def _moved(self, did: str) -> None:
+        """Someone began to move: the light of the sensor's room goes on – when the room wants it, it was not switched
+        off by hand just now, it is not on already (then only the minutes start anew) and, with „Nur wenn es dunkel
+        ist“, it is dark enough."""
+        try:
+            data = self.store.snapshot()
+            room = self._detector_room(did, data)
+            if room is None:
+                return
+            s = self._motion_settings(room, data)
+            if not s["on"] or did not in self._motion_detectors(room, data, s):
+                return
+            now = time.time()
+            lamps = self._motion_look(room, data, s, now)
+            if now < self._motion_pause.get(room, 0.0):
+                log.debug("Bewegung im Raum %s – das Licht wurde eben von Hand ausgeschaltet", room)
+                return
+            if not lamps or any(x["state"] == "ON" and not x["lost"] for x in lamps):
+                return
+            lux = self._room_lux(room, data, s, now) if s["dark_only"] else None
+            if lux is not None and lux > s["lux"]:
+                log.debug("Bewegung im Raum %s – hell genug (%s Lux)", room, lux)
+                return
+            self._motion_on(room, lamps, s)
+        except ActionError as exc:
+            log.warning("Licht bei Bewegung: %s", exc)
+        except Exception:
+            log.exception("Fehler bei der Bewegung an %s", did)
+
+    def _motion_on(self, room: str, lamps: list[dict], s: dict) -> None:
+        """The room's lamps on, with the brightness and the colour of light of the day or the night – as far as each
+        can; the ones that answered are the automation's now."""
+        night = self._night(s, self.now())
+        level, color = (s["night_level"], s["night_color"]) if night else (s["day_level"], s["day_color"])
+        wanted = {}
+        for x in lamps:
+            wanted[x["id"]] = {"state": "ON", **({"color_temp": self._mired(x["id"], color)} if x["kelvins"] else {}),
+                               **({"brightness": self._level(level)} if x["dim"] else {})}
+        self._room_switched[room] = time.monotonic()
+        missed = self._send_lights(wanted)
+        lit = sorted(set(wanted) - set(missed))
+        if lit:
+            with self.store.edit() as d:
+                d.setdefault("motion_auto", {})[room] = {"lamps": lit, "at": time.time()}
+        log.debug("Licht im Raum %s bei Bewegung an (%s)", room, "nachts" if night else "tagsüber")
+
+    def _motion_clock(self) -> None:   # a thread of its own: every MOTION_TICK seconds a look in the motion thread
+        while not self._stop.wait(MOTION_TICK):
+            if self.zigbee is None or self._motion_ticking:
+                continue
+            self._motion_ticking = True
+            try:
+                self._motion_pool.submit(self._motion_tick)
+            except RuntimeError:   # the app is ending
+                return
+
+    def _motion_tick(self, now: float | None = None) -> None:
+        """In the motion thread, every few seconds: what was switched by hand (see _motion_look) – and the light the
+        automation switched on goes off once nobody moved for the room's minutes; with „geht auch aus“ the light
+        switched on by hand as well."""
+        try:
+            now = time.time() if now is None else now
+            data = self.store.snapshot()
+            rooms = [r for r in {**(data.get("motion_light") or {}), **(data.get("motion_auto") or {})}
+                     if r in data["rooms"]]
+            for room in rooms:
+                s = self._motion_settings(room, data)
+                lamps = self._motion_look(room, data, s, now)
+                data = self.store.snapshot()
+                auto = (data.get("motion_auto") or {}).get(room) or {}
+                last, limit = self._last_motion(room, data, s, now) or 0.0, s["minutes"] * 60
+                off = []
+                if auto and now - max(last, auto.get("at") or 0.0) >= limit:
+                    off = [x for x in self._light_list(data) if x["id"] in auto["lamps"] and x["state"] == "ON"]
+                    self._motion_keep(room, [])
+                if s["on"] and s["hand_off"]:   # what was switched on by hand goes off too
+                    off += [x for x in lamps if x["state"] == "ON" and not x["lost"] and x["id"] not in
+                            (auto.get("lamps") or []) and now - max(last, self._lamp_on_since.get(x["id"], now)) >= limit]
+                if off:
+                    self._room_switched[room] = time.monotonic()
+                    self._send_lights({x["id"]: {"state": "OFF"} for x in off})
+                    log.debug("Licht im Raum %s aus – %s Minuten ohne Bewegung", room, s["minutes"])
+        except ActionError as exc:
+            log.warning("Licht bei Bewegung: %s", exc)
+        except Exception:
+            log.exception("Fehler beim Licht bei Bewegung")
+        finally:
+            self._motion_ticking = False
+
+    def _motion_look(self, room: str, data: dict, s: dict, now: float) -> list[dict]:
+        """What the room's lamps are now: one the automation switched on that is off now was switched off by hand (at
+        the wall, at a switch, in the app) – it is no longer the automation's, and when none is left the automation
+        waits its pause; since when each lamp is on (for „geht auch aus“); since when all are off – and what brightness
+        the sensors measured while they were (for „Nur wenn es dunkel ist“). Returns the lamps that go on at motion."""
+        everything = self._light_list(data)
+        lamps = self._motion_lamps(room, s, everything)
+        auto = (data.get("motion_auto") or {}).get(room)
+        if auto:
+            states = {x["id"]: x["state"] for x in everything}
+            left = [lid for lid in auto["lamps"] if states.get(lid) == "ON"]
+            if left != auto["lamps"]:
+                self._motion_keep(room, left)
+                if not left:
+                    self._motion_pause[room] = now + s["pause"] * 60
+                    log.debug("Licht im Raum %s von Hand ausgeschaltet", room)
+        for x in lamps:
+            if x["state"] == "ON" and not x["lost"]:
+                self._lamp_on_since.setdefault(x["id"], now)
+            else:
+                self._lamp_on_since.pop(x["id"], None)
+        detectors = self._motion_detectors(room, data, s)
+        if lamps and all(x["state"] != "ON" or x["lost"] for x in lamps):
+            dark = self._room_dark.setdefault(room, now)
+            for did in detectors:
+                v = self.zigbee.detector(did) if self.zigbee else None
+                if v and v.get("lux") is not None and (v.get("lux_at") or 0.0) >= dark + LUX_SETTLE:
+                    self._dark_lux[did] = (v["lux"], v["lux_at"])
+        else:   # a lamp is on: what the sensors measure now is its light too – and what they measured before is old
+            self._room_dark.pop(room, None)
+            for did in detectors:
+                self._dark_lux.pop(did, None)
+        return lamps
+
+    def _room_lux(self, room: str, data: dict, s: dict, now: float) -> float | None:
+        """The brightness at the room's sensors while its lamps were off – the darkest one says it. None: not known
+        (then the light goes on)."""
+        found = [self._dark_lux[did][0] for did in self._motion_detectors(room, data, s)
+                 if did in self._dark_lux and now - self._dark_lux[did][1] <= LUX_KEEP]
+        return min(found) if found else None
+
+    def _motion_hand(self, room: str | None, on: bool, lamps: list[str] | None = None) -> None:
+        """The light of a room switched by hand (start page, Geräte › Licht, a switch) – all lamps or these: what the
+        automation had switched on of them is light by hand now (on: it stays on); switched off, the automation waits
+        its pause before it switches the light on again."""
+        if not room:
+            return
+        data = self.store.snapshot()
+        auto = (data.get("motion_auto") or {}).get(room)
+        if auto:
+            self._motion_keep(room, [lid for lid in auto["lamps"] if lamps is not None and lid not in lamps])
+        if not on:
+            self._motion_pause[room] = time.time() + self._motion_settings(room, data)["pause"] * 60
+
+    def _motion_keep(self, room: str, lamps: list[str]) -> None:
+        """Of the lamps the automation switched on in the room only these are still its own (none: it has none)."""
+        with self.store.edit() as d:
+            auto = (d.get("motion_auto") or {}).get(room)
+            if auto is not None:
+                auto["lamps"] = [lid for lid in auto["lamps"] if lid in lamps]
+                if not auto["lamps"]:
+                    d["motion_auto"].pop(room, None)
+
+    def _motion_view(self, room_id: str, data: dict, detectors: list[dict]) -> dict | None:
+        """„Licht bei Bewegung“ of a room for the page – only for a room with a motion sensor (or settings): its
+        settings, whether someone moves there and when someone moved last, whether the light is on by motion and when
+        it goes off (nobody moving), until when the automation waits after a switching off by hand."""
+        mine = [x for x in detectors if x["room"] == room_id]
+        saved = (data.get("motion_light") or {}).get(room_id)
+        if not mine and not saved:
+            return None
+        s, now = self._motion_settings(room_id, data), time.time()
+        auto = (data.get("motion_auto") or {}).get(room_id)
+        last = self._last_motion(room_id, data, s, now)
+        moving = bool(last) and last >= now
+        pause = self._motion_pause.get(room_id, 0.0)
+        seen = self._last_motion(room_id, data, s, now, every=True)
+        return {**s, "auto": bool(auto), "night_now": self._night(s, self.now()),
+                "off_at": self._iso(max(last or 0.0, auto.get("at") or 0.0) + s["minutes"] * 60)
+                if auto and not moving else None,
+                "pause_until": self._iso(pause) if pause > now else None,
+                "moving": bool(seen) and seen >= now, "moved": self._iso(seen) if seen and seen < now else None,
+                "detectors": [x["id"] for x in mine]}
 
     def history_view(self, kind: str, ident: str, day_text: str) -> dict:
         """Verlauf of a room (or of a heater without one) on one day: the points of the chart and what it cost."""
@@ -3525,9 +4000,11 @@ class Service:
 
     RUN_WHO = {"waschmaschine": "Die Waschmaschine", "trockner": "Der Trockner"}
 
-    def _notice_views(self, data: dict, plugs: list[dict], buttons: list[dict] = ()) -> list[dict]:
+    def _notice_views(self, data: dict, plugs: list[dict], buttons: list[dict] = (),
+                      detectors: list[dict] = ()) -> list[dict]:
         """The notices for the start page, „Die Waschmaschine ist fertig – seit 10:42.“ (heizapp.cycles) – only of
-        plugs that still have that device on them –, and „Die Batterie im Schalter … ist fast leer“."""
+        plugs that still have that device on them –, and „Die Batterie im Schalter … ist fast leer“ (in a motion sensor
+        too)."""
         kinds = {p["id"]: p["appliance"] for p in plugs}
         alike = Counter(kinds.values())
         out = []
@@ -3545,6 +4022,12 @@ class Service:
                 out.append({"id": "batterie-" + b["id"], "button": b["id"], "at": None,
                             "text": f"Die Batterie im Schalter „{b['name']}“ ist fast leer ({b['battery']} %) – bitte "
                                     "bald wechseln."})
+        okay = data.get("detector_battery_ok") or {}
+        for x in detectors:
+            if x["battery"] is not None and x["battery"] <= BUTTON_LOW and not okay.get(x["id"]):
+                out.append({"id": "batterie-" + x["id"], "detector": x["id"], "at": None,
+                            "text": f"Die Batterie im Bewegungsmelder „{x['name']}“ ist fast leer ({x['battery']} %) – "
+                                    "bitte bald wechseln."})
         return out
 
     def _since_text(self, t: float) -> str:   # „10:42“, „gestern 22:10“, „24.11. 22:10“
@@ -3557,10 +4040,13 @@ class Service:
         """„OK“ on a notice of the start page – anyone may tap it, without PIN."""
         if notice_id.startswith("batterie-"):   # a switch's battery: not again until it had a new one
             bid = notice_id[len("batterie-"):]
-            if not any(b["ieee"] == bid for b in (self.zigbee.buttons() if self.zigbee else [])):
+            key = ("button_battery_ok" if any(b["ieee"] == bid for b in (self.zigbee.buttons() if self.zigbee else []))
+                   else "detector_battery_ok" if any(x["ieee"] == bid for x in
+                                                     (self.zigbee.detectors() if self.zigbee else [])) else None)
+            if key is None:
                 raise ActionError("Diesen Hinweis gibt es nicht mehr.", 404)
             with self.store.edit() as d:
-                d.setdefault("button_battery_ok", {})[bid] = True
+                d.setdefault(key, {})[bid] = True
             return {}
         if not self.cycles.ok(notice_id):
             raise ActionError("Diesen Hinweis gibt es nicht mehr.", 404)
@@ -3627,12 +4113,14 @@ class Service:
             })
         plan_list = [{"id": pid, **p, "rooms": [r["id"] for r in rooms if r["plan"] == pid]}
                      for pid, p in data["plans"].items()]
-        plugs, buttons = self._plug_list(data), self._button_list(data)
+        plugs, buttons, detectors = self._plug_list(data), self._button_list(data), self._detector_list(data)
+        for r in rooms:   # „Licht bei Bewegung“ – a room with a motion sensor
+            r["motion"] = self._motion_view(r["id"], data, detectors)
         return {"now": self.now().isoformat(timespec="seconds"), "heaters": heaters,
                 "rooms": rooms, "plans": plan_list, "sensors": self._sensor_views(data, heaters),
                 "costs": self._costs(data), "plugs": plugs, "power_today": self._power_today(data, plugs),
-                "notices": self._notice_views(data, plugs, buttons), "lights": self._light_list(data, ask=True),
-                "buttons": buttons,
+                "notices": self._notice_views(data, plugs, buttons, detectors),
+                "lights": self._light_list(data, ask=True), "buttons": buttons, "detectors": detectors,
                 "history": {"recording": self.history.active,
                             "first_day": (first := self.history.first_day()) and first.isoformat()},
                 "calib_rules": {"settle_minutes": self.CALIB_SETTLE // 60, "min_minutes": self.CALIB_MIN_MINUTES,

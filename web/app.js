@@ -698,7 +698,12 @@ const ICONS = {   // drawn for this app: a radiator (heaters and thermostats), a
   light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
     'stroke-linejoin="round"><path d="M9.2 17.5h5.6M10 20.8h4"/><path d="M12 2.8a6.2 6.2 0 0 0-3.7 11.2c.6.5 ' +
     '.9 1.2.9 1.9v.3h5.6v-.3c0-.7.3-1.4.9-1.9A6.2 6.2 0 0 0 12 2.8z"/></svg>',
+  motion: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">' +
+    '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6' +
+    'M15.8 8.2a5.4 5.4 0 0 1 0 7.6"/><path d="M5.2 5.2a9.6 9.6 0 0 0 0 13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6"/></svg>',
 };
+const CHEVRON = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6" fill="none" ' +
+  'stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function deviceIcon(h, label = false) {
   // a radiator for heaters and thermostats – warm while it heats, red without connection – or a thermometer for sensors
@@ -764,6 +769,115 @@ function roomLights(g) {   // the lamps of a room (a heater without room has non
   return g.kind === "room" ? (state.lights || []).filter(l => l.room === g.id) : [];
 }
 
+function roomDetectors(g) {   // the motion sensors of a room
+  return g.kind === "room" ? (state.detectors || []).filter(x => x.room === g.id) : [];
+}
+
+function clockText(iso) {   // "21:45" – the server's local time
+  const t = localTime(iso);
+  return t ? t.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function agoText(iso) {   // „gerade eben“, „vor 5 Min.“, „vor 2 Std.“, „gestern 22:10 Uhr“
+  const t = localTime(iso);
+  if (!t) return "";
+  const now = serverNow(), min = Math.floor((now - t) / 60000);
+  if (min < 1) return "gerade eben";
+  if (min < 60) return `vor ${min} Min.`;
+  if (min < 12 * 60) return `vor ${Math.floor(min / 60)} Std.`;
+  const days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) -
+    new Date(t.getFullYear(), t.getMonth(), t.getDate())) / 86400000);
+  return (days === 0 ? "heute " : days === 1 ? "gestern " : `am ${t.toLocaleDateString("de-DE", { day: "2-digit",
+    month: "2-digit" })} `) + `${clockText(iso)} Uhr`;
+}
+
+function motionWords(g, short = false) {   // „Bewegung gerade“, „Bewegung vor 5 Min.“ – null: no motion sensor in the
+  const m = g.room && g.room.motion;           // room (short: or nothing known yet – the app was just started)
+  if (!m || !roomDetectors(g).length) return null;
+  return m.moving ? "Bewegung gerade" : m.moved ? `Bewegung ${agoText(m.moved)}` : short ? null
+    : "Noch keine Bewegung gemeldet";
+}
+
+function tileMotionHTML(g) {   // when someone moved in the room last – and a sensor that went silent
+  const words = motionWords(g);
+  if (!words) return "";
+  const sensors = roomDetectors(g), silent = sensors.filter(x => x.silent);
+  const note = !silent.length ? "" : sensors.length === 1 ? "Der Bewegungsmelder meldet sich nicht mehr."
+    : `${silent.map(x => x.name).join(", ")} ${silent.length === 1 ? "meldet" : "melden"} sich nicht mehr.`;
+  return `<p class="tile-motion"><span class="dico${g.room.motion.moving ? " on" : ""}" aria-hidden="true">${
+    ICONS.motion}</span><span>${esc(words)}${note ? `<small>${esc(note)}</small>` : ""}</span></p>`;
+}
+
+function lightAutoText(g, on) {   // „An durch Bewegung · aus um 21:45 Uhr“, „Geht bei Bewegung an“
+  const m = g.room && g.room.motion;
+  if (!m) return "";
+  if (m.auto) return `An durch Bewegung${m.off_at ? ` · aus um ${clockText(m.off_at)} Uhr` : ""}`;
+  return m.on && !on ? "Geht bei Bewegung an" : "";
+}
+
+// ------------------------------------------------------------------ tiles that open and close
+// A tap on a room's name opens or closes its tile; closed it shows its name, its temperature and one line. With up to
+// TILES_OPEN_UPTO tiles they start open, with more closed – each phone remembers what was tapped (localStorage).
+const TILES_OPEN_UPTO = 2;
+let tilesOpen = (() => {
+  try { const v = JSON.parse(localStorage.getItem("heizung.tiles") || "{}"); return v && typeof v === "object" ? v : {}; }
+  catch (e) { return {}; }
+})();
+
+function homeGroups() {   // the rooms with a tile: heaters, plugs, light or a motion sensor
+  return groups().filter(g => g.heaters.length || roomPlugs(g).length || roomLights(g).length || roomDetectors(g).length);
+}
+
+function tileOpen(g, count) {
+  const v = tilesOpen[keyOf(g)];
+  return typeof v === "boolean" ? v : count <= TILES_OPEN_UPTO;
+}
+
+function setTilesOpen(keys, open) {
+  const known = new Set(homeGroups().map(keyOf));   // rooms that are gone are forgotten
+  tilesOpen = Object.fromEntries(Object.entries(tilesOpen).filter(([k]) => known.has(k)));
+  keys.forEach(k => { tilesOpen[k] = open; });
+  localStorage.setItem("heizung.tiles", JSON.stringify(tilesOpen));
+  render();
+}
+
+function toggleTile(tile) {
+  const g = groupFor(tile);
+  if (g) setTilesOpen([keyOf(g)], !tileOpen(g, homeGroups().length));
+}
+
+function tileHeadHTML(g, open, extra = "") {   // the room's name opens and closes the tile
+  return `<div class="tile-head"><h2><button class="tile-toggle" data-action="tile-toggle" aria-expanded="${open}">${
+    esc(g.name)}</button></h2>${extra}${CHEVRON}</div>`;
+}
+
+function tileSumHTML(parts) {   // closed: one line – [text, tone] with tone "warn" or "bad"
+  const shown = parts.filter(x => x && x[0]);
+  return shown.length ? `<p class="tile-sum">${shown.map(([text, tone]) => `<span${tone ? ` class="${tone}"` : ""}>${
+    esc(text)}</span>`).join("")}</p>` : "";
+}
+
+function lightSumParts(g) {   // the light and the motion of a room for its closed tile
+  const lamps = roomLights(g), on = lamps.filter(l => l.state === "ON" && !l.lost);
+  const light = !lamps.length ? null : on.length ? [g.room && g.room.motion && g.room.motion.auto
+    ? "Licht an durch Bewegung" : "Licht an"] : lamps.every(l => l.lost) ? ["Licht: keine Verbindung", "warn"]
+    : ["Licht aus"];
+  const words = motionWords(g, true);
+  return [light, words && [words]];
+}
+
+function plugSumParts(g) {   // the plugs of a room for its closed tile: what runs, what is on
+  const plugs = roomPlugs(g);
+  if (!plugs.length) return [];
+  const numbers = !!(state.costs && state.costs.show_power);
+  const running = numbers ? plugs.filter(p => p.run && p.found && !p.error) : [];
+  if (running.length) return running.map(p => [`${p.appliance !== "sonstiges" ? applianceText(p.appliance) : p.name} läuft`]);
+  const lost = plugs.filter(p => !p.found || p.error), on = plugs.filter(p => p.state === "ON" && p.found && !p.error);
+  if (lost.length === plugs.length) return [[plugs.length === 1 ? "Steckdose: keine Verbindung" : "Steckdosen: keine Verbindung", "warn"]];
+  return [[plugs.length === 1 ? (on.length ? "Steckdose an" : "Steckdose aus")
+    : on.length ? `${on.length} von ${plugs.length} Steckdosen an` : "Steckdosen aus"]];
+}
+
 function tileLightsHTML(g) {
   // the light of the room: „Licht einschalten“ / „Licht ausschalten“ for all its lamps, „dunkler“ and „heller“ while it
   // is on – and with several lamps each one on its own
@@ -778,9 +892,10 @@ function tileLightsHTML(g) {
     : lost.length === lamps.length ? "keine Verbindung" : "aus";
   const tune = lamps.some(l => l.dim || l.kelvins || l.hues)   // each lamp on its own: brightness, colour of light, colour
     ? '<button class="light-tune" data-action="light-sheet">Einstellen ›</button>' : "";
+  const auto = lightAutoText(g, on.length > 0);
   const head = `<div class="light-head"><span class="dico${on.length ? " on" : lost.length === lamps.length ? " offline"
     : ""}" aria-hidden="true">${ICONS.light}</span><span class="light-title">Licht</span><span class="pstate${on.length
-    ? "" : " off"}">${say}</span>${tune}</div>`;
+    ? "" : " off"}">${say}</span>${tune}</div>${auto ? `<p class="light-auto">${esc(auto)}</p>` : ""}`;
   const toggle = `<button class="big-btn${on.length ? "" : " primary"}" data-action="light-room" data-on="${on.length ? 0 : 1}"
     ${sending ? "disabled" : ""}>${sending ? "wird gesendet …" : on.length ? "Licht ausschalten" : "Licht einschalten"}</button>`;
   const dimmer = !dim.length ? "" : `<div class="tile-set light-set">
@@ -803,18 +918,24 @@ function tileLightsHTML(g) {
   return `<div class="tile-light">${head}${toggle}${dimmer}${rows}${note}</div>`;
 }
 
-function plainTile(g) {   // a room without heaters: its name, a fresh sensor's temperature, its plugs and its light
-  const felt = roomTemp(g);
-  return `<article class="tile cool${busy.has("light:" + g.id) ? " busy" : ""}" data-kind="${g.kind}" data-id="${esc(g.id)}"${
-    felt != null ? ` style="--tint:${tileTint(felt)}"` : ""}>
-    <div class="tile-head"><h2>${esc(g.name)}</h2></div>
+function plainTile(g, open = true) {   // a room without heaters: its name, a fresh sensor's temperature, its plugs, its
+  const felt = roomTemp(g);                // light and its motion
+  const start = `<article class="tile cool${open ? "" : " collapsed"}${busy.has("light:" + g.id) ? " busy" : ""}" data-kind="${
+    g.kind}" data-id="${esc(g.id)}"${felt != null ? ` style="--tint:${tileTint(felt)}"` : ""}>`;
+  if (!open) {
+    return `${start}${tileHeadHTML(g, false, felt == null ? "" : `<span class="mini-temp">${degBig(felt)}</span>`)}
+      ${tileSumHTML([...plugSumParts(g), ...lightSumParts(g)])}</article>`;
+  }
+  return `${start}
+    ${tileHeadHTML(g, true)}
     ${felt == null ? "" : `<div class="tile-now"><span class="now-temp">${degBig(felt)}</span><span class="now-label">im Raum</span></div>`}
     ${tilePlugsHTML(g)}
     ${tileLightsHTML(g)}
+    ${tileMotionHTML(g)}
   </article>`;
 }
 
-function homeTile(g) {
+function homeTile(g, open = true) {
   const key = keyOf(g);
   const online = g.heaters.filter(h => h.online);
   const sensors = homeSensors(g);
@@ -866,9 +987,19 @@ function homeTile(g) {
   unplugged.slice().reverse().forEach(h => actions.unshift(`<button class="big-btn primary" data-action="plug-on" data-heater="${
     esc(h.id)}" ${busy.has(key) ? "disabled" : ""}>${unplugged.length === 1 ? "Steckdose einschalten" : `Steckdose für ${esc(h.name)} einschalten`}</button>`));
   const classes = ["tile", glow, isOff ? "is-off" : "", online.length ? "" : "offline", heating && !isOff ? "heating" : "",
-                   busy.has(key) ? "busy" : ""].filter(Boolean).join(" ");
+                   busy.has(key) ? "busy" : "", open ? "" : "collapsed"].filter(Boolean).join(" ");
+  if (!open) {   // closed: name and temperature, then what the room does in one line
+    const heat = !online.length ? [["keine Verbindung", "bad"]]
+      : [[mode === "holiday" ? "Urlaub" : isOff ? "aus" : target != null ? `Soll ${degShort(target)}` : ""],
+         [mode === "boost" ? "volle Kraft" : heating && !isOff ? "heizt" : ""],
+         [online.some(h => h.window_open) ? "Fenster offen" : "", "warn"],
+         [unplugged.length ? "Steckdose aus" : "", "warn"], [low.length ? "Batterie bald wechseln" : "", "warn"]];
+    return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
+      ${tileHeadHTML(g, false, felt == null ? "" : `<span class="mini-temp">${degBig(felt)}</span>`)}
+      ${tileSumHTML([...heat, ...plugSumParts(g), ...lightSumParts(g)])}</article>`;
+  }
   return `<article class="${classes}" data-kind="${g.kind}" data-id="${esc(g.id)}"${tint ? ` style="--tint:${tint}"` : ""}>
-    <div class="tile-head"><h2>${esc(g.name)}</h2>${badge}</div>
+    ${tileHeadHTML(g, true, badge)}
     <div class="tile-now"><span class="now-temp">${degBig(felt)}</span>${felt == null ? "" : '<span class="now-label">im Raum</span>'}</div>
     ${setter}
     <p class="say ${say.tone}">${esc(say.text)}${online.length ? "" : ` <span class="more">${silent
@@ -881,6 +1012,7 @@ function homeTile(g) {
     ${tileHistoryHTML(g)}
     ${actions.length ? `<div class="tile-actions">${actions.join("")}</div>` : ""}
     ${tileLightsHTML(g)}
+    ${tileMotionHTML(g)}
     ${heating && !isOff ? WAVE : ""}
   </article>`;
 }
@@ -893,10 +1025,14 @@ function renderHome() {
   if (!state) return;
   renderHelp();
   renderLogFoot();
-  const gs = groups().filter(g => g.heaters.length || roomPlugs(g).length || roomLights(g).length);   // only plugs or
-  const tiles = document.getElementById("tiles");                                                   // light: a tile too
-  const html = gs.length ? gs.map(g => g.heaters.length ? homeTile(g) : plainTile(g)).join("")
+  const gs = homeGroups(), opens = gs.map(g => tileOpen(g, gs.length));   // only plugs, light or motion: a tile too
+  const tiles = document.getElementById("tiles");
+  const html = gs.length ? gs.map((g, i) => g.heaters.length ? homeTile(g, opens[i]) : plainTile(g, opens[i])).join("")
     : '<p class="home-empty">Noch keine Heizung eingerichtet. Das geht über „Einrichtung“ oben rechts.</p>';
+  const tools = document.getElementById("tiles-tools");   // with several tiles: all open or all closed at once
+  tools.hidden = gs.length <= TILES_OPEN_UPTO;
+  if (!tools.hidden) setHTML(tools, `<button class="link-btn" data-action="tiles-all" data-open="${opens.every(Boolean)
+    ? 0 : 1}">${opens.every(Boolean) ? "Alle zuklappen" : "Alle aufklappen"}</button>`);
   if (html !== tiles._html)   // new tiles: their heat waves go on where the old ones were, instead of starting over
     document.documentElement.style.setProperty("--wave-delay", `-${(performance.now() % 8000 / 1000).toFixed(2)}s`);
   setHTML(tiles, html);
@@ -2926,7 +3062,198 @@ function lightsCardHTML() {
       Wand an.</p>
     ${lamps.map(lightTileHTML).join("")}
     ${lamps.length ? "" : '<p class="empty">Noch keine Lampe in der App. Eine neue lernst du mit „+ Gerät hinzufügen“ an.</p>'}
-  </article>${buttonsCardHTML()}`;
+  </article>${buttonsCardHTML()}${detectorsCardHTML()}${motionCardHTML()}`;
+}
+
+// ------------------------------------------------------------------ motion sensors (Geräte › Licht)
+const SENSITIVITY_WORDS = { low: "niedrig", medium: "mittel", high: "hoch", very_high: "sehr hoch",
+  max: "am höchsten" };   // Service.SENSITIVITY_WORDS
+
+function detectorsCardHTML() {
+  const sensors = state.detectors || [];
+  if (!sensors.length && !(state.lights || []).length) return "";
+  return `<article class="card"><div class="card-head"><h2>Bewegungsmelder</h2></div>
+    <p class="hint">Ein Bewegungsmelder merkt, wenn sich im Raum jemand bewegt. Dann schaltet die App dort das Licht ein –
+      und wieder aus, wenn eine Weile nichts mehr los ist. Wie, stellst du darunter bei „Licht bei Bewegung“ ein. Das
+      schaltet die App, also nur, wenn der Pi läuft.</p>
+    ${sensors.map(detectorTileHTML).join("")}
+    ${sensors.length ? "" : '<p class="empty">Noch kein Bewegungsmelder in der App. Einen neuen lernst du mit „+ Gerät hinzufügen“ an.</p>'}
+  </article>`;
+}
+
+function detectorTileHTML(x) {
+  const removing = zigbeeNetPending === x.id, z = zigbeeDevice(x.id), sending = busy.has("detector:" + x.id);
+  const low = x.battery != null && x.battery <= 15;
+  const sens = !x.sensitivities.length ? "" : `<select data-action="detector-sens" aria-label="Empfindlichkeit von ${
+    esc(x.name)}" ${sending ? "disabled" : ""}>${x.sensitivity ? "" : '<option value="" selected disabled>– noch nicht bekannt –</option>'}${
+    x.sensitivities.map(v => `<option value="${esc(v)}" ${v === x.sensitivity ? "selected" : ""}>${esc(SENSITIVITY_WORDS[v] || v)}</option>`)
+    .join("")}</select>`;
+  return `<div class="device ${removing ? "busy" : ""}" data-detector="${esc(x.id)}">
+    <div class="device-head"><span class="dot ${x.silent ? "offline" : x.moving ? "on" : "ok"}"></span><strong class="dname">${
+      esc(x.name)}</strong>${radioTag(true)}<span class="muted">${esc(x.moving ? "Bewegung gerade" : x.moved
+      ? `Bewegung ${agoText(x.moved)}` : "Bewegungsmelder")}</span>
+      <button class="small" data-action="detector-remove" ${removing ? "disabled" : ""}>${removing ? "entferne …" : "Entfernen …"}</button></div>
+    <dl>
+      <dt>Name</dt><dd>${esc(x.name)} <button class="small" data-action="detector-rename">Ändern …</button></dd>
+      <dt>Raum</dt><dd><select data-action="detector-room-set" aria-label="Raum von ${esc(x.name)}" ${
+        busy.has("detectorroom:" + x.id) ? "disabled" : ""}>${plugRoomOptions(x.room)}</select>${x.room ? ""
+        : ' <span class="muted">– ohne Raum schaltet er kein Licht</span>'}</dd>
+      <dt>Bewegung</dt><dd>${esc(x.moving ? "gerade" : x.moved ? agoText(x.moved) : "seit dem Start der App noch keine")}${
+        x.silent ? `<br><span class="error-text">Meldet sich seit Stunden nicht mehr. Ist die Batterie leer, oder ist er
+        zu weit vom Pi weg?</span>` : ""}</dd>
+      ${x.lux != null ? `<dt>Helligkeit</dt><dd>${Math.round(x.lux)} Lux</dd>` : ""}
+      ${x.temperature != null ? `<dt>Temperatur</dt><dd>${deg(x.temperature)}</dd>` : ""}
+      <dt>Batterie</dt><dd>${x.battery == null ? "–" : low ? `<span class="error-text">${Math.round(x.battery)} % – bitte bald
+        wechseln</span>` : `${Math.round(x.battery)} %`}</dd>
+      ${sens ? `<dt>Empfindlichkeit</dt><dd>${sens}</dd>` : ""}
+      ${x.led_settable ? `<dt>Sein Licht</dt><dd><label class="check"><input type="checkbox" data-action="detector-led" ${
+        x.led ? "checked" : ""} ${sending ? "disabled" : ""}> blinkt bei Bewegung</label></dd>` : ""}
+      ${sending ? '<dt></dt><dd class="muted">sende … Er schläft zwischendurch – einmal vor ihm bewegen weckt ihn.</dd>' : ""}
+      <dt>Gerät</dt><dd>${esc([x.model, z && zigbeeSignal(z.signal)].filter(Boolean).join(" · ") || "–")}</dd>
+      <dt>Zigbee-Adresse</dt><dd>${esc(x.id)}</dd>
+    </dl></div>`;
+}
+
+async function setDetectorRoom(id, room, quiet = false) {   // the room of a motion sensor – true when saved
+  const key = "detectorroom:" + id;
+  if (busy.has(key)) return false;
+  busy.add(key);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  render();
+  let ok = false;
+  try {
+    const res = await api("PUT", `api/detectors/${encodeURIComponent(id)}/room`, { room: room || null });
+    if (!quiet) toast(res.message || "Gespeichert.");
+    ok = true;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy.delete(key);
+  }
+  invalidate();
+  await refresh();
+  return ok;
+}
+
+async function renameDetector(id, quiet = false, name = null) {   // „Ändern …“ at the name – it stays in the app
+  const x = (state.detectors || []).find(v => v.id === id);
+  if (!x) return false;
+  const fallback = `Melder ${id.slice(-4).toUpperCase()}`;   // as the server names it
+  const url = `api/detectors/${encodeURIComponent(id)}/name`;
+  if (name !== null) {   // from „+ Gerät hinzufügen“
+    try { const res = await api("PUT", url, { name }); if (!quiet) toast(res.message); }
+    catch (e) { toast(e.message, true); return false; }
+    return true;
+  }
+  const done = await ask({ title: "Bewegungsmelder umbenennen", text: `Leer lassen: „${fallback}“.`,
+    fields: [{ id: "name", label: "Name", type: "text", value: x.name === fallback ? "" : x.name, placeholder: fallback }],
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Speichern", value: "submit", cls: "primary" }],
+    onSubmit: async v => {
+      try { toast((await api("PUT", url, { name: v.name })).message); return null; }
+      catch (e) { return e.message; }
+    } });
+  if (done) { invalidate(); await refresh(); }
+  return !!done;
+}
+
+async function removeDetector(id) {   // „Entfernen …“: the Pi unpairs it – it sleeps: a motion right before wakes it
+  const x = (state.detectors || []).find(v => v.id === id);
+  if (!x) return;
+  const yes = await ask({ title: "Bewegungsmelder entfernen?",
+    text: `Der Pi meldet ${x.name} im Zigbee-Netz ab. Beweg dich kurz vorher vor dem Melder – dann ist er wach und hört ` +
+      "es. Später kannst du ihn mit „+ Gerät hinzufügen“ wieder anlernen.",
+    buttons: [{ label: "Abbrechen", value: null }, { label: "Entfernen", value: "yes", cls: "danger-solid" }] });
+  if (!yes) return;
+  await zigbeeUnpair(id, "den Bewegungsmelder", "er", "ihn");
+  return refresh();
+}
+
+function setDetector(id, body) {   // its sensitivity or its light – it sleeps: the server waits a few seconds for it
+  act("detector:" + id, async () => toast((await api("PUT", `api/detectors/${encodeURIComponent(id)}/settings`, body)).message));
+}
+
+// „Licht bei Bewegung“: one block for each room with a motion sensor
+const MOTION_MINUTES = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120];
+const MOTION_LEVELS = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+const MOTION_LUX = [5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 1000];
+const MOTION_PAUSE = [0, 1, 2, 5, 10, 15, 30];
+const MOTION_CLOCK = Array.from({ length: 48 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}`);
+
+function motionCardHTML() {
+  const sensors = state.detectors || [];
+  if (!sensors.length) return "";
+  const rooms = state.rooms.filter(r => sensors.some(x => x.room === r.id));
+  return `<article class="card"><div class="card-head"><h2>Licht bei Bewegung</h2></div>
+    <p class="hint">Geht jemand durch einen Raum mit Bewegungsmelder, schaltet die App dort das Licht ein. Hat sich eine
+      Weile nichts mehr bewegt, schaltet sie es wieder aus – nachts auf Wunsch gedämpft, damit es nicht blendet.</p>
+    ${rooms.length ? rooms.map(motionRoomHTML).join("")
+      : '<p class="empty">Noch kein Bewegungsmelder in einem Raum. Wähle oben beim Melder seinen Raum.</p>'}
+  </article>`;
+}
+
+function motionRoomHTML(r) {
+  const m = r.motion || {}, dis = busy.has("motion:" + r.id) ? "disabled" : "";
+  const lamps = (state.lights || []).filter(l => l.room === r.id), sensors = (state.detectors || []).filter(x => x.room === r.id);
+  const minutes = n => `${n} Minute${n === 1 ? "" : "n"}`;
+  const pick = (field, list, word) => `<select data-mfield="${field}" ${dis}>${(list.includes(m[field]) || m[field] == null
+    ? list : list.concat([m[field]]).sort((a, b) => a < b ? -1 : 1)).map(v => `<option value="${v}" ${v === m[field]
+    ? "selected" : ""}>${esc(word(v))}</option>`).join("")}</select>`;
+  const colors = field => pick(field, Object.keys(LIGHT_COLOR_WORDS), c => LIGHT_COLOR_WORDS[c]);
+  const box = (field, words) => `<label class="check"><input type="checkbox" data-mfield="${field}" ${m[field] ? "checked"
+    : ""} ${dis}> ${words}</label>`;
+  const lux = sensors.filter(x => x.lux != null).map(x => x.lux);
+  const status = !lamps.length ? "In diesem Raum ist noch keine Lampe. Wähle bei einer Lampe diesen Raum."
+    : m.auto ? `Gerade an durch Bewegung${m.off_at ? ` – geht um ${clockText(m.off_at)} Uhr aus` : ""}.`
+    : m.pause_until ? `Von Hand ausgeschaltet – reagiert wieder ab ${clockText(m.pause_until)} Uhr.` : "";
+  const head = `<div class="motion-head"><h3>${esc(r.name)}</h3>${box("on", "Licht bei Bewegung")}</div>${status
+    ? `<p class="hint">${esc(status)}</p>` : ""}`;
+  if (!m.on) return `<div class="motion-room" data-motion-room="${esc(r.id)}">${head}</div>`;
+  const which = (legend, attr, items, chosen) => items.length < 2 ? "" : `<fieldset><legend>${legend}</legend>${items.map(x =>
+    `<label class="check"><input type="checkbox" data-${attr}="${esc(x.id)}" ${!chosen || chosen.includes(x.id) ? "checked" : ""} ${
+      dis}> ${esc(x.name)}</label>`).join("")}</fieldset>`;
+  return `<div class="motion-room" data-motion-room="${esc(r.id)}">${head}
+    <div class="motion-form">
+      <label>Aus, wenn sich so lange nichts bewegt hat ${pick("minutes", MOTION_MINUTES, minutes)}</label>
+      <fieldset><legend>${m.night ? "Tagsüber" : "So hell"}</legend>
+        <label>Helligkeit ${pick("day_level", MOTION_LEVELS, v => v + " %")}</label>
+        <label>Lichtfarbe ${colors("day_color")}</label></fieldset>
+      ${box("night", "Nachts gedämpftes Licht")}
+      ${!m.night ? "" : `<fieldset><legend>Nachts${m.night_now ? " – gilt gerade" : ""}</legend>
+        <label>von ${pick("night_from", MOTION_CLOCK, v => v + " Uhr")}</label>
+        <label>bis ${pick("night_to", MOTION_CLOCK, v => v + " Uhr")}</label>
+        <label>Helligkeit ${pick("night_level", MOTION_LEVELS, v => v + " %")}</label>
+        <label>Lichtfarbe ${colors("night_color")}</label></fieldset>`}
+      ${box("dark_only", "Nur, wenn es dunkel ist")}
+      ${!m.dark_only ? "" : `<label>Dunkel heißt: weniger als ${pick("lux", MOTION_LUX, v => v + " Lux")}<small>${lux.length
+        ? `Der Melder misst gerade ${Math.round(Math.min(...lux))} Lux${lamps.some(l => l.state === "ON") ? " – mit Licht" : ""}.`
+        : "Der Melder hat noch keine Helligkeit gemeldet."}</small></label>`}
+      <label>Licht, das jemand von Hand eingeschaltet hat, <select data-mfield="hand_off" ${dis}><option value="0" ${
+        m.hand_off ? "" : "selected"}>bleibt an</option><option value="1" ${m.hand_off ? "selected" : ""}>geht auch aus</option></select></label>
+      <label>Von Hand ausgeschaltet: wieder bei Bewegung ${pick("pause", MOTION_PAUSE, v => v ? `nach ${minutes(v)}` : "sofort")}</label>
+      ${which("Diese Lampen gehen an", "mlamp", lamps, m.lamps)}
+      ${which("Bei diesen Meldern", "mdet", sensors, m.detectors)}
+    </div></div>`;
+}
+
+function motionChange(t) {   // a change in „Licht bei Bewegung“ goes to the server at once
+  const room = t.closest("[data-motion-room]").dataset.motionRoom, field = t.dataset.mfield;
+  let body;
+  if (field) {
+    body = { [field]: t.type === "checkbox" ? t.checked : field === "hand_off" ? t.value === "1"
+      : ["minutes", "day_level", "night_level", "lux", "pause"].includes(field) ? Number(t.value) : t.value };
+  } else {   // which lamps, which sensors: all of them – null, so a new one counts too
+    const attr = t.dataset.mlamp !== undefined ? "mlamp" : "mdet";
+    const boxes = [...t.closest("fieldset").querySelectorAll(`input[data-${attr}]`)];
+    const chosen = boxes.filter(b => b.checked).map(b => b.dataset[attr]);
+    if (!chosen.length) {
+      toast(attr === "mlamp" ? "Mindestens eine Lampe muss angehen." : "Mindestens ein Melder muss das Licht schalten.", true);
+      invalidate();
+      return render();
+    }
+    body = { [attr === "mlamp" ? "lamps" : "detectors"]: chosen.length === boxes.length ? null : chosen };
+  }
+  t.blur();
+  act("motion:" + room, async () => toast((await api("PUT", `api/rooms/${encodeURIComponent(room)}/motion`, body)).message));
 }
 
 // ------------------------------------------------------------------ switches (Geräte › Licht)
@@ -3633,12 +3960,13 @@ function zigbeeOthersHTML() {   // in the Zigbee network, but no thermostat, plu
   if (!(state.app && state.app.zigbee)) return "";
   const shown = new Set(state.heaters.map(h => h.id).concat((state.plugs || []).map(p => p.id),
                                                             (state.lights || []).map(l => l.id),
-                                                            (state.buttons || []).map(b => b.id)));
+                                                            (state.buttons || []).map(b => b.id),
+                                                            (state.detectors || []).map(x => x.id)));
   const others = ((zigbee && zigbee.net && zigbee.net.devices) || []).filter(d => !shown.has(d.ieee));
   if (!others.length) return "";
   return `<article class="card"><div class="card-head"><h2>Weitere Zigbee-Geräte</h2></div>
-    <p class="hint">Diese Geräte sind im Zigbee-Netz, aber (noch) kein Thermostat, keine Steckdose, keine Lampe und kein
-      Schalter der App.</p>
+    <p class="hint">Diese Geräte sind im Zigbee-Netz, aber (noch) kein Thermostat, keine Steckdose, keine Lampe, kein
+      Schalter und kein Bewegungsmelder der App.</p>
     <ul class="net-list zigbee-list">${others.map(zigbeeDeviceHTML).join("")}</ul>
   </article>`;
 }
@@ -3658,7 +3986,7 @@ function renderDevices(el) {   // every device by its kind – new ones come wit
   const bar = `<div class="devices-bar"><div class="subtabs" role="tablist" aria-label="Geräteart">${subtab("heaters", "Heizungen",
       state.heaters.length)}${subtab("sensors", "Raumfühler", (state.sensors || []).length)}${subtab("plugs", "Steckdosen",
       (state.plugs || []).length)}${lamps ? subtab("lights", "Licht", (state.lights || []).length
-      + (state.buttons || []).length) : ""}</div>
+      + (state.buttons || []).length + (state.detectors || []).length) : ""}</div>
     <button class="primary" data-action="add-open">+ Gerät hinzufügen</button></div>`;
   const list = deviceTab === "plugs" ? plugsCardHTML() : deviceTab === "sensors" ? sensorsCardHTML(roomOptions)
     : deviceTab === "lights" ? lightsCardHTML() : heatersCardHTML(roomOptions);
@@ -3696,6 +4024,12 @@ const BUTTON_STEPS = ["Den Schalter zum Anlernen nah an den Pi bringen.",
   "<li><b>Hue Dimmschalter:</b> die Batterieklappe hinten öffnen und die Setup-Taste 10 Sekunden halten, bis das Licht " +
   "rot blinkt.</li></ul>",
   "Warten: Nach etwa einer Minute erscheint er hier."];
+const DETECTOR_STEPS = ["Batterien in den Bewegungsmelder legen und ihn zum Anlernen nah an den Pi bringen.",
+  "Den Melder in den Anlern-Modus bringen:<ul class=\"maker-steps\">" +
+  "<li><b>Hue Bewegungsmelder:</b> die Setup-Taste hinten 3 bis 5 Sekunden halten, bis das Licht rot blinkt. Ein " +
+  "älterer (SML001 – steht hinten drauf): danach die Taste noch einmal halten, bis es orange blinkt.</li>" +
+  "<li><b>IKEA VALLHORN:</b> die Kopplungstaste 4-mal kurz drücken – das rote Licht vorn blinkt.</li></ul>",
+  "Warten: Nach etwa einer Minute erscheint er hier. Ein Hue-Melder blinkt dann grün."];
 const SONOFF_STEPS = ["Die Steckdose in die Wanddose stecken, an der die Heizung hängt, und den Stecker der Heizung in die Steckdose.",
   "Die Taste an der Steckdose 5 Sekunden halten, bis das blaue Licht langsam blinkt.",
   "Warten: Nach etwa einer Minute erscheint sie hier."];
@@ -3715,7 +4049,8 @@ function addKinds() {   // what can be added here: a thermostat only on a Pi wit
     .concat([["sensor", "Raumfühler", "Shelly Pill mit Temperaturfühler – im WLAN"],
              ["plug", "Steckdose", `mit Strommessung, für eine AeroFlow oder ein anderes Gerät – Shelly im WLAN${zig ? " oder SONOFF über Zigbee" : ""}`]])
     .concat(zig ? [["light", "Lampe", "Zigbee-Lampe von Hue, IKEA, Innr und anderen – direkt am Pi, ohne Bridge"],
-                   ["button", "Schalter", "Funk-Schalter für das Licht – IKEA RODRET, Hue Smart Button, Hue Dimmschalter"]] : []);
+                   ["button", "Schalter", "Funk-Schalter für das Licht – IKEA RODRET, Hue Smart Button, Hue Dimmschalter"],
+                   ["detector", "Bewegungsmelder", "schaltet das Licht bei Bewegung – Hue Bewegungsmelder, IKEA VALLHORN"]] : []);
 }
 
 function addStep() {   // 0 … 3 for the steps above the guide
@@ -3760,15 +4095,16 @@ function zigbeeSearchStateHTML() {   // the Zigbee network open for new devices:
 function addZigbeeItemHTML(d) {   // a device that joined: being paired, ready („Weiter“), failed or unknown („Entfernen …“)
   const heater = state.heaters.find(h => h.id === d.ieee), plug = (state.plugs || []).find(p => p.id === d.ieee);
   const lamp = (state.lights || []).find(l => l.id === d.ieee), button = (state.buttons || []).find(b => b.id === d.ieee);
-  const ready = d.interview === "done" && d.supported && !!(heater || plug || lamp || button);
+  const sensor = (state.detectors || []).find(x => x.id === d.ieee);
+  const ready = d.interview === "done" && d.supported && !!(heater || plug || lamp || button || sensor);
   const [dot, words] = zigbeeDeviceState(d);
   const model = [d.vendor, d.model].filter(Boolean).join(" ") || zigbeeKindWord(d);
-  const title = heater ? heater.name : plug ? plug.name : lamp ? lamp.name : button ? button.name : model;
+  const title = heater ? heater.name : plug ? plug.name : lamp ? lamp.name : button ? button.name : sensor ? sensor.name : model;
   const bad = d.interview === "failed" || (d.interview === "done" && !d.supported);
   return `<li data-ieee="${esc(d.ieee)}"><span class="dot ${ready ? "ok" : dot}"></span><span class="hname"><b>${esc(title)}</b>${
       title !== model ? ` <span class="muted">${esc(model)}</span>` : ""}
       <span class="muted zigbee-facts">${esc(ready ? "✓ angelernt" : words)}</span></span>
-    ${ready ? `<button class="small primary" data-action="add-next" data-type="${heater ? "heater" : plug ? "plug" : lamp ? "light" : "button"}">Weiter</button>`
+    ${ready ? `<button class="small primary" data-action="add-next" data-type="${heater ? "heater" : plug ? "plug" : lamp ? "light" : button ? "button" : "detector"}">Weiter</button>`
       : bad ? `<button class="small" data-action="zigbee-forget" ${zigbeeNetPending ? "disabled" : ""}>${
         zigbeeNetPending === d.ieee ? "entferne …" : "Entfernen …"}</button>` : ""}</li>`;
 }
@@ -3796,10 +4132,10 @@ function addFindHTML() {   // steps 2 and 3: the guide and what the search found
         "Die App sucht im Heimnetz. Beim Fühler „Übernehmen“ drücken, dann Name und Raum wählen."])
       + (sensorSearch ? sensorPanelHTML() : "");
   }
-  if (f.kind === "thermostat" || f.kind === "light" || f.kind === "button") {
+  if (["thermostat", "light", "button", "detector"].includes(f.kind)) {
     if (!zigbee) return `<p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p>`;
     return zigbeeReady() ? addZigbeeHTML(f.kind === "light" ? LIGHT_STEPS : f.kind === "button" ? BUTTON_STEPS
-      : THERMOSTAT_STEPS) : zigbeeMissingHTML();
+      : f.kind === "detector" ? DETECTOR_STEPS : THERMOSTAT_STEPS) : zigbeeMissingHTML();
   }
   // a plug: Shelly in the WLAN – and with Zigbee a SONOFF too; both searches run at once
   const zig = state.app && state.app.zigbee;
@@ -3836,6 +4172,20 @@ function addWhereHTML(roomOptions) {   // step 4: the room – for a plug the he
           }${b && !b.direct ? "Diesen Schalter kennt die App nicht genau: Er schaltet über die App, also nur, wenn der Pi läuft."
           : "Nach „Fertig“ einmal eine Taste am Schalter drücken – dann koppelt ihn die App mit den Lampen. Danach schaltet " +
             "er sie direkt, auch wenn der Pi aus ist."}</p>
+      </div>${done}`;
+  }
+  if (w.type === "detector") {
+    const x = (state.detectors || []).find(v => v.id === w.id);
+    return `<p><b>${esc(x ? x.name : "Der Bewegungsmelder")}</b> ist in der App. Wie soll er heißen, und in welchem Raum
+      ist er?</p>
+      <div class="device-form">
+        <label>Name<input data-afield="name" value="${esc(f.name)}" placeholder="${esc(x ? x.name : "")}" maxlength="40"
+          autocomplete="off"></label>
+        <label>Raum<select data-afield="room">${roomOptions(f.room)}</select></label>
+        <label class="check"><input type="checkbox" data-afield="motion" ${f.motion ? "checked" : ""}> Dort das Licht bei
+          Bewegung einschalten</label>
+        <p class="hint">${state.rooms.length ? "" : "Noch kein Raum angelegt – Räume legst du im Tab „Räume“ über „+ Raum“ an. "
+          }Wie hell, wie lange und ob nachts gedämpft, stellst du danach unter „Licht bei Bewegung“ ein.</p>
       </div>${done}`;
   }
   if (w.type === "plug") {
@@ -3931,8 +4281,10 @@ function addWhere(type, id) {   // step 4
   const p = type === "plug" ? (state.plugs || []).find(x => x.id === id) : null;
   const l = type === "light" ? (state.lights || []).find(x => x.id === id) : null;
   const b = type === "button" ? (state.buttons || []).find(x => x.id === id) : null;
+  const x = type === "detector" ? (state.detectors || []).find(v => v.id === id) : null;
   addFlow = Object.assign(addFlow || { kind: type }, { step: "where", where: { type, id }, name: "",
-    room: (h && h.room) || (l && l.room) || (b && b.room) || "", heater: (p && p.heater) || "", appliance: (p && p.appliance) || "sonstiges" });
+    room: (h && h.room) || (l && l.room) || (b && b.room) || (x && x.room) || "", heater: (p && p.heater) || "",
+    appliance: (p && p.appliance) || "sonstiges", motion: true });
   invalidate();
   render();
 }
@@ -3964,6 +4316,24 @@ async function addFinish() {   // „Fertig“: save the room (and a thermostat'
       const saved = f.room ? await setButtonRoom(w.id, f.room, true) : true;
       if (!saved) return;
       if (typeof saved === "string") said = saved;
+    } finally {
+      busy.delete("addflow");
+    }
+    deviceTab = "lights";
+  } else if (w.type === "detector") {   // its name (if one was typed), its room – and the light there by motion
+    busy.add("addflow");
+    render();
+    try {
+      if (String(f.name || "").trim() && !(await renameDetector(w.id, true, String(f.name).trim()))) return;
+      if (f.room && !(await setDetectorRoom(w.id, f.room, true))) return;
+      if (f.room && f.motion) {
+        try {
+          said = (await api("PUT", `api/rooms/${encodeURIComponent(f.room)}/motion`, { on: true })).message;
+        } catch (e) {
+          toast(e.message, true);
+          return;
+        }
+      }
     } finally {
       busy.delete("addflow");
     }
@@ -5034,7 +5404,8 @@ function zigbeeDeviceState(d) {   // [dot, words]
 function plugName(ieee) { return "Steckdose " + ieee.slice(-4).toUpperCase(); }   // as the server names it
 
 function zigbeeKindWord(d) {
-  return d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : d.light ? "Lampe" : d.button ? "Schalter" : "Unbekanntes Gerät";
+  return d.thermostat ? "Thermostat" : d.plug ? "Steckdose" : d.light ? "Lampe" : d.button ? "Schalter"
+    : d.detector ? "Bewegungsmelder" : "Unbekanntes Gerät";
 }
 
 function zigbeeDeviceHTML(d) {
@@ -5091,6 +5462,10 @@ document.addEventListener("click", e => {
   if (e.target.id === "dialog") return closeDialog(null);   // tap next to the dialog = cancel
   if (e.target.id === "history") return closeHistory();     // tap next to the Verlauf = close
   if (e.target.id === "lightsheet") return closeLightSheet();   // … next to „Einstellen“ too
+  if (!e.target.closest("button, a, select, input, label, summary")) {   // a tap on a room's name, or anywhere on a closed
+    const at = e.target.closest("article.tile .tile-head, article.tile.collapsed");   // tile: it opens or closes
+    if (at) return toggleTile(at.closest("article.tile"));
+  }
   const t = e.target.closest("button");
   if (!t || t.disabled) return;
   if (t.dataset.dialogButton !== undefined) return dialogButton(Number(t.dataset.dialogButton));
@@ -5114,6 +5489,8 @@ document.addEventListener("click", e => {
     case "lamp-white": return lampSet(t.closest("[data-light]").dataset.light, { white: t.dataset.white });
     case "lamp-hue": return lampSet(t.closest("[data-light]").dataset.light, { hue: t.dataset.hue });
     case "notice-ok": return noticeOk(t.dataset.notice);
+    case "tile-toggle": return toggleTile(tile);
+    case "tiles-all": return setTilesOpen(homeGroups().map(keyOf), t.dataset.open === "1");
     case "help-start": return helpStart();
     case "help-end": return helpEnd();
     case "logs-save": return logsBusy ? undefined : logsSave();
@@ -5202,6 +5579,8 @@ document.addEventListener("click", e => {
     case "light-rename": return renameLight(t.closest("[data-light]").dataset.light);
     case "light-remove": return removeLight(t.closest("[data-light]").dataset.light);
     case "button-rename": return renameButton(t.closest("[data-button]").dataset.button);
+    case "detector-rename": return renameDetector(t.closest("[data-detector]").dataset.detector);
+    case "detector-remove": return removeDetector(t.closest("[data-detector]").dataset.detector);
     case "button-remove": return removeButton(t.closest("[data-button]").dataset.button);
     case "sensor-search": return sensorSearch && sensorSearch.running ? undefined : runSensorSearch();
     case "sensor-adopt": return openSensorForm(null, t.dataset.pill, Number(t.dataset.channel));
@@ -5277,12 +5656,13 @@ document.addEventListener("change", e => {
   }
   if (t.dataset.cfield === "show" || t.dataset.cfield === "show_power") { editCosts()[t.dataset.cfield] = t.checked; return; }
   if (addFlow && t.dataset.afield) {   // what hangs on a plug, its heater: the heater is asked for only at „Heizung“,
-    addFlow[t.dataset.afield] = t.value;   // the room only without one
+    addFlow[t.dataset.afield] = t.type === "checkbox" ? t.checked : t.value;   // the room only without one
     if (t.dataset.afield === "heater" || t.dataset.afield === "appliance") { t.blur(); render(); }
     return;
   }
   if (deviceForm && t.closest(".device-form")) return updateDeviceForm(t);
   if (roomForm && t.closest(".room-form")) return updateRoomForm(t);
+  if (t.closest("[data-motion-room]")) return motionChange(t);   // „Licht bei Bewegung“
   switch (t.dataset.action) {
     case "room-plan": t.blur(); return assignPlan(t.closest("article.card"), t.value);
     case "heater-room":
@@ -5294,6 +5674,9 @@ document.addEventListener("change", e => {
     case "plug-appliance": return setPlugAppliance(t.closest("[data-plug]").dataset.plug, t.value);
     case "light-room-set": return setLightRoom(t.closest("[data-light]").dataset.light, t.value);
     case "button-room-set": return setButtonRoom(t.closest("[data-button]").dataset.button, t.value);
+    case "detector-room-set": return setDetectorRoom(t.closest("[data-detector]").dataset.detector, t.value);
+    case "detector-sens": t.blur(); return setDetector(t.closest("[data-detector]").dataset.detector, { sensitivity: t.value });
+    case "detector-led": return setDetector(t.closest("[data-detector]").dataset.detector, { led: t.checked });
     case "light-color-set": t.blur(); return setLightColor(t.closest("[data-light]").dataset.light, t.value);
     case "light-level-set": t.blur(); return setLightLevel(t.closest("[data-light]").dataset.light, t.value);
     case "lamp-range":   // let go of a slider: now the lamp gets the value
