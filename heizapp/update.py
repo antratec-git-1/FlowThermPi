@@ -6,7 +6,7 @@ Version; das holt immer den neuesten Stand von GitHub main – genau wie der Ein
 installiert wird, kann die App also nicht bestimmen. Fortschritt und Ergebnis schreibt der Installer
 nach update-status.json.
 
-Den Knopf gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
+Den Knopf gibt es nur, wenn HoLiTherm mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_UPDATE_DIR. Auf GitHub wird nur gefragt, wenn jemand „Nach Updates suchen“ drückt.
 """
 from __future__ import annotations
@@ -80,7 +80,7 @@ class Updater:
 
     # ------------------------------------------------------------------ GitHub
     def _get(self, url: str, headers: dict | None = None) -> bytes:
-        request = urllib.request.Request(url, headers={"User-Agent": f"FlowThermPi/{__version__}", **(headers or {})})
+        request = urllib.request.Request(url, headers={"User-Agent": f"HoLiTherm/{__version__}", **(headers or {})})
         with self._open(request, timeout=15) as res:
             data = res.read(MAX_ANSWER + 1)
         if len(data) > MAX_ANSWER:
@@ -127,7 +127,7 @@ class Updater:
     def start(self) -> dict:
         """Ask the installer for an update; it fetches the newest version from GitHub itself."""
         if not self.supported:
-            raise ActionError("Updates per Knopf gibt es nur, wenn FlowThermPi mit install.py auf dem "
+            raise ActionError("Updates per Knopf gibt es nur, wenn HoLiTherm mit install.py auf dem "
                               "Raspberry Pi eingerichtet ist. Hier bitte von Hand aktualisieren.", 409)
         with self._lock:
             current = self.status()

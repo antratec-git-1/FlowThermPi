@@ -1,4 +1,6 @@
-# FlowThermPi – lokale Steuerung für Thermotec AeroFlow (FlexiSmart Pro)
+# HoLiTherm – lokale Steuerung für Thermotec AeroFlow (FlexiSmart Pro)
+
+<img src="web/logo.jpg" width="300" alt="HoLiTherm-Logo: Licht, Heizung, Power">
 
 Kleine Web-App, die Thermotec-Elektroheizungen mit **FlexiSmart-Pro-Regler** direkt im
 Heimnetz steuert – ohne Cloud, ohne Konto, ohne Zusatzpakete (nur Python-Standardbibliothek). Nur die
@@ -7,6 +9,9 @@ freiwillige [Fernwartung](#fernwartung-tailscale) nutzt Tailscale, und die
 installiert.
 
 Inoffizielles Projekt – kein Produkt von Thermotec und nicht von Thermotec unterstützt.
+
+Bis Version 0.4.25 hieß das Projekt FlowThermPi. Ordner, Dienste und Netznamen auf dem Pi (`flowthermpi`) und
+die Adresse auf GitHub heißen noch so, damit Updates auf vorhandenen Geräten weiter funktionieren.
 
 ## Zwei Ansichten: einfach für Bewohner, Einrichtung mit PIN
 
@@ -207,7 +212,7 @@ Heizungen und per SSH erreichbar. Dann **ein Befehl** per SSH auf dem Pi:
 curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
 ```
 
-Das Skript lädt FlowThermPi von GitHub nach `/opt/flowthermpi`, legt den Dienst `flowthermpi` an
+Das Skript lädt HoLiTherm von GitHub nach `/opt/flowthermpi`, legt den Dienst `flowthermpi` an
 (startet beim Einschalten und nach Absturz oder Stromausfall von selbst), legt die Daten in
 `/var/lib/flowthermpi` an (Heizungsliste mit Tokens nur für den Dienst lesbar), stellt die Zeitzone
 auf Europe/Berlin, falls noch die Werkseinstellung gilt, prüft, ob die App antwortet, und zeigt die
@@ -478,7 +483,7 @@ Thermostat.
 - **Feste Versionen, jede Datei geprüft:** Welche Versionen kommen, steht in `install.py` (`ZIGBEE_PARTS`): für
   Node.js und pnpm mit Prüfsumme, für Zigbee2MQTT mit der Git-Commit-Nummer. Die Bausteine prüft pnpm gegen die
   Prüfsummen im Lockfile von Zigbee2MQTT (`--frozen-lockfile`). Passt etwas nicht, wird nichts installiert. Neue
-  Versionen kommen mit einem Update von FlowThermPi; dann steht unter „Zigbee-Funk“ **Neue Versionen installieren**.
+  Versionen kommen mit einem Update von HoLiTherm; dann steht unter „Zigbee-Funk“ **Neue Versionen installieren**.
 - **Ablauf:** *Einrichtung › Verbindungen › Zigbee-Funk › Zigbee-Programme installieren*. Die Seite zeigt Schritt und Fortschritt; die
   Heizungen heizen weiter, und die Seite darf zu (der Pi macht allein weiter, auch wenn die App neu startet).
   Geschätzt 10 bis 20 Minuten und etwa 200 MB Download – auf einem echten Pi noch nicht gemessen. Klappt etwas nicht,
@@ -495,7 +500,7 @@ Thermostat.
   `/etc/flowthermpi/zigbee2mqtt.env` (nur root; systemd reicht sie beim Start weiter). Die Seite zeigt sie nie.
 - **Entfernen …** (bei den Programmen) hält Zigbee2MQTT an und löscht die Programme und Mosquitto wieder. Ein
   Mosquitto, das schon vorher auf dem Pi war, bleibt und
-  verliert nur die Einstellungen von FlowThermPi. Die Daten von Zigbee2MQTT bleiben, damit angelernte Thermostate nach
+  verliert nur die Einstellungen von HoLiTherm. Die Daten von Zigbee2MQTT bleiben, damit angelernte Thermostate nach
   einer neuen Installation noch verbunden sind. `--uninstall` nimmt die Programme mit; `--uninstall --purge` auch die
   Daten und den Benutzer.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage in ihren Datenordner; der Dienst
@@ -1111,10 +1116,10 @@ echter Melder sich verhält, prüfen die Tests nicht.
 
 Copyright © 2026 antratec
 
-FlowThermPi ist freie Software unter der **GNU General Public License, Version 3**
+HoLiTherm ist freie Software unter der **GNU General Public License, Version 3**
 (siehe [LICENSE](LICENSE)): Sie darf genutzt, verändert und weitergegeben werden – wer eine
 veränderte Version weitergibt, muss deren Quellcode ebenfalls unter dieser Lizenz offenlegen.
-FlowThermPi wird ohne jede Gewährleistung bereitgestellt.
+HoLiTherm wird ohne jede Gewährleistung bereitgestellt.
 
 Die Schrift Atkinson Hyperlegible Next (Braille Institute; lateinischer Teil, von Google Fonts) in `web/fonts/` steht
 unter der SIL Open Font License 1.1 (siehe [web/fonts/OFL.txt](web/fonts/OFL.txt)).

@@ -166,7 +166,7 @@ function watchUpdate() {  // after every refresh; true = the page reloads
   else if (build !== loadedBuild) { location.reload(); return true; }   // new version: load its page and scripts
   if (!updateRun) return false;
   const u = state.update;
-  if (build !== updateRun.from) endUpdateRun(`Update fertig – jetzt läuft FlowThermPi ${state.app.version}.`);
+  if (build !== updateRun.from) endUpdateRun(`Update fertig – jetzt läuft HoLiTherm ${state.app.version}.`);
   else if (u && u.state === "failed") endUpdateRun(`Update fehlgeschlagen: ${u.message || "unbekannter Fehler"}`, true);
   else if (u && u.state === "done") endUpdateRun(u.message || "Update fertig.");
   else if (Date.now() - updateRun.at > UPDATE_MAX_MS)
@@ -192,7 +192,7 @@ async function startUpdate() {
   const latest = updateCheck && updateCheck.result && updateCheck.result.latest;
   const yes = await ask({
     title: "Jetzt aktualisieren?",
-    text: `FlowThermPi holt ${latest ? "Version " + latest.version : "die neueste Version"} von GitHub und startet neu. ` +
+    text: `HoLiTherm holt ${latest ? "Version " + latest.version : "die neueste Version"} von GitHub und startet neu. ` +
       "Das dauert meist ein bis zwei Minuten, die Heizungen heizen in der Zeit ganz normal weiter. " +
       "Danach lädt diese Seite von selbst neu.",
     buttons: [{ label: "Abbrechen", value: null }, { label: "Jetzt aktualisieren", value: "yes", cls: "primary" }],
@@ -236,7 +236,7 @@ function updateCardHTML(app) {
         ${l.message ? `<p class="muted">„${esc(l.message)}“</p>` : ""}
         ${app.updates ? `<button class="primary" data-action="update-start">Jetzt aktualisieren</button>`
           : `<p class="muted">Auf diesem Gerät gibt es keinen Update-Knopf. Den gibt es auf dem Raspberry Pi,
-              wenn FlowThermPi mit dem Installationsbefehl eingerichtet ist (Anleitung im Quellcode).</p>`}
+              wenn HoLiTherm mit dem Installationsbefehl eingerichtet ist (Anleitung im Quellcode).</p>`}
       </div>` : `<button data-action="update-check">Nach Updates suchen</button>`}`;
   }
   return `<div class="card about updates">
@@ -393,7 +393,7 @@ function renderConnections(el) {   // sub-tabs Heimnetz · Zigbee-Funk · Fernwa
 function renderAbout(el) {  // "Über": logo, what the app does, version, licence, source code
   const app = state.app || {};
   setHTML(el, `<div class="card about">
-    <img class="about-logo" src="logo.jpg" width="800" height="706" alt="FlowThermPi-Logo">
+    <img class="about-logo" src="logo.jpg" width="800" height="800" alt="HoLiTherm-Logo">
     <p class="about-lead"><b>${esc(app.name)}</b> steuert Thermotec-Heizungen (AeroFlow mit FlexiSmart-Pro-Regler)
       direkt im eigenen WLAN – ohne Cloud und ohne Konto beim Hersteller. Alle Daten bleiben im Haus.</p>
     <dl class="about-facts">
@@ -402,7 +402,7 @@ function renderAbout(el) {  // "Über": logo, what the app does, version, licenc
       <dt>Lizenz</dt><dd>${esc(app.license)} – freie Software, ${esc(app.copyright)}</dd>
       <dt>Quellcode</dt><dd><a href="${esc(app.repo)}" target="_blank" rel="noopener">${esc(String(app.repo).replace(/^https:\/\//, ""))}</a></dd>
     </dl>
-    <p class="muted">FlowThermPi ist ein unabhängiges Projekt und kein Produkt der Thermotec AG.</p>
+    <p class="muted">HoLiTherm ist ein unabhängiges Projekt und kein Produkt der Thermotec AG.</p>
   </div>
   ${updateCardHTML(app)}
   ${logsCardHTML()}`);
@@ -5021,7 +5021,7 @@ function wifiNetworksHTML(w) {
 function wifiHTML() {   // „Verbindungen“ › „Heimnetz“: the Pi's own WLAN
   const w = wifi;
   if (!w) return `<div class="card"><p class="${wifiError ? "error-text" : "searching"}">${esc(wifiError || "Frage den Pi …")}</p></div>`;
-  if (!w.supported) return `<div class="card"><p>Das WLAN lässt sich hier nur einrichten, wenn FlowThermPi mit dem
+  if (!w.supported) return `<div class="card"><p>Das WLAN lässt sich hier nur einrichten, wenn HoLiTherm mit dem
     Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
   return wifiStatusHTML(w) + wifiNetworksHTML(w);
 }
@@ -5262,7 +5262,7 @@ function remoteAboutHTML(r) {
 function remoteHTML() {   // „Verbindungen“ › „Fernwartung“
   const r = remote;
   if (!r) return `<div class="card"><p class="${remoteError ? "error-text" : "searching"}">${esc(remoteError || "Frage den Pi …")}</p></div>`;
-  if (!r.supported) return `<div class="card"><p>Fernwartung gibt es nur, wenn FlowThermPi mit dem
+  if (!r.supported) return `<div class="card"><p>Fernwartung gibt es nur, wenn HoLiTherm mit dem
     Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
   return remoteStatusHTML(r) + remoteLoginHTML(r) + remoteModeHTML(r) + remoteAboutHTML(r);
 }
@@ -5636,15 +5636,15 @@ function zigbeeAboutHTML() {
       <li><b>Mosquitto</b> reicht die Nachrichten zwischen Zigbee2MQTT und dieser App weiter – nur hier auf dem Pi, mit Passwort.</li>
       <li><b>Node.js</b> – darauf läuft Zigbee2MQTT.</li>
     </ul>
-    <p class="hint">Welche Versionen der Pi lädt, legt die jeweilige Version von FlowThermPi fest, und er prüft jede Datei.
-      Nach einem Update von FlowThermPi kann hier deshalb „Neue Versionen installieren“ erscheinen.</p>
+    <p class="hint">Welche Versionen der Pi lädt, legt die jeweilige Version von HoLiTherm fest, und er prüft jede Datei.
+      Nach einem Update von HoLiTherm kann hier deshalb „Neue Versionen installieren“ erscheinen.</p>
   </div>`;
 }
 
 function zigbeeHTML() {   // „Verbindungen“ › „Zigbee-Funk“: programs, stick, channel – the devices are under „Geräte“
   const z = zigbee;
   if (!z) return `<div class="card"><p class="${zigbeeError ? "error-text" : "searching"}">${esc(zigbeeError || "Frage den Pi …")}</p></div>`;
-  if (!z.supported) return `<div class="card"><p>Zigbee gibt es nur, wenn FlowThermPi mit dem
+  if (!z.supported) return `<div class="card"><p>Zigbee gibt es nur, wenn HoLiTherm mit dem
     Installationsbefehl auf dem Raspberry Pi läuft.</p></div>`;
   return zigbeeStatusHTML(z) + zigbeeNetHTML(z) + zigbeeAboutHTML();
 }

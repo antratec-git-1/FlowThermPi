@@ -708,7 +708,7 @@ class UnpackTest(unittest.TestCase):
 
 
 class InstallerTest(InstallBase):
-    """The installer of FlowThermPi sets up what the button needs – and installs nothing of Zigbee by itself."""
+    """The installer of HoLiTherm sets up what the button needs – and installs nothing of Zigbee by itself."""
 
     def test_fresh_install_has_the_zigbee_units(self):
         system, _ = self.run_install()
@@ -855,7 +855,7 @@ class ZigbeeAppTest(AppBase):
         self.start_service()
         self.zigbee.install()
         self.view_when(lambda v: v["job"]["phase"] == "dependencies")
-        again = self.make_zigbee()          # the app after its restart (e.g. an update of FlowThermPi)
+        again = self.make_zigbee()          # the app after its restart (e.g. an update of HoLiTherm)
         self.assertEqual((again.view()["job"]["state"], again.view()["busy"]), ("running", "install"))
         again.start()
         self.zigbee = again

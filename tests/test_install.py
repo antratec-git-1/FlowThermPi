@@ -78,7 +78,7 @@ class InstallTest(Base):
         self.assertIn("systemctl enable --now flowthermpi-remote.path", commands)
         self.assertIn("systemctl restart flowthermpi", commands)
         self.assertFalse([c for c in commands if "tailscale" in c or "apt" in c])   # Tailscale only when asked for
-        self.assertIn("FlowThermPi 1.2.3 läuft", out)
+        self.assertIn("HoLiTherm 1.2.3 läuft", out)
         info = json.loads((current / "release.json").read_text())
         self.assertEqual((info["version"], info["commit"], info["ref"]), ("1.2.3", None, None))  # local folder
 
@@ -232,7 +232,7 @@ class UpdateFromAppTest(Base):
         self.assertTrue(status["finished"])
         info = json.loads(self.path("/opt/flowthermpi/current/release.json").read_text())
         self.assertEqual((info["version"], info["commit"]), ("1.3.0", "b" * 40))
-        self.assertIn("FlowThermPi 1.3.0 läuft", out)        # the new version's installer did the work
+        self.assertIn("HoLiTherm 1.3.0 läuft", out)        # the new version's installer did the work
 
     def test_same_commit_is_not_installed_again(self):
         self.github = ("a" * 40, None)

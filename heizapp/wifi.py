@@ -6,7 +6,7 @@ flowthermpi-wifi.path startet daraufhin als root „install.py --wifi“. Das pr
 löscht sie sofort (sie kann das WLAN-Passwort enthalten), spricht mit NetworkManager und schreibt das
 Ergebnis samt Zustand von Kabel und WLAN nach wifi-status.json – ohne Passwort.
 
-Den Reiter gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
+Den Reiter gibt es nur, wenn HoLiTherm mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_WIFI_DIR.
 """
 from __future__ import annotations
@@ -204,7 +204,7 @@ class Wifi:
     # ------------------------------------------------------------------ talking to the WLAN service
     def _begin(self, action: str, request: dict, job: dict | None = None) -> str:
         if not self.supported:
-            raise ActionError("WLAN einrichten geht nur, wenn FlowThermPi mit dem Installationsbefehl auf dem "
+            raise ActionError("WLAN einrichten geht nur, wenn HoLiTherm mit dem Installationsbefehl auf dem "
                               "Raspberry Pi eingerichtet ist.", 409)
         rid = secrets.token_hex(8)
         with self._lock:

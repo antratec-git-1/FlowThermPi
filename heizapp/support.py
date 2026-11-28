@@ -14,7 +14,7 @@ und Geräten, Adressen im Heimnetz und WLAN-Namen sind darin – darauf weist de
 
 Die Systemprotokolle darf die App nicht selbst lesen. Sie legt logs-request.json in ihren Datenordner,
 flowthermpi-logs.path startet daraufhin als root „install.py --logs“. Das schreibt system-log.txt (nur für die App
-lesbar) und logs-status.json. Diesen Teil gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist (dessen
+lesbar) und logs-status.json. Diesen Teil gibt es nur, wenn HoLiTherm mit install.py eingerichtet ist (dessen
 systemd-Unit setzt HEIZAPP_SYSLOG_DIR) – sonst steht in system.txt, warum er fehlt.
 
 Danach kann die Seite eine E-Mail an den Helfer vorbereiten (mailto:). Die Adresse trägt er in der Einrichtung ein; die
@@ -141,7 +141,7 @@ class SystemLog:
     def collect(self) -> tuple[str | None, str | None]:
         """(the system logs, None) – or (None, why they are missing)."""
         if not self.supported:
-            return None, ("FlowThermPi ist hier nicht mit dem Installationsbefehl auf einem Raspberry Pi eingerichtet "
+            return None, ("HoLiTherm ist hier nicht mit dem Installationsbefehl auf einem Raspberry Pi eingerichtet "
                           "(z. B. auf dem Mac oder in Docker) – dann sammelt die App keine Systemprotokolle.")
         with self._lock:
             if self._cache and time.monotonic() - self._cache[0] < CACHE:
@@ -337,7 +337,7 @@ class Support:
             started = time.monotonic()
             system, missing = self.syslog.collect()
             now = _now()
-            name = f"flowthermpi-protokoll-{self._device()}-{now:%Y%m%d-%H%M}.zip"
+            name = f"holitherm-protokoll-{self._device()}-{now:%Y%m%d-%H%M}.zip"
             data = self._zip(now, system, missing, local)
             fid = secrets.token_hex(8)
             with self._lock:

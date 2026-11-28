@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Startet FlowThermPi, die lokale Web-App für Thermotec-Heizungen.
+"""Startet HoLiTherm, die lokale Web-App für Thermotec-Heizungen.
 
     python3 run.py                      # nur auf diesem Rechner: http://127.0.0.1:8080
     python3 run.py --host 0.0.0.0       # im ganzen Heimnetz erreichbar (dann Passwort setzen!)

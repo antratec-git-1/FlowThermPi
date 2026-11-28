@@ -1,6 +1,6 @@
 """Protokoll der App: eine Datei im Datenordner, die Bewohner dem Helfer schicken können, wenn etwas schiefgeht.
 
-FlowThermPi schreibt alles Wichtige nach <Ordner von data.json>/logs/flowthermpi.log (auf dem Pi
+HoLiTherm schreibt alles Wichtige nach <Ordner von data.json>/logs/flowthermpi.log (auf dem Pi
 /var/lib/flowthermpi/data/logs) und wie bisher auf die Konsole, auf dem Pi also ins Journal. Ist die Datei 2 MB groß,
 wird sie zu flowthermpi.log.1; neun ältere bleiben, zusammen höchstens etwa 20 MB. Jede Zeile beginnt mit Datum,
 Uhrzeit und dem Teil der App, aus dem sie kommt.

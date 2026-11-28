@@ -119,11 +119,11 @@ class LogFileTest(LogBase):
 
     def test_each_line_says_when_how_bad_and_where(self):
         logging.getLogger("heizapp.service").warning("Heizung Bad antwortet nicht")
-        logging.getLogger("heizapp").info("FlowThermPi startet")
+        logging.getLogger("heizapp").info("HoLiTherm startet")
         lines = logs.read_all().splitlines()
         stamp = r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [+-]\d{4} "
         self.assertRegex(lines[-2], stamp + r"WARNING service  Heizung Bad antwortet nicht$")
-        self.assertRegex(lines[-1], stamp + r"INFO {4}app {6}FlowThermPi startet$")
+        self.assertRegex(lines[-1], stamp + r"INFO {4}app {6}HoLiTherm startet$")
         self.assertEqual(self.file, self.folder / "flowthermpi.log")
         self.assertEqual(oct(self.folder.stat().st_mode & 0o777), "0o700")
 
@@ -251,7 +251,7 @@ class SupportApiTest(LogBase):
         self.cookie = None                                    # the residents have no PIN
         logging.getLogger("heizapp.device").warning("Antwort auf Json?token=%s war 4.01 – Token %s", TOKEN, TOKEN)
         made = self.call("POST", "/api/logs/prepare")
-        self.assertRegex(made["name"], r"^flowthermpi-protokoll-[A-Za-z0-9-]+-\d{8}-\d{4}\.zip$")
+        self.assertRegex(made["name"], r"^holitherm-protokoll-[A-Za-z0-9-]+-\d{8}-\d{4}\.zip$")
         self.assertEqual((made["system"], made["mail"]), (False, None))
         self.assertIn("nicht mit dem Installationsbefehl", made["missing"])
         files = self.download(made)
@@ -284,7 +284,7 @@ class SupportApiTest(LogBase):
         self.assertEqual(self.call("GET", "/api/state")["logs"]["email"], "helfer@beispiel.de")   # the residents' view
         made = self.call("POST", "/api/logs/prepare")
         self.assertEqual(made["mail"]["to"], "helfer@beispiel.de")
-        self.assertRegex(made["mail"]["subject"], r"^FlowThermPi-Protokoll \S+ vom \d\d\.\d\d\.\d{4} \d\d:\d\d$")
+        self.assertRegex(made["mail"]["subject"], r"^HoLiTherm-Protokoll \S+ vom \d\d\.\d\d\.\d{4} \d\d:\d\d$")
         self.assertIn(made["name"], made["mail"]["body"])
         self.cookie = unlocked
         self.assertIsNone(self.call("PUT", "/api/logs/settings", {"email": ""})["logs"]["email"])
@@ -488,7 +488,7 @@ class LogsFromAppTest(SystemLogBase):
         self.assertIn("mit ••• abgelehnt", report)
         self.assertIn("Client flowthermpi (•••) abgelehnt", report)
         self.assertIn("device (wlan0): Activation: successful", report)          # the rest stays readable
-        self.assertTrue(report.startswith("FlowThermPi – Systemprotokolle vom "))
+        self.assertTrue(report.startswith("HoLiTherm – Systemprotokolle vom "))
         self.assertIn("Raspberry Pi 4 Model B Rev 1.5", report)
         self.assertIn("1 Tg. 1 Std. 1 Min. (Last 0.15 0.10 0.05)", report)
         self.assertIn("2941 von 3793 MB frei", report)
@@ -545,7 +545,7 @@ class LogsFromAppTest(SystemLogBase):
             self.assertEqual(self.ask()["state"], "done")
         report = self.report()
         self.assertLess(len(report.encode()), (64 << 10) + 100)
-        self.assertTrue(report.startswith("FlowThermPi – Systemprotokolle vom "))   # the overview stays …
+        self.assertTrue(report.startswith("HoLiTherm – Systemprotokolle vom "))   # the overview stays …
         self.assertIn("… (zu lang – hier gekürzt) …", report)
         self.assertTrue(report.rstrip().endswith("Zeile 019999 " + "x" * 40))      # … and the newest lines
 

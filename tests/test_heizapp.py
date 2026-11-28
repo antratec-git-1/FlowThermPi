@@ -586,8 +586,8 @@ class ApiTest(unittest.TestCase):
         heater = next(h for h in self.call("GET", "/api/state")["heaters"] if h["id"] == "92220002")
         self.assertFalse(heater["online"])
         with urllib.request.urlopen(self.base + "/", timeout=5) as res:
-            self.assertIn(b"<title>FlowThermPi</title>", res.read())
-            self.assertTrue(res.headers["Server"].startswith("FlowThermPi/"))
+            self.assertIn(b"<title>HoLiTherm</title>", res.read())
+            self.assertTrue(res.headers["Server"].startswith("HoLiTherm/"))
         self.call("GET", "/api/nope", expect=404)
 
     def test_app_icon_is_served(self):
@@ -1000,7 +1000,7 @@ class ApiTest(unittest.TestCase):
 
     def test_state_names_the_app(self):
         app = self.call("GET", "/api/state")["app"]
-        self.assertEqual((app["name"], app["license"]), ("FlowThermPi", "GPL-3.0"))
+        self.assertEqual((app["name"], app["license"]), ("HoLiTherm", "GPL-3.0"))
         self.assertIn("antratec", app["copyright"])
         self.assertRegex(app["version"], r"^\d+\.\d+\.\d+$")
 

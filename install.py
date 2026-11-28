@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FlowThermPi auf einem Raspberry Pi einrichten oder aktualisieren – ein Befehl per SSH:
+"""HoLiTherm auf einem Raspberry Pi einrichten oder aktualisieren – ein Befehl per SSH:
 
     curl -fsSL https://raw.githubusercontent.com/antratec-git-1/FlowThermPi/main/install.py | sudo python3 -
 
@@ -10,7 +10,7 @@ Zigbee-Thermostate: Einrichtung › Zigbee – auch deren Zusatzprogramme erst, 
 Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi und
 bleiben bei Updates erhalten.
 
-Dieses Skript ist der einzige Teil von FlowThermPi, der als root läuft – auch für den Update-Knopf
+Dieses Skript ist der einzige Teil von HoLiTherm, der als root läuft – auch für den Update-Knopf
 (--from-app), die WLAN-Einrichtung (--wifi), die Fernwartung (--remote), die Zigbee-Programme
 (--zigbee) und die Systemprotokolle für „Protokoll speichern“ (--logs). Die App selbst hat keine
 Rechte am System.
@@ -133,7 +133,7 @@ SECRET_PATTERNS = (
 THROTTLED = {0: "Unterspannung jetzt", 1: "Takt begrenzt jetzt", 2: "gedrosselt jetzt", 3: "Temperaturgrenze jetzt",
              16: "Unterspannung seit dem Start", 17: "Takt begrenzt seit dem Start", 18: "gedrosselt seit dem Start",
              19: "Temperaturgrenze seit dem Start"}   # bits of „vcgencmd get_throttled“
-# What „Installieren“ puts on the Pi: fixed for each version of FlowThermPi and checked after every download.
+# What „Installieren“ puts on the Pi: fixed for each version of HoLiTherm and checked after every download.
 ZIGBEE_PARTS = {
     "node": {"version": "24.22.3",       # Node.js 24 (LTS); Zigbee2MQTT 2.14 asks for ^22.2.0 || ^24
              "sha256": {"arm64": "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
@@ -170,7 +170,7 @@ UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Eigene Einstellungen (z. B. HEIZAPP_PASSWORD=…) gehören nach /etc/default/{name}.
 [Unit]
-Description=FlowThermPi – lokale Heizungssteuerung
+Description=HoLiTherm – lokale Heizungssteuerung
 Wants=network-online.target
 After=network-online.target time-sync.target
 
@@ -212,7 +212,7 @@ UPDATE_UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Holt die neueste Version von GitHub, wenn die App darum bittet (Knopf „Jetzt aktualisieren“).
 [Unit]
-Description=FlowThermPi – Update von GitHub
+Description=HoLiTherm – Update von GitHub
 Wants=network-online.target
 After=network-online.target
 
@@ -226,7 +226,7 @@ UPDATE_PATH_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Startet {name}-update.service, sobald die App eine Update-Anfrage ablegt.
 [Unit]
-Description=FlowThermPi – wartet auf den Update-Knopf der App
+Description=HoLiTherm – wartet auf den Update-Knopf der App
 
 [Path]
 PathExists={data}/{request}
@@ -241,7 +241,7 @@ WIFI_UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Richtet das WLAN ein, wenn die App darum bittet (Einrichtung › WLAN).
 [Unit]
-Description=FlowThermPi – WLAN einrichten
+Description=HoLiTherm – WLAN einrichten
 After=NetworkManager.service
 
 [Service]
@@ -254,7 +254,7 @@ WIFI_PATH_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Startet {name}-wifi.service, sobald die App eine WLAN-Anfrage ablegt.
 [Unit]
-Description=FlowThermPi – wartet auf WLAN-Anfragen der App
+Description=HoLiTherm – wartet auf WLAN-Anfragen der App
 
 [Path]
 PathExists={data}/{wifi_request}
@@ -268,7 +268,7 @@ REMOTE_UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Fernwartung mit Tailscale, wenn die App darum bittet (Einrichtung › Fernwartung).
 [Unit]
-Description=FlowThermPi – Fernwartung (Tailscale)
+Description=HoLiTherm – Fernwartung (Tailscale)
 Wants=network-online.target
 After=network-online.target
 # while a login is open the app asks every few seconds – more often than systemd allows by default
@@ -285,7 +285,7 @@ REMOTE_PATH_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Startet {name}-remote.service, sobald die App eine Anfrage zur Fernwartung ablegt.
 [Unit]
-Description=FlowThermPi – wartet auf Anfragen der App zur Fernwartung
+Description=HoLiTherm – wartet auf Anfragen der App zur Fernwartung
 
 [Path]
 PathExists={data}/{remote_request}
@@ -296,7 +296,7 @@ WantedBy=multi-user.target
 """
 
 TAILSCALE_SOURCE_TEMPLATE = """\
-# Tailscale – eingerichtet von FlowThermPi (Einrichtung › Fernwartung)
+# Tailscale – eingerichtet von HoLiTherm (Einrichtung › Fernwartung)
 deb [signed-by={keyring}] {packages}/{distro} {codename} main
 """
 
@@ -304,7 +304,7 @@ ZIGBEE_UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Installiert oder entfernt die Zigbee-Programme, wenn die App darum bittet (Einrichtung › Zigbee).
 [Unit]
-Description=FlowThermPi – Zigbee-Programme
+Description=HoLiTherm – Zigbee-Programme
 Wants=network-online.target
 After=network-online.target
 # „Neu prüfen“ several times in a row must not lock the service (and with it the path unit) – systemd's
@@ -326,7 +326,7 @@ ZIGBEE_PATH_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Startet {name}-zigbee.service, sobald die App eine Anfrage zu den Zigbee-Programmen ablegt.
 [Unit]
-Description=FlowThermPi – wartet auf Anfragen der App zu Zigbee
+Description=HoLiTherm – wartet auf Anfragen der App zu Zigbee
 
 [Path]
 PathExists={data}/{zigbee_request}
@@ -340,7 +340,7 @@ LOGS_UNIT_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Sammelt die Systemprotokolle für „Protokoll speichern“ in der App – ohne Passwörter, Tokens und Anmelde-Links.
 [Unit]
-Description=FlowThermPi – Systemprotokolle sammeln
+Description=HoLiTherm – Systemprotokolle sammeln
 # „Protokoll speichern“ several times in a row must not lock the service (and with it the path unit)
 StartLimitIntervalSec=60
 StartLimitBurst=30
@@ -356,7 +356,7 @@ LOGS_PATH_TEMPLATE = """\
 # Geschrieben von install.py – wird bei jedem Update neu geschrieben.
 # Startet {name}-logs.service, sobald die App um die Systemprotokolle bittet.
 [Unit]
-Description=FlowThermPi – wartet auf „Protokoll speichern“ in der App
+Description=HoLiTherm – wartet auf „Protokoll speichern“ in der App
 
 [Path]
 PathExists={data}/{logs_request}
@@ -367,7 +367,7 @@ WantedBy=multi-user.target
 """
 
 MOSQUITTO_TEMPLATE = """\
-# Geschrieben von FlowThermPi (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
+# Geschrieben von HoLiTherm (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
 # Nur auf diesem Pi erreichbar und nur mit Passwort (eins für die App, eins für Zigbee2MQTT).
 listener {port} 127.0.0.1
 allow_anonymous false
@@ -375,7 +375,7 @@ password_file {passwd}
 """
 
 ZIGBEE_ENV_TEMPLATE = """\
-# Geschrieben von FlowThermPi (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
+# Geschrieben von HoLiTherm (Einrichtung › Zigbee) – wird bei jeder Installation neu geschrieben.
 # Anmeldung von Zigbee2MQTT bei Mosquitto. Nur root kann diese Datei lesen.
 ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://127.0.0.1:{port}
 ZIGBEE2MQTT_CONFIG_MQTT_USER={user}
@@ -387,7 +387,7 @@ ZIGBEE2MQTT_UNIT_TEMPLATE = """\
 # Geschrieben von install.py (Einrichtung › Zigbee) – wird bei jedem Update neu geschrieben.
 # Zigbee2MQTT: spricht über den USB-Stick mit den Thermostaten und über Mosquitto mit der App.
 [Unit]
-Description=FlowThermPi – Zigbee2MQTT (Thermostate)
+Description=HoLiTherm – Zigbee2MQTT (Thermostate)
 Wants=mosquitto.service
 After=mosquitto.service network-online.target
 # without the stick it fails at every start: systemd stops trying after a while, the app shows why
@@ -401,7 +401,7 @@ SupplementaryGroups=dialout
 WorkingDirectory={base}/zigbee2mqtt
 Environment=NODE_ENV=production NO_COLOR=1 FORCE_COLOR=0
 Environment=ZIGBEE2MQTT_DATA={data}
-# no setup pages of its own: FlowThermPi has written its settings
+# no setup pages of its own: HoLiTherm has written its settings
 Environment=Z2M_ONBOARD_NO_SERVER=1
 Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT={port}
 EnvironmentFile={env}
@@ -428,7 +428,7 @@ WantedBy=multi-user.target
 # Written once, at „Zigbee einrichten“. Zigbee2MQTT rewrites the file at every start (without these comments) and puts
 # a random network key and network numbers in place of GENERATE – its own defaults are the same for everybody.
 ZIGBEE2MQTT_CONFIG_TEMPLATE = """\
-# Geschrieben von FlowThermPi (Einrichtung › Zigbee). Zigbee2MQTT schreibt diese Datei beim Start selbst neu und
+# Geschrieben von HoLiTherm (Einrichtung › Zigbee). Zigbee2MQTT schreibt diese Datei beim Start selbst neu und
 # ergänzt dabei einen zufälligen Netzwerkschlüssel – bitte nicht von Hand ändern.
 version: 5
 mqtt:
@@ -613,7 +613,7 @@ class DryRun(System):
 def download(ref: str, tmp: Path) -> tuple[Path, str | None]:
     """Program folder and Git commit of ref (GitHub writes the commit into the archive)."""
     url = f"https://codeload.github.com/{REPO}/tar.gz/{ref}"
-    say(f"• Lade FlowThermPi ({ref}) von GitHub …")
+    say(f"• Lade HoLiTherm ({ref}) von GitHub …")
     error: Exception | None = None
     for attempt in range(1, 4):
         try:
@@ -657,7 +657,7 @@ def extract(archive: Path, dest: Path) -> tuple[Path, str | None]:
 def program_version(src: Path) -> str:
     init = src / "heizapp" / "__init__.py"
     if not (src / "run.py").is_file() or not init.is_file():
-        raise InstallError(f"In {src} liegt kein FlowThermPi (run.py und heizapp/ fehlen).")
+        raise InstallError(f"In {src} liegt kein HoLiTherm (run.py und heizapp/ fehlen).")
     found = re.search(r'^__version__\s*=\s*"([^"]+)"', init.read_text(encoding="utf-8"), re.M)
     return found.group(1) if found else "unbekannt"
 
@@ -935,7 +935,7 @@ def check_host() -> None:
     if os.geteuid() != 0:
         raise InstallError("Bitte mit sudo starten:  … | sudo python3 -")
     if not os.path.isdir("/run/systemd/system"):
-        raise InstallError("systemd fehlt – FlowThermPi braucht Raspberry Pi OS oder ein anderes Linux mit systemd.")
+        raise InstallError("systemd fehlt – HoLiTherm braucht Raspberry Pi OS oder ein anderes Linux mit systemd.")
 
 
 def install(args: argparse.Namespace, system: System) -> None:
@@ -945,7 +945,7 @@ def install(args: argparse.Namespace, system: System) -> None:
         raise InstallError("--commit: 40 Zeichen 0-9/a-f erwartet.")
     with install_lock(app):
         update = (app / "current").is_symlink()
-        say(f"FlowThermPi – {'Update' if update else 'Einrichtung'}")
+        say(f"HoLiTherm – {'Update' if update else 'Einrichtung'}")
 
         with tempfile.TemporaryDirectory(prefix="flowthermpi-") as tmp:
             if args.source:
@@ -955,7 +955,7 @@ def install(args: argparse.Namespace, system: System) -> None:
             version = program_version(src)
             release = copy_release(src, app / "releases", version)
             write_release_info(release, version, commit, args.ref if commit or not args.source else None)
-        say(f"• Programm FlowThermPi {version}{f' ({commit[:7]})' if commit else ''} nach {APP_DIR} kopiert")
+        say(f"• Programm HoLiTherm {version}{f' ({commit[:7]})' if commit else ''} nach {APP_DIR} kopiert")
 
         if not system.user_exists():
             system.run("useradd", "--system", "--user-group", "--home-dir", DATA_DIR, "--no-create-home",
@@ -985,7 +985,7 @@ def install(args: argparse.Namespace, system: System) -> None:
             system.run("systemctl", "try-restart", ZIGBEE_SERVICE, check=False)
 
         if system.live:
-            say("• Starte FlowThermPi …")
+            say("• Starte HoLiTherm …")
             if wait_until_up(port) is None:
                 say(system.run("journalctl", "-u", NAME, "-n", "25", "--no-pager", check=False))
                 if previous is not None:
@@ -993,13 +993,13 @@ def install(args: argparse.Namespace, system: System) -> None:
                     system.run("systemctl", "restart", NAME, check=False)
                     shutil.rmtree(release, ignore_errors=True)
                     raise InstallError("Die neue Version startet nicht – die vorherige läuft wieder (Meldungen oben).")
-                raise InstallError("FlowThermPi startet nicht (Meldungen oben).")
+                raise InstallError("HoLiTherm startet nicht (Meldungen oben).")
         prune(app)
 
     suffix = "" if port == 80 else f":{port}"
     address = own_address()
     say("")
-    say(f"✓ FlowThermPi {version} läuft.")
+    say(f"✓ HoLiTherm {version} läuft.")
     say(f"  Öffnen im Heimnetz:  http://{socket.gethostname().split('.')[0]}.local{suffix}"
         + (f"   oder   http://{address}{suffix}" if address else ""))
     say("  Update später:       in der App unter Einrichtung › Über – oder diesen Befehl noch einmal")
@@ -1738,7 +1738,7 @@ def remote_from_app(args: argparse.Namespace, system: System) -> None:
 # SONOFF's Zigbee thermostats need three extra programs on the Pi: Mosquitto (passes the messages between Zigbee2MQTT
 # and the app; from Debian's own archive), Node.js and Zigbee2MQTT (which talks to the Zigbee USB stick). The app
 # places {data}/zigbee-request.json with nothing but one of ZIGBEE_ACTIONS, and flowthermpi-zigbee.path runs
-# „install.py --zigbee“ as root. What gets installed is fixed in ZIGBEE_PARTS for each version of FlowThermPi – the app
+# „install.py --zigbee“ as root. What gets installed is fixed in ZIGBEE_PARTS for each version of HoLiTherm – the app
 # cannot choose – and every download is checked: Node.js and pnpm against their checksums, Zigbee2MQTT against its Git
 # commit, its building blocks against the checksums in its own lockfile (pnpm install --frozen-lockfile). Zigbee2MQTT
 # is built (and later run) by its own user, never by root. Mosquitto listens only on this Pi and only with a password
@@ -1873,7 +1873,7 @@ def zigbee_data(root: Path, system: System | None = None) -> int | None:
 
 
 def zigbee_config(folder: int) -> dict | None:
-    """What FlowThermPi needs from configuration.yaml – radio channel, stick, network key –, read line by line: we and
+    """What HoLiTherm needs from configuration.yaml – radio channel, stick, network key –, read line by line: we and
     Zigbee2MQTT write it in YAML's block style. None if there is none."""
     text = read_private(folder, ZIGBEE_CONFIG)
     if text is None:
@@ -1961,7 +1961,7 @@ def fetch_file(url: str, dest: Path, report=None, limit: int = 300 << 20) -> Non
 
 
 def check_digest(path: Path, algorithm: str, expected: str, url: str) -> None:
-    """The file is exactly the one this version of FlowThermPi expects – otherwise it is deleted, nothing is installed."""
+    """The file is exactly the one this version of HoLiTherm expects – otherwise it is deleted, nothing is installed."""
     digest = hashlib.new(algorithm)
     with open(path, "rb") as fh:
         while chunk := fh.read(1 << 20):
@@ -2258,7 +2258,7 @@ def prune_zigbee(base: Path) -> None:
 
 
 def zigbee_install(system: System, root: Path, folder: int, status: dict, report) -> None:
-    """„Installieren“: everything in ZIGBEE_PARTS that is not there yet – also after an update of FlowThermPi that
+    """„Installieren“: everything in ZIGBEE_PARTS that is not there yet – also after an update of HoLiTherm that
     brings newer versions. A step that fails leaves what worked before as it was."""
     base = root / ZIGBEE_DIR.lstrip("/")
 
@@ -2404,7 +2404,7 @@ def write_zigbee2mqtt_unit(root: Path, port: str) -> bool:
 
 
 def refresh_zigbee2mqtt_unit(root: Path) -> bool:
-    """At an update of FlowThermPi: Zigbee2MQTT's service – if it is set up – from this version's template."""
+    """At an update of HoLiTherm: Zigbee2MQTT's service – if it is set up – from this version's template."""
     port = zigbee2mqtt_unit_port(root)
     return port is not None and write_zigbee2mqtt_unit(root, port)
 
@@ -2530,7 +2530,7 @@ def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
 
 # ---------------------------------------------------------------------- „Protokoll speichern“
 # The app may not read the system's journal: it places {data}/logs-request.json and flowthermpi-logs.path runs
-# „install.py --logs“ as root. That collects the journal of the last week (FlowThermPi's services, Zigbee2MQTT,
+# „install.py --logs“ as root. That collects the journal of the last week (HoLiTherm's services, Zigbee2MQTT,
 # Mosquitto, the network, Tailscale, the kernel) and the Pi's state – voltage, temperature, memory, SD card,
 # restarts – and writes it to {data}/system-log.txt, readable only by the app. Every secret root can find (the
 # heaters' tokens, WLAN passwords, the MQTT logins, the app's password) and everything that looks like one is
@@ -2653,7 +2653,7 @@ def system_overview(system: System, root: Path) -> list[str]:
     lines.append(f"Spannung:         {throttled(volts) if volts else 'vcgencmd nicht verfügbar'}")
     lines.append(f"Journal:          {'dauerhaft gespeichert' if (root / 'var/log/journal').is_dir() else 'nur seit dem letzten Start (geht beim Ausschalten verloren)'}")
     app = release_info(root / APP_DIR.lstrip("/") / "current")
-    lines.append(f"FlowThermPi:      {app.get('version') or '?'} ({str(app.get('commit') or '?')[:7]}), installiert {app.get('installed') or '?'}")
+    lines.append(f"HoLiTherm:        {app.get('version') or '?'} ({str(app.get('commit') or '?')[:7]}), installiert {app.get('installed') or '?'}")
     zigbee = zigbee_info(root / ZIGBEE_DIR.lstrip("/"))
     lines.append("Zigbee-Programme: " + (", ".join(f"{part} {zigbee[part]}" for part in ZIGBEE_PARTS if zigbee.get(part))
                                          or "nicht installiert"))
@@ -2720,7 +2720,7 @@ def system_report(system: System, root: Path, folder: int) -> str:
     """The Pi's system logs and state for „Protokoll speichern“ – without any secret (scrub)."""
     now = datetime.now()
     since = (now - timedelta(days=LOGS_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-    parts = [f"FlowThermPi – Systemprotokolle vom {now:%d.%m.%Y %H:%M:%S}, Rechner {socket.gethostname()}, "
+    parts = [f"HoLiTherm – Systemprotokolle vom {now:%d.%m.%Y %H:%M:%S}, Rechner {socket.gethostname()}, "
              f"Gerätenummer {device_number(root) or '?'}\n"
              f"Journal der letzten {LOGS_DAYS} Tage (seit {since}), von jedem Dienst die neuesten Zeilen.\n"
              "Passwörter, Tokens und Anmelde-Links sind durch ••• ersetzt.\n"]
@@ -2843,7 +2843,7 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
             say(f"✓ Zigbee-Programme entfernt ({ZIGBEE_DIR})." if args.purge else
                 f"✓ Zigbee-Programme entfernt ({ZIGBEE_DIR}) – die angelernten Thermostate bleiben in {ZIGBEE_DATA}.")
         shutil.rmtree(root / APP_DIR.lstrip("/"), ignore_errors=True)
-    say(f"✓ FlowThermPi entfernt ({APP_DIR}).")
+    say(f"✓ HoLiTherm entfernt ({APP_DIR}).")
     if system.live and shutil.which("tailscale"):
         say("  Tailscale (Fernwartung) bleibt installiert. Abmelden: sudo tailscale logout – "
             "entfernen: sudo apt remove tailscale")
@@ -2857,7 +2857,7 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="install.py",
-                                     description="FlowThermPi auf einem Raspberry Pi einrichten oder aktualisieren.")
+                                     description="HoLiTherm auf einem Raspberry Pi einrichten oder aktualisieren.")
     parser.add_argument("--port", type=int, help="Port der App (Standard 80, bei Updates der bisherige)")
     parser.add_argument("--ref", default="main", help="Git-Tag oder Branch (Standard: main)")
     parser.add_argument("--import", dest="import_dir", metavar="ORDNER",

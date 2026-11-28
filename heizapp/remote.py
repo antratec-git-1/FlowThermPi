@@ -15,7 +15,7 @@ eingerichtet ist), danach schaltet ein Wächter es wieder aus. Erlauben und verl
 aus der Ferne; beenden geht überall. Mit „always“ bleibt die Fernwartung dauerhaft an. Einstellung und Ende der
 Fernhilfe stehen in remote-settings.json, damit sie einen Neustart überstehen.
 
-Den Reiter gibt es nur, wenn FlowThermPi mit install.py eingerichtet ist: dessen systemd-Unit setzt
+Den Reiter gibt es nur, wenn HoLiTherm mit install.py eingerichtet ist: dessen systemd-Unit setzt
 HEIZAPP_REMOTE_DIR.
 """
 from __future__ import annotations
@@ -548,7 +548,7 @@ class Remote:
     # ------------------------------------------------------------------ talking to the root service
     def _require(self) -> None:
         if not self.supported:
-            raise ActionError("Fernwartung gibt es nur, wenn FlowThermPi mit dem Installationsbefehl auf dem Raspberry Pi "
+            raise ActionError("Fernwartung gibt es nur, wenn HoLiTherm mit dem Installationsbefehl auf dem Raspberry Pi "
                               "eingerichtet ist.", 409)
 
     def _begin(self, action: str, job: dict | None = None, wait: float = 10.0) -> str:
