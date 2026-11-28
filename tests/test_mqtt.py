@@ -61,12 +61,12 @@ class PacketTest(unittest.TestCase):
 
 class ClientTest(unittest.TestCase):
     def setUp(self):
-        self.broker = FakeBroker(users={"flowthermpi": PASSWORD})
+        self.broker = FakeBroker(users={"holitherm": PASSWORD})
         self.addCleanup(self.broker.close)
         self.got = []
 
     def client(self, password=PASSWORD, keepalive=30):
-        client = Client("127.0.0.1", self.broker.port, "flowthermpi", password, client_id="test",
+        client = Client("127.0.0.1", self.broker.port, "holitherm", password, client_id="test",
                         on_message=lambda topic, payload, retained: self.got.append((topic, payload, retained)),
                         keepalive=keepalive)
         self.addCleanup(client.close)
@@ -101,7 +101,7 @@ class ClientTest(unittest.TestCase):
         self.assertCountEqual(self.got[1:], [("zigbee2mqtt/bridge/request/permit_join", b'{"time": 180}', False),
                                              ("zigbee2mqtt/0x0000000000000001", "ü".encode(), False)])
         self.assertIn(("zigbee2mqtt/bridge/request/permit_join", b'{"time": 180}'), self.broker.published)
-        self.assertEqual(self.broker.connects, [("test", "flowthermpi", 0)])
+        self.assertEqual(self.broker.connects, [("test", "holitherm", 0)])
 
     def test_a_big_message(self):
         client = self.client()
@@ -170,7 +170,7 @@ class ZigbeeNetTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
-        self.broker = FakeBroker(users={"flowthermpi": PASSWORD})
+        self.broker = FakeBroker(users={"holitherm": PASSWORD})
         self.addCleanup(self.broker.close)
         self.z2m = FakeZ2M(self.broker, channel=15, join_after=0.2, interview=0.2)
         self.net = ZigbeeNet(self.tmp, retry=(0.05, 0.1))
@@ -179,7 +179,7 @@ class ZigbeeNetTest(unittest.TestCase):
 
     def login(self, password=PASSWORD):
         (self.tmp / "zigbee-mqtt.json").write_text(json.dumps(
-            {"host": "127.0.0.1", "port": self.broker.port, "user": "flowthermpi", "password": password}))
+            {"host": "127.0.0.1", "port": self.broker.port, "user": "holitherm", "password": password}))
 
     def when(self, check):
         return until(lambda: (lambda v: v if check(v) else None)(self.net.view()))

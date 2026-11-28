@@ -6,7 +6,7 @@ Version 3 (siehe LICENSE).
 import logging
 
 APP_NAME = "HoLiTherm"
-__version__ = "0.4.28"
+__version__ = "0.4.29"
 LICENSE = "GPL-3.0"
 COPYRIGHT = "© 2026 antratec"
 REPO_URL = "https://github.com/antratec-git-1/HoLiTherm"

@@ -67,7 +67,7 @@ class LogBase(unittest.TestCase):
         def restore():
             for handler in list(root.handlers):
                 root.removeHandler(handler)
-                if getattr(handler, "_flowthermpi", False):
+                if getattr(handler, "_holitherm", False):
                     handler.close()
             for handler in saved[0]:
                 root.addHandler(handler)
@@ -124,7 +124,7 @@ class LogFileTest(LogBase):
         stamp = r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} [+-]\d{4} "
         self.assertRegex(lines[-2], stamp + r"WARNING service  Heizung Bad antwortet nicht$")
         self.assertRegex(lines[-1], stamp + r"INFO {4}app {6}HoLiTherm startet$")
-        self.assertEqual(self.file, self.folder / "flowthermpi.log")
+        self.assertEqual(self.file, self.folder / "holitherm.log")
         self.assertEqual(oct(self.folder.stat().st_mode & 0o777), "0o700")
 
     def test_detailed_entries_only_in_the_file_and_only_when_asked(self):
@@ -152,7 +152,7 @@ class LogFileTest(LogBase):
             for i in range(400):
                 log.info("Eintrag %04d", i)
             self.assertEqual([p.name for p in logs.files()],
-                             ["flowthermpi.log.3", "flowthermpi.log.2", "flowthermpi.log.1", "flowthermpi.log"])
+                             ["holitherm.log.3", "holitherm.log.2", "holitherm.log.1", "holitherm.log"])
             numbers = [int(line.rsplit(" ", 1)[1]) for line in logs.read_all().splitlines()]
             self.assertEqual(numbers, list(range(numbers[0], 400)))   # in order, nothing missing, newest last
             self.assertGreater(numbers[0], 0)                          # the oldest are gone: the SD card stays free
@@ -367,17 +367,17 @@ class FakePi(install.DryRun):
             ("ip", "-brief", "address"): "lo               UNKNOWN        127.0.0.1/8\nwlan0            UP             192.168.1.50/24\n",
             ("journalctl", "--list-boots"): "IDX BOOT ID                          FIRST ENTRY                 LAST ENTRY\n"
                                             + "".join(f"{-i:3d} {i:032x} Sat 2026-11-{i % 28 + 1:02d} …\n" for i in range(30)),
-            ("journalctl", "-u", "flowthermpi"):
+            ("journalctl", "-u", "holitherm"):
                 "2026-11-22T10:00:00+01:00 python3[512]: Traceback (most recent call last):\n"
                 f"2026-11-22T10:00:00+01:00 python3[512]: urlopen coap://192.168.1.10/Json?token={TOKEN}\n"
                 f"2026-11-22T10:00:01+01:00 python3[512]: Umgebung: HEIZAPP_PASSWORD={APP_PASSWORD}\n",
-            ("journalctl", "-u", "flowthermpi-remote"):
+            ("journalctl", "-u", "holitherm-remote"):
                 "2026-11-22T10:05:00+01:00 python3[901]: To authenticate, visit:\n"
                 f"2026-11-22T10:05:00+01:00 python3[901]: \thttps://login.tailscale.com/a/{LOGIN}\n",
-            ("journalctl", "-u", "flowthermpi-zigbee2mqtt"):
+            ("journalctl", "-u", "holitherm-zigbee2mqtt"):
                 f"2026-11-22T10:06:00+01:00 node[990]: MQTT: Anmeldung von zigbee2mqtt mit {Z2M_MQTT} abgelehnt\n",
             ("journalctl", "-u", "mosquitto"):
-                f"2026-11-22T10:06:00+01:00 mosquitto[700]: Client flowthermpi ({APP_MQTT}) abgelehnt\n",
+                f"2026-11-22T10:06:00+01:00 mosquitto[700]: Client holitherm ({APP_MQTT}) abgelehnt\n",
             ("journalctl", "-u", "NetworkManager"):
                 f"2026-11-22T09:00:00+01:00 NetworkManager[401]: secrets: psk {WLAN}\n"
                 f"2026-11-22T09:00:01+01:00 NetworkManager[401]: 802-11-wireless-security.psk:   {OTHER_WLAN}\n"
@@ -407,13 +407,13 @@ def logs_pi_root(root: Path, outside: Path) -> Path:
         path.write_text(text)
 
     data = root / install.DATA_DIR.lstrip("/")
-    write(f"{install.DATA_DIR}/data/logs/flowthermpi.log", "2026-11-22 10:00:00.000 +0100 INFO …\n")
+    write(f"{install.DATA_DIR}/data/logs/holitherm.log", "2026-11-22 10:00:00.000 +0100 INFO …\n")
     write(f"{install.DATA_DIR}/heizungen.conf", f"# Heizungen\n192.168.1.10 {TOKEN}\n192.168.1.11\n")
     write(f"{install.DATA_DIR}/{install.ZIGBEE_LOGIN}", json.dumps({"host": "127.0.0.1", "port": 1883,
-                                                                  "user": "flowthermpi", "password": APP_MQTT}))
+                                                                  "user": "holitherm", "password": APP_MQTT}))
     (data / "fremd").symlink_to(outside)
     write(install.ZIGBEE_ENV, f"ZIGBEE2MQTT_CONFIG_MQTT_USER=zigbee2mqtt\nZIGBEE2MQTT_CONFIG_MQTT_PASSWORD={Z2M_MQTT}\n")
-    write("/etc/default/flowthermpi", f'HEIZAPP_PASSWORD="{APP_PASSWORD}"\n')
+    write("/etc/default/holitherm", f'HEIZAPP_PASSWORD="{APP_PASSWORD}"\n')
     write("/etc/NetworkManager/system-connections/Zuhause.nmconnection",
           f"[connection]\nid=Zuhause\ntype=wifi\n\n[wifi]\nssid=Zuhause\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk={WLAN}\n")
     write("/proc/uptime", "90061.5 300000.0\n")    # 1 day, 1 hour, 1 minute
@@ -440,7 +440,7 @@ class SystemLogBase(LogBase):
         self.addCleanup(patcher.stop)
 
     def ask(self, text: str | None = None) -> dict:
-        """As flowthermpi-logs.service does it when the app has placed its request."""
+        """As holitherm-logs.service does it when the app has placed its request."""
         (self.data / install.LOGS_REQUEST).write_text(text or json.dumps({"id": "0123abcd", "action": "collect"}))
         self.assertEqual(install.main(["--root", str(self.root), "--logs"], self.pi), 0)
         self.assertFalse((self.data / install.LOGS_REQUEST).exists())
@@ -471,7 +471,7 @@ class SystemLogBase(LogBase):
 
 
 class LogsFromAppTest(SystemLogBase):
-    """install.py --logs, as flowthermpi-logs.service runs it for „Protokoll speichern“."""
+    """install.py --logs, as holitherm-logs.service runs it for „Protokoll speichern“."""
 
     def test_everything_the_helper_needs_and_no_secret(self):
         status = self.ask()
@@ -486,7 +486,7 @@ class LogsFromAppTest(SystemLogBase):
         self.assertIn("secrets: psk •••", report)
         self.assertIn("802-11-wireless-security.psk:   •••", report)
         self.assertIn("mit ••• abgelehnt", report)
-        self.assertIn("Client flowthermpi (•••) abgelehnt", report)
+        self.assertIn("Client holitherm (•••) abgelehnt", report)
         self.assertIn("device (wlan0): Activation: successful", report)          # the rest stays readable
         self.assertTrue(report.startswith("HoLiTherm – Systemprotokolle vom "))
         self.assertIn("Raspberry Pi 4 Model B Rev 1.5", report)
@@ -501,9 +501,9 @@ class LogsFromAppTest(SystemLogBase):
         self.assertNotIn("8a2c1d0e9f", report)                                    # no serial numbers
         self.assertIn("(nmcli gibt es auf diesem Pi nicht)", report)
         self.assertIn("Undervoltage detected!", report)
-        listing = report.split("===== Datenordner /var/lib/flowthermpi =====\n")[1].split("\n=====")[0]
+        listing = report.split("===== Datenordner /var/lib/holitherm =====\n")[1].split("\n=====")[0]
         self.assertRegex(listing, r"(?m)^heizungen\.conf  \d+ B  -rw")          # names and sizes, not contents
-        self.assertRegex(listing, r"(?m)^data/ .*\n  logs/ .*\n    flowthermpi\.log  \d+ B")
+        self.assertRegex(listing, r"(?m)^data/ .*\n  logs/ .*\n    holitherm\.log  \d+ B")
         self.assertRegex(listing, r"(?m)^fremd → Verweis ")                     # a link is named, never followed
         boots = report.split("===== Systemstarts =====\n")[1].split("\n=====")[0].splitlines()
         self.assertEqual((boots[0][:3], boots[1], len(boots)), ("IDX", "…", 22))   # the latest 20 starts
@@ -597,12 +597,12 @@ class LogsInstallerTest(InstallBase):
 
     def test_fresh_install_has_the_logs_units(self):
         system, out = self.run_install()
-        self.assertIn("Environment=HEIZAPP_SYSLOG_DIR=/var/lib/flowthermpi\n", self.path(install.UNIT).read_text())
-        self.assertIn("PathExists=/var/lib/flowthermpi/logs-request.json\n", self.path(install.LOGS_PATH).read_text())
+        self.assertIn("Environment=HEIZAPP_SYSLOG_DIR=/var/lib/holitherm\n", self.path(install.UNIT).read_text())
+        self.assertIn("PathExists=/var/lib/holitherm/logs-request.json\n", self.path(install.LOGS_PATH).read_text())
         unit = self.path(install.LOGS_UNIT).read_text()
-        self.assertIn("/opt/flowthermpi/current/install.py --logs\n", unit)
+        self.assertIn("/opt/holitherm/current/install.py --logs\n", unit)
         self.assertIn("StartLimitBurst=30\n", unit)
-        self.assertIn("systemctl enable --now flowthermpi-logs.path", [" ".join(c) for c in system.commands])
+        self.assertIn("systemctl enable --now holitherm-logs.path", [" ".join(c) for c in system.commands])
         self.assertIn("Protokoll speichern", out)
 
     def test_uninstall_removes_them(self):

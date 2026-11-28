@@ -3,8 +3,8 @@
 Der Pi kommt dabei in das private Tailscale-Netz dessen, der ihn anmeldet; von dort lässt sich die App öffnen –
 ohne Freigaben im Router. Die App darf am System nichts ändern. Sie legt nur remote-request.json in ihren
 Datenordner, darin steht nichts als eine von fünf Aktionen (status, up, on, down, logout), und
-flowthermpi-remote.path startet daraufhin als root „install.py --remote“. Das installiert Tailscale beim ersten
-„up“ aus dessen eigenem Paketarchiv, meldet den Pi als flowthermpi-<Gerätenummer> mit dem Tag tag:flowthermpi an
+holitherm-remote.path startet daraufhin als root „install.py --remote“. Das installiert Tailscale beim ersten
+„up“ aus dessen eigenem Paketarchiv, meldet den Pi als holitherm-<Gerätenummer> mit dem Tag tag:holitherm an
 und schreibt Tailscales Zustand nach remote-status.json – solange eine Anmeldung offen ist, mit Anmelde-Link und
 QR-Code. Wer mit diesem Link die Anmeldung abschließt, bestimmt, in wessen Tailscale-Netz der Pi kommt. Der Link
 steht deshalb nur in der Einrichtung (hinter der PIN), nie in /api/state.
@@ -129,7 +129,7 @@ def device_number(root: str | os.PathLike = "/") -> str | None:
         machine = (root / "etc/machine-id").read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError):
         return None
-    return hashlib.sha256(f"flowthermpi:{machine}".encode()).hexdigest()[:8] if re.fullmatch(r"[0-9a-f]{32}", machine) else None
+    return hashlib.sha256(f"holitherm:{machine}".encode()).hexdigest()[:8] if re.fullmatch(r"[0-9a-f]{32}", machine) else None
 
 
 def _tailscale(value) -> dict | None:
@@ -486,7 +486,7 @@ class Remote:
 
     # ------------------------------------------------------------------ looking at the Pi in the background
     def _hostname(self) -> str:
-        return f"flowthermpi-{self.device}" if self.device else "flowthermpi"
+        return f"holitherm-{self.device}" if self.device else "holitherm"
 
     def _own_login(self, ts: dict) -> bool:
         """Tailscale's open login link is the one the setup started here (call with the lock held)."""

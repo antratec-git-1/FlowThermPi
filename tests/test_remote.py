@@ -72,7 +72,7 @@ class Base(unittest.TestCase):
         return remote
 
     def start_service(self):
-        """flowthermpi-remote.path + .service: run install.py --remote whenever a request appears."""
+        """holitherm-remote.path + .service: run install.py --remote whenever a request appears."""
         stop = threading.Event()
         args = install.parse_args(["--root", str(self.root), "--remote"])
 
@@ -109,7 +109,7 @@ class Base(unittest.TestCase):
 class RemoteTest(Base):
     def test_device_number_is_the_installers(self):
         self.assertEqual(self.remote.device, install.device_number(self.root))
-        self.assertEqual(self.remote.view()["hostname"], "flowthermpi-a1b2c3d4")
+        self.assertEqual(self.remote.view()["hostname"], "holitherm-a1b2c3d4")
         for serial in (b"100000009f8e7d6c\x00", b"", b"0000000000000000\x00", None):
             other = self.tmp / f"pi-{serial!r}"
             pi_root(other, serial=serial)
@@ -140,13 +140,13 @@ class RemoteTest(Base):
         view = self.view_when(lambda v: v["tailscale"]["state"] == "Running" and not v["watching"], local="100.101.102.103")
         ts = view["tailscale"]
         self.assertEqual((ts["name"], ts["ipv4"], ts["tags"], ts["auth_url"], ts["qr"]),
-                         ("flowthermpi-a1b2c3d4", "100.101.102.103", ["tag:flowthermpi"], None, None))
+                         ("holitherm-a1b2c3d4", "100.101.102.103", ["tag:holitherm"], None, None))
         self.assertTrue(view["via_tailscale"])                                      # this browser comes from afar
         self.assertFalse(self.remote.view(local="192.168.1.20")["via_tailscale"])
         self.assertTrue(self.remote.summary()["on"])
 
     def test_a_login_started_by_hand_is_not_offered(self):
-        # „sudo tailscale up“ by hand before the app: that link would sign the Pi in under the plain name „flowthermpi“
+        # „sudo tailscale up“ by hand before the app: that link would sign the Pi in under the plain name „holitherm“
         self.ts.installed = True
         self.ts.tailscale(["up"])
         self.start_service()
@@ -158,7 +158,7 @@ class RemoteTest(Base):
         self.remote.up()                                                             # „Fernwartung einrichten“
         ts = self.setup_done()["tailscale"]
         self.assertEqual((ts["auth_url"], ts["qr"], ts["other_login"]), ("https://login.tailscale.com/a/000000000002", QR, False))
-        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")
+        self.assertEqual(self.ts.prefs["hostname"], "holitherm-a1b2c3d4")
 
     def test_cancelling_closes_the_login(self):
         self.start_service()
@@ -261,11 +261,11 @@ class RemoteTest(Base):
     def test_tags_do_not_hide_the_key_expiry(self):
         # a tag given in Tailscale's admin console keeps the key's expiry – the page must still show the date
         state = {"id": "x", "state": "done", "tailscale": {"installed": True, "daemon": True, "state": "Running",
-                                                            "tags": ["tag:flowthermpi", "<b>x</b>", 5],
+                                                            "tags": ["tag:holitherm", "<b>x</b>", 5],
                                                             "key_expiry": "2027-05-20T10:00:00Z"}}
         (self.data / install.REMOTE_STATUS).write_text(json.dumps(state))
         ts = self.make_remote().view()["tailscale"]
-        self.assertEqual((ts["tags"], ts["key_expiry"]), (["tag:flowthermpi"], "2027-05-20T10:00:00Z"))
+        self.assertEqual((ts["tags"], ts["key_expiry"]), (["tag:holitherm"], "2027-05-20T10:00:00Z"))
 
     def test_without_folder_there_is_no_remote_maintenance(self):
         off = Remote(None)

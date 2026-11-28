@@ -1,7 +1,7 @@
 """Updates per Knopf (Einrichtung › Über): neueste Version auf GitHub finden und das Update anstoßen.
 
 Die App hat keine Rechte am Programmordner. Für ein Update legt sie nur update-request.json in ihren
-Datenordner. flowthermpi-update.path startet daraufhin als root das install.py der installierten
+Datenordner. holitherm-update.path startet daraufhin als root das install.py der installierten
 Version; das holt immer den neuesten Stand von GitHub main – genau wie der Einzeiler. Welcher Code
 installiert wird, kann die App also nicht bestimmen. Fortschritt und Ergebnis schreibt der Installer
 nach update-status.json.
@@ -157,7 +157,7 @@ class Updater:
             requested = datetime.fromtimestamp((self.folder / REQUEST).stat().st_mtime).astimezone()
         except OSError:
             requested = None
-        if requested is not None:   # placed, not yet picked up by flowthermpi-update.path
+        if requested is not None:   # placed, not yet picked up by holitherm-update.path
             if now - requested > NOT_PICKED_UP:
                 return {"state": "failed", "started": _iso(requested),
                         "message": "Der Update-Dienst auf dem Pi reagiert nicht. Bitte einmal den "
@@ -172,7 +172,7 @@ class Updater:
                 return None
             if now - self._asked > NOT_PICKED_UP:   # picked up, but the installer never reported back
                 return {"state": "failed", "started": _iso(self._asked),
-                        "message": "Das Update hat nicht begonnen. Meldungen: journalctl -u flowthermpi-update"}
+                        "message": "Das Update hat nicht begonnen. Meldungen: journalctl -u holitherm-update"}
             return {"state": "waiting", "started": _iso(self._asked)}   # picked up a moment ago
         result = {key: info.get(key) if isinstance(info.get(key), str) else None
                   for key in ("state", "started", "finished", "from", "to", "message")}

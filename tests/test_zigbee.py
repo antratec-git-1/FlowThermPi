@@ -300,7 +300,7 @@ class Base(unittest.TestCase):
 
 
 class ZigbeeFromAppTest(Base):
-    """install.py --zigbee, as flowthermpi-zigbee.service runs it for Einrichtung › Zigbee."""
+    """install.py --zigbee, as holitherm-zigbee.service runs it for Einrichtung › Zigbee."""
 
     def test_install_brings_everything(self):
         status = self.ask("install")
@@ -313,8 +313,8 @@ class ZigbeeFromAppTest(Base):
         # Mosquitto from Debian: only on this Pi, only with a password
         self.assertTrue([c for c in self.pi.commands if c[:1] == ("apt-get",) and "install" in c])
         conf = self.path(install.MOSQUITTO_CONF).read_text()
-        self.assertIn("listener 1883 127.0.0.1\nallow_anonymous false\npassword_file /etc/mosquitto/flowthermpi.passwd\n", conf)
-        self.assertEqual([[line.split(":")[0] for line in lines] for lines in self.pi.hashed], [["flowthermpi", "zigbee2mqtt"]])
+        self.assertIn("listener 1883 127.0.0.1\nallow_anonymous false\npassword_file /etc/mosquitto/holitherm.passwd\n", conf)
+        self.assertEqual([[line.split(":")[0] for line in lines] for lines in self.pi.hashed], [["holitherm", "zigbee2mqtt"]])
         passwd = self.path(install.MOSQUITTO_PASSWD)
         self.assertNotIn(self.logins()[0]["password"], passwd.read_text())          # hashes only
         self.assertEqual(oct(passwd.stat().st_mode & 0o777), "0o600")
@@ -322,7 +322,7 @@ class ZigbeeFromAppTest(Base):
                          ["mosquitto"])                                            # Mosquitto may read it again
         # the logins: the app's in its own folder, Zigbee2MQTT's only for root
         app, env = self.logins()
-        self.assertEqual((app["host"], app["port"], app["user"]), ("127.0.0.1", 1883, "flowthermpi"))
+        self.assertEqual((app["host"], app["port"], app["user"]), ("127.0.0.1", 1883, "holitherm"))
         self.assertEqual(oct((self.data / install.ZIGBEE_LOGIN).stat().st_mode & 0o777), "0o600")
         self.assertEqual((env["ZIGBEE2MQTT_CONFIG_MQTT_SERVER"], env["ZIGBEE2MQTT_CONFIG_MQTT_USER"]),
                          ("mqtt://127.0.0.1:1883", "zigbee2mqtt"))
@@ -532,17 +532,17 @@ class SetupTest(Base):
         app, env = self.logins()
         self.assertNotIn(env["ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD"], text)   # only systemd hands it over
         unit = self.path(install.ZIGBEE_SERVICE_UNIT).read_text()
-        for line in ("User=flowthermpi-zigbee\n", "SupplementaryGroups=dialout\n",
-                     "WorkingDirectory=/opt/flowthermpi-zigbee/zigbee2mqtt\n",
-                     "Environment=ZIGBEE2MQTT_DATA=/var/lib/flowthermpi-zigbee\n", "Environment=Z2M_ONBOARD_NO_SERVER=1\n",
+        for line in ("User=holitherm-zigbee\n", "SupplementaryGroups=dialout\n",
+                     "WorkingDirectory=/opt/holitherm-zigbee/zigbee2mqtt\n",
+                     "Environment=ZIGBEE2MQTT_DATA=/var/lib/holitherm-zigbee\n", "Environment=Z2M_ONBOARD_NO_SERVER=1\n",
                      f"Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/{STICK}\n",
-                     "EnvironmentFile=/etc/flowthermpi/zigbee2mqtt.env\n",
-                     "ExecStart=/opt/flowthermpi-zigbee/node/bin/node index.js\n", "ProtectSystem=strict\n",
-                     "ReadWritePaths=/var/lib/flowthermpi-zigbee\n", "Restart=on-failure\n", "WantedBy=multi-user.target\n"):
+                     "EnvironmentFile=/etc/holitherm/zigbee2mqtt.env\n",
+                     "ExecStart=/opt/holitherm-zigbee/node/bin/node index.js\n", "ProtectSystem=strict\n",
+                     "ReadWritePaths=/var/lib/holitherm-zigbee\n", "Restart=on-failure\n", "WantedBy=multi-user.target\n"):
             self.assertIn(line, unit)
         commands = [" ".join(c) for c in self.pi.commands]
-        for command in ("systemctl daemon-reload", "systemctl enable flowthermpi-zigbee2mqtt",
-                        "systemctl restart flowthermpi-zigbee2mqtt"):
+        for command in ("systemctl daemon-reload", "systemctl enable holitherm-zigbee2mqtt",
+                        "systemctl restart holitherm-zigbee2mqtt"):
             self.assertIn(command, commands)
         z = status["zigbee"]
         self.assertEqual((z["service"]["present"], z["service"]["enabled"], z["service"]["active"]), (True, True, True))
@@ -631,7 +631,7 @@ class SetupTest(Base):
                                f"mqtt: connecting with password {password}\n"
                                "networkKey: [200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215]\n"
                                "Error: Failed to open the serial port (no such file)\n"
-                               "flowthermpi-zigbee2mqtt.service: Main process exited, code=exited, status=1/FAILURE\n")
+                               "holitherm-zigbee2mqtt.service: Main process exited, code=exited, status=1/FAILURE\n")
         status = self.ask("start")
         self.assertEqual(status["state"], "done")
         service = status["zigbee"]["service"]
@@ -654,7 +654,7 @@ class SetupTest(Base):
                             ("network_key=[1,2,3]", "network_key=•••"), ("networkKey: [9, 8]", "networkKey: [•••]")):
             self.assertEqual(install.scrub(text, set()), shown)   # also a key root does not know
 
-    def test_an_update_of_flowthermpi_brings_the_service_up_to_date(self):
+    def test_an_update_of_holitherm_brings_the_service_up_to_date(self):
         self.ask(self.setup_request(25))
         unit = self.path(install.ZIGBEE_SERVICE_UNIT)
         current = unit.read_text()
@@ -713,14 +713,14 @@ class InstallerTest(InstallBase):
     def test_fresh_install_has_the_zigbee_units(self):
         system, _ = self.run_install()
         unit = self.path(install.UNIT).read_text()
-        self.assertIn("Environment=HEIZAPP_ZIGBEE_DIR=/var/lib/flowthermpi\n", unit)
-        self.assertIn("PathExists=/var/lib/flowthermpi/zigbee-request.json\n", self.path(install.ZIGBEE_PATH).read_text())
+        self.assertIn("Environment=HEIZAPP_ZIGBEE_DIR=/var/lib/holitherm\n", unit)
+        self.assertIn("PathExists=/var/lib/holitherm/zigbee-request.json\n", self.path(install.ZIGBEE_PATH).read_text())
         zigbee_unit = self.path(install.ZIGBEE_UNIT).read_text()
-        self.assertIn("/opt/flowthermpi/current/install.py --zigbee\n", zigbee_unit)
+        self.assertIn("/opt/holitherm/current/install.py --zigbee\n", zigbee_unit)
         self.assertIn("Nice=10\n", zigbee_unit)
         self.assertIn("StartLimitBurst=30\n", zigbee_unit)   # „Neu prüfen“ many times in a row
         commands = [" ".join(c) for c in system.commands]
-        self.assertIn("systemctl enable --now flowthermpi-zigbee.path", commands)
+        self.assertIn("systemctl enable --now holitherm-zigbee.path", commands)
         self.assertFalse([c for c in commands if "apt" in c or "mosquitto" in c])
 
     def test_an_update_rewrites_the_service_of_zigbee2mqtt(self):

@@ -7,7 +7,7 @@
 Passwort (optional, empfohlen sobald --host 0.0.0.0): Umgebungsvariable HEIZAPP_PASSWORD,
 Benutzername im Browser: heizung.
 
-Protokoll: neben data.json im Ordner logs/ (flowthermpi.log), anderer Ordner mit --log-dir.
+Protokoll: neben data.json im Ordner logs/ (holitherm.log), anderer Ordner mit --log-dir.
 """
 from __future__ import annotations
 

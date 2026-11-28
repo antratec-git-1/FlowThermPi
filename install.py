@@ -7,7 +7,7 @@ Updates danach in der App: Einrichtung › Über › „Nach Updates suchen“ �
 einmal. WLAN einrichten: Einrichtung › WLAN (der Pi kann also mit Netzwerkkabel ausgeliefert werden).
 Fernwartung: Einrichtung › Fernwartung – Tailscale wird erst installiert, wenn man dort darum bittet.
 Zigbee-Thermostate: Einrichtung › Zigbee – auch deren Zusatzprogramme erst, wenn man dort darum bittet.
-Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/flowthermpi und
+Heizungen, Tokens, Räume, Pläne und PIN liegen getrennt vom Programm in /var/lib/holitherm und
 bleiben bei Updates erhalten.
 
 Dieses Skript ist der einzige Teil von HoLiTherm, der als root läuft – auch für den Update-Knopf
@@ -51,9 +51,12 @@ from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 REPO = "antratec-git-1/HoLiTherm"
-NAME = "flowthermpi"
-APP_DIR = "/opt/flowthermpi"
-DATA_DIR = "/var/lib/flowthermpi"
+NAME = "holitherm"
+APP_DIR = f"/opt/{NAME}"
+DATA_DIR = f"/var/lib/{NAME}"
+# Until 0.4.28 the app was called FlowThermPi, and on the Pi everything was „flowthermpi“: folders, services, users,
+# files, the Pi's name. move_old_installation() moves such an installation over to NAME.
+OLD_NAME = "flowthermpi"
 UNIT = f"/etc/systemd/system/{NAME}.service"
 UPDATE_UNIT = f"/etc/systemd/system/{NAME}-update.service"   # runs this script when the app asks for an update
 UPDATE_PATH = f"/etc/systemd/system/{NAME}-update.path"      # watches for the app's request
@@ -65,7 +68,8 @@ WIFI_REQUEST = "wifi-request.json"       # in DATA_DIR: placed by the app (Einri
 WIFI_STATUS = "wifi-status.json"         # in DATA_DIR: result and network state, for the app – never a password
 WIFI_ACTIONS = ("scan", "connect", "forget")
 WIFI_COUNTRIES = ("DE", "AT", "CH", "LU", "LI", "NL", "BE", "FR", "IT", "DK", "PL", "CZ", "ES", "GB", "US")
-WIFI_PROFILE = "FlowThermPi WLAN"        # name of the NetworkManager connections made here
+WIFI_PROFILE = "HoLiTherm WLAN"          # name of the NetworkManager connections made here
+OLD_WIFI_PROFILE = "FlowThermPi WLAN"    # their name until 0.4.28 – renamed by move_old_installation()
 WIFI_ONLY_LINK = ("Der Pi hängt gerade nur über „{ssid}“ am Netz. Vergisst er dieses WLAN, ist er nicht mehr "
                   "erreichbar – auch nicht aus der Ferne. Bitte zuerst das Netzwerkkabel am Pi einstecken.")
 REMOTE_UNIT = f"/etc/systemd/system/{NAME}-remote.service"   # runs this script for the remote maintenance in the app
@@ -97,8 +101,8 @@ ZIGBEE_LOGIN = "zigbee-mqtt.json"        # in DATA_DIR: the app's login at Mosqu
 ZIGBEE_INFO = "installed.json"           # in ZIGBEE_DIR: what is installed there
 ZIGBEE_FREE_MB = 1500                    # free space on the SD card needed before an installation starts
 ZIGBEE_STEPS = ("check", "mosquitto", "node", "pnpm", "zigbee2mqtt", "dependencies", "build", "finish")
-MOSQUITTO_CONF = "/etc/mosquitto/conf.d/flowthermpi.conf"
-MOSQUITTO_PASSWD = "/etc/mosquitto/flowthermpi.passwd"
+MOSQUITTO_CONF = f"/etc/mosquitto/conf.d/{NAME}.conf"
+MOSQUITTO_PASSWD = f"/etc/mosquitto/{NAME}.passwd"
 MQTT_PORT = 1883
 MQTT_USERS = {"app": NAME, "zigbee2mqtt": "zigbee2mqtt"}   # one login each, made anew at every installation
 LOGS_UNIT = f"/etc/systemd/system/{NAME}-logs.service"   # collects the Pi's system logs for „Protokoll speichern“
@@ -111,8 +115,19 @@ LOGS_MAX = 6 << 20                       # … in at most this many bytes
 # whose journal goes in, with at most this many of its newest lines
 LOGS_UNITS = ((NAME, 3000), (f"{NAME}-update", 600), (f"{NAME}-wifi", 400), (f"{NAME}-remote", 400),
               (f"{NAME}-zigbee", 800), (f"{NAME}-logs", 100), (ZIGBEE_SERVICE, 1500), ("mosquitto", 300),
-              ("NetworkManager", 1000), ("wpa_supplicant", 300), ("tailscaled", 800), ("systemd-timesyncd", 100))
+              ("NetworkManager", 1000), ("wpa_supplicant", 300), ("tailscaled", 800), ("systemd-timesyncd", 100),
+              (f"{NAME}-umzug", 200), (f"{OLD_NAME}-update", 400))   # the move from FlowThermPi: where it ran
 LOGS_KERNEL = 1500
+# An installation from before 0.4.29 (move_old_installation): what moves where, the old services, and the transient
+# service that finishes the move once the update – which still runs in the old update service – is over
+OLD_MOVES = ((f"/opt/{OLD_NAME}", APP_DIR), (f"/var/lib/{OLD_NAME}", DATA_DIR),
+             (f"/opt/{OLD_NAME}-zigbee", ZIGBEE_DIR), (f"/var/lib/{OLD_NAME}-zigbee", ZIGBEE_DATA),
+             (f"/etc/{OLD_NAME}", f"/etc/{NAME}"), (f"/etc/default/{OLD_NAME}", f"/etc/default/{NAME}"))
+OLD_UNITS = tuple(f"{OLD_NAME}{end}" for end in (
+    ".service", "-update.path", "-update.service", "-wifi.path", "-wifi.service", "-remote.path", "-remote.service",
+    "-zigbee.path", "-zigbee.service", "-logs.path", "-logs.service", "-zigbee2mqtt.service"))
+OLD_UPDATE = f"{OLD_NAME}-update.service"
+MOVE_UNIT = f"{NAME}-umzug"
 HIDDEN = "•••"
 # What a secret looks like – the same list as in heizapp/logs.py (this script cannot import the app), plus the lines of
 # NetworkManager, wpa_supplicant and nmcli that hold a WLAN password
@@ -175,8 +190,8 @@ Wants=network-online.target
 After=network-online.target time-sync.target
 
 [Service]
-User={name}
-Group={name}
+User={user}
+Group={user}
 WorkingDirectory={app}/current
 Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 Environment=HEIZAPP_HOST=0.0.0.0
@@ -534,9 +549,10 @@ class System:
         except KeyError:
             return False
 
-    def fchown(self, fd: int, user: str = NAME) -> None:
+    def fchown(self, fd: int, user: str | None = None) -> None:
+        """fd to user and its group – without user to the app's own (app_user)."""
         import pwd
-        entry = pwd.getpwnam(user)
+        entry = pwd.getpwnam(user or app_user(self))
         os.fchown(fd, entry.pw_uid, entry.pw_gid)
 
     def lchown(self, path: Path, user: str) -> None:
@@ -595,7 +611,7 @@ class DryRun(System):
     def user_exists(self, user: str = NAME) -> bool:
         return False
 
-    def fchown(self, fd: int, user: str = NAME) -> None:
+    def fchown(self, fd: int, user: str | None = None) -> None:
         pass
 
     def lchown(self, path: Path, user: str) -> None:
@@ -618,7 +634,7 @@ def download(ref: str, tmp: Path) -> tuple[Path, str | None]:
     for attempt in range(1, 4):
         try:
             with urllib.request.urlopen(url, timeout=60) as res:
-                archive = tmp / "flowthermpi.tar.gz"
+                archive = tmp / "holitherm.tar.gz"
                 archive.write_bytes(res.read())
             return extract(archive, tmp / "src")
         except urllib.error.HTTPError as exc:
@@ -743,7 +759,7 @@ def prune(app: Path) -> None:
 # The data folder belongs to the service user, so nothing in it is trusted: root never follows a link
 # there (a planted link could otherwise make root change or hand over files elsewhere). Files are opened
 # relative to an opened folder with O_NOFOLLOW and replaced by renaming, never written through a path.
-def open_folder(name: str | Path, system: System, parent: int | None = None, user: str = NAME,
+def open_folder(name: str | Path, system: System, parent: int | None = None, user: str | None = None,
                 mode: int = 0o750) -> int:
     """Folder of the service (created if missing), 0750 and owned by it; returns an open descriptor."""
     try:
@@ -786,7 +802,7 @@ def read_private(folder: int, name: str) -> str | None:
 def write_private(folder: int, name: str, text: str, system: System) -> None:
     """Replace folder/name: 0600 and owned by the service. Written to a new file that is renamed into
     place, so a planted link is replaced, never followed."""
-    write_owned(folder, name, text, system, NAME)
+    write_owned(folder, name, text, system, app_user(system))
 
 
 def write_owned(folder: int, name: str, text: str, system: System, user: str) -> None:
@@ -867,10 +883,10 @@ def configured_port(unit: Path) -> int | None:
     return None
 
 
-def write_units(root: Path, port: int) -> None:
+def write_units(root: Path, port: int, user: str = NAME) -> None:
     """The app's service plus the units behind the update button, the WLAN setup, the remote maintenance, the
-    Zigbee programs and „Protokoll speichern“."""
-    values = {"name": NAME, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
+    Zigbee programs and „Protokoll speichern“. user: the app's user (app_user)."""
+    values = {"name": NAME, "user": user, "app": APP_DIR, "data": DATA_DIR, "port": port, "request": UPDATE_REQUEST,
               "wifi_request": WIFI_REQUEST, "remote_request": REMOTE_REQUEST, "zigbee_request": ZIGBEE_REQUEST,
               "logs_request": LOGS_REQUEST, "python": sys.executable or "/usr/bin/python3"}
     for unit, template in ((UNIT, UNIT_TEMPLATE), (UPDATE_UNIT, UPDATE_UNIT_TEMPLATE), (UPDATE_PATH, UPDATE_PATH_TEMPLATE),
@@ -911,7 +927,7 @@ def wait_until_up(port: int, seconds: float = 45) -> str | None:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3) as res:
                 return (json.load(res).get("app") or {}).get("version") or "?"
         except urllib.error.HTTPError as exc:
-            if exc.code == 401:  # password set in /etc/default/flowthermpi – the app answers
+            if exc.code == 401:  # password set in /etc/default/holitherm – the app answers
                 return "?"
         except (OSError, ValueError):
             pass
@@ -926,6 +942,252 @@ def own_address() -> str | None:
             return sock.getsockname()[0]
     except OSError:
         return None
+
+
+# ---------------------------------------------------------------------- move from FlowThermPi (until 0.4.28)
+# Until 0.4.28 everything of the app on the Pi was called „flowthermpi“. The first installation of a newer version moves
+# it over: the folders are renamed in place (same files, same owners), the services written anew under the new names,
+# Mosquitto gets new logins, the WLAN connections and the Pi's entry in Tailscale their new names, and so do the users.
+# Started by the update button, this installer runs inside the old update service, whose program (still 0.4.28) writes
+# its result as the app's old user at the very end. So the app's user – and the Pi's own name, which would cut the
+# browser off in the middle of the update – follow half a minute later, in a service of their own (finish_move).
+def app_user(system: System) -> str:
+    """The app's user: NAME – or OLD_NAME as long as a move from FlowThermPi has not renamed it."""
+    return OLD_NAME if not system.user_exists(NAME) and system.user_exists(OLD_NAME) else NAME
+
+
+def unit_running(system: System, unit: str) -> bool:
+    """unit is starting, running or stopping. A oneshot service like the update is „activating“ all the while it runs –
+    „systemctl is-active“ does not count that."""
+    state = system.run("systemctl", "show", "-p", "ActiveState", "--value", unit, check=False)
+    return state in ("active", "activating", "deactivating", "reloading")
+
+
+def old_installation(root: Path) -> bool:
+    """Something of FlowThermPi is still there: a folder, a service or Mosquitto's settings."""
+    units = root / "etc/systemd/system"
+    return (any(os.path.lexists(root / old.lstrip("/")) for old, _ in OLD_MOVES)
+            or any(os.path.lexists(units / unit) for unit in OLD_UNITS)
+            or os.path.lexists(root / f"etc/mosquitto/conf.d/{OLD_NAME}.conf"))
+
+
+def move_old_installation(system: System, root: Path) -> dict:
+    """An installation of FlowThermPi becomes one of HoLiTherm – without one nothing happens. Returns what install()
+    needs to know: the app's port, whether Zigbee2MQTT ran, and later=True when the app's user and the Pi's name have to
+    wait for the old update service (schedule_finish)."""
+    if not old_installation(root):
+        return {}
+    double = [f"{old} und {new}" for old, new in OLD_MOVES
+              if os.path.lexists(root / old.lstrip("/")) and os.path.lexists(root / new.lstrip("/"))]
+    if double:
+        raise InstallError(f"Auf diesem Pi gibt es FlowThermPi und HoLiTherm nebeneinander ({', '.join(double)}) – "
+                           "bitte zuerst eins davon entfernen.")
+    if any(unit_running(system, f"{OLD_NAME}-{task}.service") for task in ("wifi", "remote", "zigbee", "logs")):
+        raise InstallError("Die App erledigt gerade noch etwas (WLAN, Fernwartung, Zigbee oder Protokoll) – bitte in "
+                           "ein paar Minuten noch einmal aktualisieren.")
+    say("• Aus FlowThermPi wird HoLiTherm: Ordner, Dienste, Benutzer und Namen ziehen um")
+    units = root / "etc/systemd/system"
+    moved = {"port": configured_port(units / f"{OLD_NAME}.service"),
+             "zigbee": os.path.lexists(units / f"multi-user.target.wants/{OLD_NAME}-zigbee2mqtt.service")}
+    stick = zigbee2mqtt_unit_port(root, f"/etc/systemd/system/{OLD_NAME}-zigbee2mqtt.service")
+    for unit in sorted(OLD_UNITS, key=lambda name: not name.endswith(".path")):   # first what starts the others
+        if unit != OLD_UPDATE and os.path.lexists(units / unit):   # the old update runs on: this is it
+            system.run("systemctl", "disable", "--now", unit, check=False)
+    for old, new in OLD_MOVES:
+        if os.path.lexists(root / old.lstrip("/")):
+            (root / new.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
+            os.rename(root / old.lstrip("/"), root / new.lstrip("/"))
+            say(f"  {old} → {new}")
+    if system.user_exists(f"{OLD_NAME}-zigbee") and not system.user_exists(ZIGBEE_USER):   # Zigbee2MQTT is stopped
+        rename_user(system, f"{OLD_NAME}-zigbee", ZIGBEE_USER, ZIGBEE_DATA)
+    for link in [units / unit for unit in OLD_UNITS] + [wants / unit for wants in units.glob("*.wants")
+                                                         for unit in OLD_UNITS]:   # also links to nowhere
+        if os.path.lexists(link):
+            link.unlink()
+    if stick:
+        write_zigbee2mqtt_unit(root, stick)
+    system.run("systemctl", "daemon-reload", check=False)
+    system.run("systemctl", "reset-failed", *(unit for unit in OLD_UNITS if unit != OLD_UPDATE), check=False)
+    for step in (move_mosquitto, rename_wifi_profiles, rename_tailscale_host, rename_app_logs, rename_tailscale_source):
+        try:
+            step(system, root)
+        except (InstallError, OSError) as exc:   # all of this can wait – the app comes first
+            say(f"  Hinweis: {exc}")
+    moved["later"] = unit_running(system, OLD_UPDATE)
+    return moved
+
+
+def move_mosquitto(system: System, root: Path) -> None:
+    """Mosquitto's settings and logins under the new name – the app logs in as „holitherm“ from now on."""
+    old = (root / f"etc/mosquitto/conf.d/{OLD_NAME}.conf", root / f"etc/mosquitto/{OLD_NAME}.passwd")
+    if not old[0].exists():
+        return
+    logins = mosquitto_logins(system, root, drop=old)
+    folder = os.open(root / DATA_DIR.lstrip("/"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        zigbee_logins(system, root, folder, logins)
+    finally:
+        os.close(folder)
+    restart_zigbee2mqtt(system)   # only if it runs under the new name already (a move that was cut short)
+    say("  Mosquitto: neue Anmeldungen für die App und Zigbee2MQTT")
+
+
+def rename_wifi_profiles(system: System, root: Path) -> None:
+    """The WLAN connections FlowThermPi made („FlowThermPi WLAN <Netz>“) are called „HoLiTherm WLAN <Netz>“. Only the
+    name changes – a connection in use stays up."""
+    count = 0
+    for uuid, kind, name in nm_rows(nm(system, "-t", "-f", "UUID,TYPE,NAME", "connection", "show", check=False), 3):
+        if uuid and kind in ("802-11-wireless", "wifi") and name.startswith(f"{OLD_WIFI_PROFILE} "):
+            nm(system, "connection", "modify", "uuid", uuid, "connection.id",
+               WIFI_PROFILE + name[len(OLD_WIFI_PROFILE):])
+            count += 1
+    if count:
+        say(f"  WLAN: {count} Verbindung{'en heißen' if count > 1 else ' heißt'} jetzt „{WIFI_PROFILE} …“")
+
+
+def rename_tailscale_host(system: System, root: Path) -> None:
+    """The Pi's name in Tailscale: flowthermpi-<Gerätenummer> becomes holitherm-<Gerätenummer>. Only the name changes –
+    the login, the key and the tailnet's rules stay as they are."""
+    number = device_number(root)
+    state = tailscale_state(system)
+    if not state.get("daemon") or state.get("host_name") != (f"{OLD_NAME}-{number}" if number else OLD_NAME):
+        return
+    code, out, err = tailscale(system, "set", f"--hostname={remote_name(root)}", timeout=30)
+    if code:
+        raise InstallError(f"Den Namen in Tailscale konnte ich nicht ändern ({first_line(err or out) or f'Fehlercode {code}'}).")
+    say(f"  Tailscale: der Pi heißt dort jetzt „{remote_name(root)}“")
+
+
+def rename_app_logs(system: System, root: Path) -> None:
+    """The app's log files (data/logs/flowthermpi.log, .1 …) under the new name – „Protokoll speichern“ goes on finding
+    them. The data folder belongs to the app: no link in it is followed."""
+    flags, fds = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, []
+    try:
+        fds.append(os.open(root / DATA_DIR.lstrip("/"), flags))
+        for name in ("data", "logs"):
+            fds.append(os.open(name, flags, dir_fd=fds[-1]))
+        names = set(os.listdir(fds[-1]))
+        for name in sorted(names):
+            found = re.fullmatch(rf"{OLD_NAME}\.log(\.\d{{1,2}})?", name)
+            if found and f"{NAME}.log{found.group(1) or ''}" not in names:
+                os.rename(name, f"{NAME}.log{found.group(1) or ''}", src_dir_fd=fds[-1], dst_dir_fd=fds[-1])
+    except FileNotFoundError:
+        pass
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def rename_tailscale_source(system: System, root: Path) -> None:
+    """The comment in Tailscale's package source says who set it up."""
+    path = root / TAILSCALE_SOURCE.lstrip("/")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    new = re.sub(r"(?im)^(#.*?)\bFlowThermPi\b", r"\1HoLiTherm", text)
+    if new != text:
+        write_system_file(path, new.encode())
+
+
+def rename_user(system: System, old: str, new: str, home: str) -> bool:
+    """A user and its own group get a new name – their numbers stay, so every file stays theirs. Not while a program of
+    the user runs (usermod refuses). False if it did not work: then both keep the old name."""
+    try:
+        system.run("groupmod", "--new-name", new, old)
+        try:
+            system.run("usermod", "--login", new, "--home", home, old)
+        except CommandError:
+            system.run("groupmod", "--new-name", old, new, check=False)   # back: user and group must match
+            raise
+    except CommandError as exc:
+        say(f"  Hinweis: Benutzer „{old}“ ließ sich nicht umbenennen ({first_line(exc.detail)}) – er bleibt vorerst.")
+        return False
+    say(f"  Benutzer „{old}“ heißt jetzt „{new}“")
+    return True
+
+
+def rename_host(system: System, root: Path) -> bool:
+    """The Pi's own name, if it is still FlowThermPi's: http://flowthermpi.local becomes http://holitherm.local. The way
+    raspi-config does it – hostnamectl and the line 127.0.1.1 in /etc/hosts. Any other name stays as it is."""
+    try:
+        current = (root / "etc/hostname").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if current.lower() != OLD_NAME:
+        return False
+    if not system.ok("hostnamectl", "set-hostname", NAME):
+        write_system_file(root / "etc/hostname", f"{NAME}\n".encode())
+        system.run("hostname", NAME, check=False)
+    hosts = root / "etc/hosts"
+    try:
+        lines = hosts.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        lines = []
+    changed = False
+    for number, line in enumerate(lines):
+        if line.split("#")[0].split()[:1] == ["127.0.1.1"]:
+            lines[number] = re.sub(rf"(?i)(?<![\w-]){OLD_NAME}(?![\w-])", NAME, line)
+            changed = changed or lines[number] != line
+    if changed:
+        write_system_file(hosts, "".join(lines).encode())
+    system.run("systemctl", "try-restart", "avahi-daemon.service", check=False)   # tells the home network the new name
+    say(f"• Der Pi heißt jetzt „{NAME}“ – im Heimnetz: http://{NAME}.local")
+    return True
+
+
+def finish_names(system: System, root: Path) -> bool:
+    """The rest of a move from FlowThermPi: the app's user – its service must not run meanwhile – and the Pi's name,
+    and Zigbee2MQTT's user if the move could not rename it. True if the app's user got its new name: its services have
+    to be written anew."""
+    if system.user_exists(f"{OLD_NAME}-zigbee") and not system.user_exists(ZIGBEE_USER):   # not done at the move
+        system.run("systemctl", "stop", ZIGBEE_SERVICE, check=False)
+        if rename_user(system, f"{OLD_NAME}-zigbee", ZIGBEE_USER, ZIGBEE_DATA):
+            system.run("systemctl", "reset-failed", ZIGBEE_SERVICE, check=False)   # it could not start meanwhile
+            restart_zigbee2mqtt(system)
+    renamed = False
+    if system.user_exists(OLD_NAME) and not system.user_exists(NAME):
+        system.run("systemctl", "stop", NAME, check=False)   # usermod refuses while a program of the user runs
+        renamed = rename_user(system, OLD_NAME, NAME, DATA_DIR)
+        if not renamed:
+            system.run("systemctl", "start", NAME, check=False)
+    rename_host(system, root)
+    return renamed
+
+
+def schedule_finish(system: System) -> None:
+    """The app's user and the Pi's name, half a minute after this update: in a service of its own (MOVE_UNIT) that
+    first waits until the old update service is over."""
+    system.run("systemctl", "reset-failed", f"{MOVE_UNIT}.service", check=False)
+    try:
+        system.run("systemd-run", f"--unit={MOVE_UNIT}", "--description=HoLiTherm – Umzug abschließen",
+                   "--on-active=30", "--timer-property=AccuracySec=1s", "--collect",
+                   sys.executable or "/usr/bin/python3", "-I", "-B", "-X", "utf8", f"{APP_DIR}/current/install.py",
+                   "--finish-move")
+    except CommandError as exc:
+        say(f"  Hinweis: Den Rest des Umzugs macht das nächste Update ({first_line(exc.detail)}).")
+        return
+    say(f"• In einer halben Minute bekommen der Benutzer der App und der Pi ihre neuen Namen ({MOVE_UNIT})")
+
+
+def finish_move(args: argparse.Namespace, system: System) -> None:
+    """Run by MOVE_UNIT half a minute after an update from FlowThermPi: once the old update service is over, the app's
+    user gets its new name – its services written anew, the app started again – and the Pi its own."""
+    root = Path(args.root)
+    for _ in range(450):   # the update is over within seconds – waits at most a quarter of an hour
+        if not unit_running(system, OLD_UPDATE):
+            break
+        system.sleep(2)
+    else:
+        raise InstallError("Das alte Update läuft noch immer – den Rest des Umzugs macht das nächste Update.")
+    with install_lock(root / APP_DIR.lstrip("/")):
+        if finish_names(system, root):
+            try:
+                write_units(root, configured_port(root / UNIT.lstrip("/")) or DEFAULT_PORT, app_user(system))
+                system.run("systemctl", "daemon-reload", check=False)
+            finally:
+                system.run("systemctl", "restart", NAME, check=False)
+    say("✓ Umzug von FlowThermPi abgeschlossen.")
 
 
 # ---------------------------------------------------------------------- commands
@@ -943,11 +1205,12 @@ def install(args: argparse.Namespace, system: System) -> None:
     app, data_dir, unit = root / APP_DIR.lstrip("/"), root / DATA_DIR.lstrip("/"), root / UNIT.lstrip("/")
     if args.commit and not COMMIT.fullmatch(args.commit):
         raise InstallError("--commit: 40 Zeichen 0-9/a-f erwartet.")
+    moved = move_old_installation(system, root)   # before the lock: that lives in the folder that moves
     with install_lock(app):
         update = (app / "current").is_symlink()
         say(f"HoLiTherm – {'Update' if update else 'Einrichtung'}")
 
-        with tempfile.TemporaryDirectory(prefix="flowthermpi-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="holitherm-") as tmp:
             if args.source:
                 src, commit = Path(args.source).expanduser().resolve(), args.commit
             else:
@@ -957,21 +1220,23 @@ def install(args: argparse.Namespace, system: System) -> None:
             write_release_info(release, version, commit, args.ref if commit or not args.source else None)
         say(f"• Programm HoLiTherm {version}{f' ({commit[:7]})' if commit else ''} nach {APP_DIR} kopiert")
 
-        if not system.user_exists():
+        if not moved.get("later"):
+            finish_names(system, root)   # the app's user and the Pi's name, if an earlier move left them
+        if not system.user_exists(NAME) and not system.user_exists(OLD_NAME):
             system.run("useradd", "--system", "--user-group", "--home-dir", DATA_DIR, "--no-create-home",
                        "--shell", "/usr/sbin/nologin", NAME)
             say(f"• Benutzer „{NAME}“ für den Dienst angelegt")
         prepare_data(data_dir, system, args.import_dir)
         set_timezone(system, args.timezone)
 
-        port = args.port or configured_port(unit) or DEFAULT_PORT
+        port = args.port or configured_port(unit) or moved.get("port") or DEFAULT_PORT
         running = system.ok("systemctl", "is-active", "--quiet", NAME)
         if system.live and not running and not port_free(port):
             shutil.rmtree(release)
             raise InstallError(f"Port {port} ist schon belegt (läuft dort ein anderer Webserver?). "
                                "Mit „--port 8080“ einen anderen Port wählen.")
         previous = switch_current(app, release)
-        write_units(root, port)
+        write_units(root, port, app_user(system))
         zigbee_changed = refresh_zigbee2mqtt_unit(root)   # Zigbee2MQTT's service, if it is set up
         system.run("systemctl", "daemon-reload")
         system.run("systemctl", "enable", NAME)
@@ -981,7 +1246,9 @@ def install(args: argparse.Namespace, system: System) -> None:
         system.run("systemctl", "enable", "--now", f"{NAME}-zigbee.path")
         system.run("systemctl", "enable", "--now", f"{NAME}-logs.path")
         system.run("systemctl", "restart", NAME)
-        if zigbee_changed:
+        if moved.get("zigbee"):      # Zigbee2MQTT ran under its old name: now under the new one
+            system.run("systemctl", "enable", "--now", ZIGBEE_SERVICE, check=False)
+        elif zigbee_changed:
             system.run("systemctl", "try-restart", ZIGBEE_SERVICE, check=False)
 
         if system.live:
@@ -995,6 +1262,8 @@ def install(args: argparse.Namespace, system: System) -> None:
                     raise InstallError("Die neue Version startet nicht – die vorherige läuft wieder (Meldungen oben).")
                 raise InstallError("HoLiTherm startet nicht (Meldungen oben).")
         prune(app)
+    if moved.get("later"):
+        schedule_finish(system)
 
     suffix = "" if port == 80 else f":{port}"
     address = own_address()
@@ -1007,7 +1276,7 @@ def install(args: argparse.Namespace, system: System) -> None:
 
 
 def update_from_app(args: argparse.Namespace, system: System) -> None:
-    """Run by flowthermpi-update.service when the app has placed its request (button „Jetzt aktualisieren“).
+    """Run by holitherm-update.service when the app has placed its request (button „Jetzt aktualisieren“).
 
     Fetches GitHub main of REPO and lets the installer of that new version install it – exactly what the
     one-line command does. The request only says „please update“; what gets installed is decided here.
@@ -1029,7 +1298,7 @@ def update_from_app(args: argparse.Namespace, system: System) -> None:
                   "from_commit": before.get("commit")}
         write_private(folder, UPDATE_STATUS, json.dumps(status, indent=1) + "\n", system)
         try:
-            with tempfile.TemporaryDirectory(prefix="flowthermpi-") as tmp:
+            with tempfile.TemporaryDirectory(prefix="holitherm-") as tmp:
                 src, commit = download(args.ref, Path(tmp))
                 status.update(to=program_version(src), commit=commit)
                 if commit and commit == before.get("commit"):
@@ -1073,7 +1342,7 @@ def run_new_installer(src: Path, commit: str | None, args: argparse.Namespace) -
 
 # ---------------------------------------------------------------------- WLAN (Einrichtung › WLAN)
 # The Pi is delivered for a network cable; the WLAN is set up in the app. The app may not change the
-# network itself: it places {data}/wifi-request.json and flowthermpi-wifi.path runs „install.py --wifi“
+# network itself: it places {data}/wifi-request.json and holitherm-wifi.path runs „install.py --wifi“
 # as root. Only three actions exist (scan, connect, forget); every value is checked here again, and
 # NetworkManager is driven with argument lists, never through a shell. The password is handed to nmcli
 # once („connection add“, a fraction of a second in its arguments) and never written to the status
@@ -1357,7 +1626,7 @@ def run_wifi(system: System, request: dict, status: dict) -> None:
 
 
 def wifi_from_app(args: argparse.Namespace, system: System) -> None:
-    """Run by flowthermpi-wifi.service when the app has placed a WLAN request. The result goes to
+    """Run by holitherm-wifi.service when the app has placed a WLAN request. The result goes to
     wifi-status.json, together with the state of cable and WLAN afterwards."""
     data_dir = Path(args.root) / DATA_DIR.lstrip("/")
     try:
@@ -1403,9 +1672,9 @@ def wifi_from_app(args: argparse.Namespace, system: System) -> None:
 # ---------------------------------------------------------------------- Fernwartung (Einrichtung › Fernwartung)
 # Remote maintenance with Tailscale: the Pi joins the private network ("tailnet") of whoever signs it in, and
 # from there the app can be opened from afar. The app places {data}/remote-request.json with nothing but one of
-# REMOTE_ACTIONS, and flowthermpi-remote.path runs „install.py --remote“ as root. Tailscale is installed only when
+# REMOTE_ACTIONS, and holitherm-remote.path runs „install.py --remote“ as root. Tailscale is installed only when
 # „up“ asks for it, from Tailscale's own signed package archive; it then keeps itself up to date (auto-update).
-# The name in the tailnet is decided here (flowthermpi-<device number>), never by the app. Signing in works with
+# The name in the tailnet is decided here (holitherm-<device number>), never by the app. Signing in works with
 # a login link that the app shows as a QR code: whoever completes it decides whose tailnet the Pi joins. The Pi
 # asks for REMOTE_TAG when it signs in, so nobody has to tag it by hand – and a device tagged at its first login
 # keeps its key without expiry. The tailnet must name owners for that tag (README, „Tailscale-Netz einrichten“).
@@ -1430,7 +1699,7 @@ def device_number(root: Path) -> str | None:
         machine = (root / "etc/machine-id").read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError):
         return None
-    return hashlib.sha256(f"flowthermpi:{machine}".encode()).hexdigest()[:8] if re.fullmatch(r"[0-9a-f]{32}", machine) else None
+    return hashlib.sha256(f"holitherm:{machine}".encode()).hexdigest()[:8] if re.fullmatch(r"[0-9a-f]{32}", machine) else None
 
 
 def remote_name(root: Path) -> str:
@@ -1694,7 +1963,7 @@ def run_remote(system: System, root: Path, action: str, status: dict, report) ->
 
 
 def remote_from_app(args: argparse.Namespace, system: System) -> None:
-    """Run by flowthermpi-remote.service when the app has placed a request. The result goes to remote-status.json,
+    """Run by holitherm-remote.service when the app has placed a request. The result goes to remote-status.json,
     always with Tailscale's state afterwards."""
     root = Path(args.root)
     data_dir = root / DATA_DIR.lstrip("/")
@@ -1737,7 +2006,7 @@ def remote_from_app(args: argparse.Namespace, system: System) -> None:
 # ---------------------------------------------------------------------- Zigbee (Einrichtung › Zigbee)
 # SONOFF's Zigbee thermostats need three extra programs on the Pi: Mosquitto (passes the messages between Zigbee2MQTT
 # and the app; from Debian's own archive), Node.js and Zigbee2MQTT (which talks to the Zigbee USB stick). The app
-# places {data}/zigbee-request.json with nothing but one of ZIGBEE_ACTIONS, and flowthermpi-zigbee.path runs
+# places {data}/zigbee-request.json with nothing but one of ZIGBEE_ACTIONS, and holitherm-zigbee.path runs
 # „install.py --zigbee“ as root. What gets installed is fixed in ZIGBEE_PARTS for each version of HoLiTherm – the app
 # cannot choose – and every download is checked: Node.js and pnpm against their checksums, Zigbee2MQTT against its Git
 # commit, its building blocks against the checksums in its own lockfile (pnpm install --frozen-lockfile). Zigbee2MQTT
@@ -2056,9 +2325,13 @@ def zigbee_mosquitto(system: System, root: Path, info: dict) -> dict[str, str]:
         except CommandError as exc:
             raise InstallError(f"Mosquitto ließ sich nicht installieren ({apt_reason(exc.detail)}).") from None
         info["mosquitto_ours"] = True   # „Entfernen“ takes it away again
+    return mosquitto_logins(system, root)
+
+
+def mosquitto_logins(system: System, root: Path, drop: tuple[Path, ...] = ()) -> dict[str, str]:
+    """Mosquitto's settings and password file anew, with new logins {user: password} – they go to the app and to
+    Zigbee2MQTT, nowhere else –, and Mosquitto started again. drop: files of FlowThermPi's, removed just before."""
     logins = {user: secrets.token_urlsafe(24) for user in MQTT_USERS.values()}
-    write_system_file(root / MOSQUITTO_CONF.lstrip("/"),
-                      MOSQUITTO_TEMPLATE.format(port=MQTT_PORT, passwd=MOSQUITTO_PASSWD).encode())
     passwd = root / MOSQUITTO_PASSWD.lstrip("/")
     tmp = passwd.with_name(f".{passwd.name}.{secrets.token_hex(4)}.tmp")
     try:
@@ -2070,6 +2343,10 @@ def zigbee_mosquitto(system: System, root: Path, info: dict) -> dict[str, str]:
         os.replace(tmp, passwd)
     finally:
         tmp.unlink(missing_ok=True)
+    write_system_file(root / MOSQUITTO_CONF.lstrip("/"),   # after the password file: if that fails, nothing changed
+                      MOSQUITTO_TEMPLATE.format(port=MQTT_PORT, passwd=MOSQUITTO_PASSWD).encode())
+    for old in drop:   # its listener would take the same port
+        old.unlink(missing_ok=True)
     system.run("systemctl", "enable", "mosquitto", check=False)
     try:
         system.run("systemctl", "restart", "mosquitto")
@@ -2378,10 +2655,10 @@ def zigbee_port(root: Path, wanted: str | None) -> str:
                        "Am Pi stecken mehrere USB-Geräte – bitte den Zigbee-Stick wählen.")
 
 
-def zigbee2mqtt_unit_port(root: Path) -> str | None:
+def zigbee2mqtt_unit_port(root: Path, unit: str = ZIGBEE_SERVICE_UNIT) -> str | None:
     """The stick Zigbee2MQTT's service uses (its name under /dev/serial/by-id); None if it is not set up."""
     try:
-        text = (root / ZIGBEE_SERVICE_UNIT.lstrip("/")).read_text(encoding="utf-8")
+        text = (root / unit.lstrip("/")).read_text(encoding="utf-8")
     except OSError:
         return None
     found = re.search(r"^Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/([\w.:+-]{1,200})$", text, re.M)
@@ -2469,7 +2746,7 @@ def zigbee_switch(system: System, root: Path, on: bool) -> str:
 
 
 def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
-    """Run by flowthermpi-zigbee.service when the app has placed a request. Progress and result go to
+    """Run by holitherm-zigbee.service when the app has placed a request. Progress and result go to
     zigbee-status.json – at the end always with the state of the programs."""
     root = Path(args.root)
     data_dir = root / DATA_DIR.lstrip("/")
@@ -2529,7 +2806,7 @@ def zigbee_from_app(args: argparse.Namespace, system: System) -> None:
 
 
 # ---------------------------------------------------------------------- „Protokoll speichern“
-# The app may not read the system's journal: it places {data}/logs-request.json and flowthermpi-logs.path runs
+# The app may not read the system's journal: it places {data}/logs-request.json and holitherm-logs.path runs
 # „install.py --logs“ as root. That collects the journal of the last week (HoLiTherm's services, Zigbee2MQTT,
 # Mosquitto, the network, Tailscale, the kernel) and the Pi's state – voltage, temperature, memory, SD card,
 # restarts – and writes it to {data}/system-log.txt, readable only by the app. Every secret root can find (the
@@ -2770,7 +3047,7 @@ def system_report(system: System, root: Path, folder: int) -> str:
 
 
 def logs_from_app(args: argparse.Namespace, system: System) -> None:
-    """Run by flowthermpi-logs.service when the app asks for the system logs („Protokoll speichern“). Writes them,
+    """Run by holitherm-logs.service when the app asks for the system logs („Protokoll speichern“). Writes them,
     without any secret, to system-log.txt in the data folder (only the app reads it) and the result to
     logs-status.json."""
     root = Path(args.root)
@@ -2813,7 +3090,7 @@ def logs_from_app(args: argparse.Namespace, system: System) -> None:
 def reset_pin(args: argparse.Namespace, system: System) -> None:
     system.run("systemctl", "stop", NAME, check=False)
     try:
-        system.run("runuser", "-u", NAME, "--", sys.executable, f"{APP_DIR}/current/run.py",
+        system.run("runuser", "-u", app_user(system), "--", sys.executable, f"{APP_DIR}/current/run.py",
                    "--reset-pin", "--data", f"{DATA_DIR}/data/data.json")
     finally:
         system.run("systemctl", "start", NAME, check=False)
@@ -2822,6 +3099,7 @@ def reset_pin(args: argparse.Namespace, system: System) -> None:
 
 def uninstall(args: argparse.Namespace, system: System) -> None:
     root = Path(args.root)
+    move_old_installation(system, root)   # FlowThermPi goes the same way
     with install_lock(root / APP_DIR.lstrip("/")):
         system.run("systemctl", "disable", "--now", f"{NAME}-update.path", check=False)
         system.run("systemctl", "disable", "--now", f"{NAME}-wifi.path", check=False)
@@ -2849,7 +3127,7 @@ def uninstall(args: argparse.Namespace, system: System) -> None:
             "entfernen: sudo apt remove tailscale")
     if args.purge:
         shutil.rmtree(root / DATA_DIR.lstrip("/"), ignore_errors=True)
-        system.run("userdel", NAME, check=False)
+        system.run("userdel", app_user(system), check=False)
         say(f"✓ Daten gelöscht ({DATA_DIR}, auch die Tokens).")
     else:
         say(f"  Heizungen, Tokens und Einstellungen bleiben in {DATA_DIR} (alles löschen: --uninstall --purge).")
@@ -2868,11 +3146,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--reset-pin", action="store_true", help="PIN der Einrichtung löschen")
     parser.add_argument("--uninstall", action="store_true", help="Dienst und Programm entfernen")
     parser.add_argument("--purge", action="store_true", help="mit --uninstall: auch alle Daten löschen")
-    parser.add_argument("--from-app", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-update.service
-    parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-wifi.service
-    parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-remote.service
-    parser.add_argument("--zigbee", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-zigbee.service
-    parser.add_argument("--logs", action="store_true", help=argparse.SUPPRESS)  # flowthermpi-logs.service
+    parser.add_argument("--from-app", action="store_true", help=argparse.SUPPRESS)  # holitherm-update.service
+    parser.add_argument("--wifi", action="store_true", help=argparse.SUPPRESS)  # holitherm-wifi.service
+    parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)  # holitherm-remote.service
+    parser.add_argument("--zigbee", action="store_true", help=argparse.SUPPRESS)  # holitherm-zigbee.service
+    parser.add_argument("--logs", action="store_true", help=argparse.SUPPRESS)  # holitherm-logs.service
+    parser.add_argument("--finish-move", action="store_true", help=argparse.SUPPRESS)  # holitherm-umzug.service
     parser.add_argument("--commit", help=argparse.SUPPRESS)  # with --source: Git commit of that folder
     parser.add_argument("--root", default="/", help=argparse.SUPPRESS)  # tests: work inside this folder only
     return parser.parse_args(argv)
@@ -2898,6 +3177,8 @@ def main(argv: list[str] | None = None, system: System | None = None) -> int:
             zigbee_from_app(args, system)
         elif args.logs:
             logs_from_app(args, system)
+        elif args.finish_move:
+            finish_move(args, system)
         elif args.uninstall:
             uninstall(args, system)
         elif args.reset_pin:

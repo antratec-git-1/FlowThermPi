@@ -13,7 +13,7 @@ beim Einsammeln der Systemprotokolle, und beim Zusammenstellen wird alles noch e
 und Geräten, Adressen im Heimnetz und WLAN-Namen sind darin – darauf weist der Dialog hin.
 
 Die Systemprotokolle darf die App nicht selbst lesen. Sie legt logs-request.json in ihren Datenordner,
-flowthermpi-logs.path startet daraufhin als root „install.py --logs“. Das schreibt system-log.txt (nur für die App
+holitherm-logs.path startet daraufhin als root „install.py --logs“. Das schreibt system-log.txt (nur für die App
 lesbar) und logs-status.json. Diesen Teil gibt es nur, wenn HoLiTherm mit install.py eingerichtet ist (dessen
 systemd-Unit setzt HEIZAPP_SYSLOG_DIR) – sonst steht in system.txt, warum er fehlt.
 

@@ -130,12 +130,12 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
-        self.broker = FakeBroker(users={"flowthermpi": PASSWORD})
+        self.broker = FakeBroker(users={"holitherm": PASSWORD})
         self.addCleanup(self.broker.close)
         self.z2m = FakeZ2M(self.broker, channel=25, join_after=0.2, interview=0.2)
         self.z2m.start([thermostat(ieee) for ieee in self.devices])
         (self.tmp / "zigbee-mqtt.json").write_text(json.dumps(
-            {"host": "127.0.0.1", "port": self.broker.port, "user": "flowthermpi", "password": PASSWORD}))
+            {"host": "127.0.0.1", "port": self.broker.port, "user": "holitherm", "password": PASSWORD}))
         self.net = ZigbeeNet(self.tmp, retry=(0.05,))
         self.addCleanup(self.net.stop)
         self.net.start()

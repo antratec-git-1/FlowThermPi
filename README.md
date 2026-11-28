@@ -14,9 +14,9 @@ Inoffizielles Projekt – kein Produkt von Thermotec, SONOFF, Shelly, IKEA, Phil
 Herstellern, deren Geräte es nutzt, und von keinem dieser Hersteller unterstützt. Die genannten Marken gehören ihren
 Inhabern.
 
-Bis Version 0.4.25 hieß das Projekt FlowThermPi. Ordner, Dienste und Netznamen auf dem Pi (`flowthermpi`) heißen
-noch so, damit Updates auf vorhandenen Geräten weiter funktionieren. Die alte Adresse auf GitHub leitet auf die neue
-weiter.
+Bis Version 0.4.25 hieß das Projekt FlowThermPi, auf dem Pi hieß bis 0.4.28 noch alles `flowthermpi`. Ab 0.4.29
+heißt auch dort alles `holitherm` – ein älterer Pi zieht beim nächsten Update von selbst um
+([Umzug von FlowThermPi](#umzug-von-flowthermpi)). Die alte Adresse auf GitHub leitet auf die neue weiter.
 
 ## Zwei Ansichten: einfach für Bewohner, Einrichtung mit PIN
 
@@ -217,11 +217,11 @@ Heizungen und per SSH erreichbar. Dann **ein Befehl** per SSH auf dem Pi:
 curl -fsSL https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/main/install.py | sudo python3 -
 ```
 
-Das Skript lädt HoLiTherm von GitHub nach `/opt/flowthermpi`, legt den Dienst `flowthermpi` an
+Das Skript lädt HoLiTherm von GitHub nach `/opt/holitherm`, legt den Dienst `holitherm` an
 (startet beim Einschalten und nach Absturz oder Stromausfall von selbst), legt die Daten in
-`/var/lib/flowthermpi` an (Heizungsliste mit Tokens nur für den Dienst lesbar), stellt die Zeitzone
+`/var/lib/holitherm` an (Heizungsliste mit Tokens nur für den Dienst lesbar), stellt die Zeitzone
 auf Europe/Berlin, falls noch die Werkseinstellung gilt, prüft, ob die App antwortet, und zeigt die
-Adresse an – z. B. `http://flowthermpi.local`.
+Adresse an – z. B. `http://holitherm.local`.
 
 - **Am Mac mit Chrome oder Firefox nicht erreichbar** (Chrome: `ERR_ADDRESS_UNREACHABLE`): Ab macOS 15
   braucht jeder Browser außer Safari die Freigabe *Lokales Netzwerk*. Der Mac fragt beim ersten Aufruf
@@ -237,14 +237,14 @@ Adresse an – z. B. `http://flowthermpi.local`.
   Den Knopf gibt es ab Version 0.2.0 – ein älterer Pi bekommt ihn, wenn der Befehl oben einmal
   ausgeführt wird. Der Befehl funktioniert auch weiterhin als Update.
 - **Wie der Knopf abgesichert ist:** Die App hat keine Rechte am Programm. Sie legt nur eine Anfrage
-  in ihren Datenordner. Daraufhin startet der Dienst `flowthermpi-update` (als root) das installierte
+  in ihren Datenordner. Daraufhin startet der Dienst `holitherm-update` (als root) das installierte
   `install.py`; das lädt immer `main` von diesem Repository und installiert es mit dem Installer der
   neuen Version – genau wie der Befehl oben. Welcher Code kommt, kann die App nicht bestimmen. Im
-  Datenordner folgt root keinen Verweisen (Symlinks). Meldungen: `journalctl -u flowthermpi-update`.
+  Datenordner folgt root keinen Verweisen (Symlinks). Meldungen: `journalctl -u holitherm-update`.
 - **Daten vom Mac übernehmen** (Heizungen mit Tokens, Räume, Pläne, PIN):
   ```bash
   # auf dem Mac, im App-Ordner:
-  scp heizungen.conf data/data.json BENUTZER@flowthermpi.local:
+  scp heizungen.conf data/data.json BENUTZER@holitherm.local:
   # auf dem Pi:
   curl -fsSL https://raw.githubusercontent.com/antratec-git-1/HoLiTherm/main/install.py | sudo python3 - --import ~
   rm ~/heizungen.conf ~/data.json
@@ -253,24 +253,51 @@ Adresse an – z. B. `http://flowthermpi.local`.
 - **Weitere Optionen** hinter `python3 -`: `--port 8080`, `--ref v0.2.0` (bestimmte Version),
   `--reset-pin` (PIN vergessen), `--uninstall` (Daten bleiben; Zigbee-Programme kommen mit weg),
   `--uninstall --purge` (alles weg).
-- **Meldungen:** `journalctl -u flowthermpi -f` – oder in der App [Protokoll speichern](#protokoll-wenn-etwas-schiefgeht).
+- **Meldungen:** `journalctl -u holitherm -f` – oder in der App [Protokoll speichern](#protokoll-wenn-etwas-schiefgeht).
   Passwort fürs Heimnetz: `HEIZAPP_PASSWORD=…` in
-  `/etc/default/flowthermpi` eintragen, dann `sudo systemctl restart flowthermpi`.
+  `/etc/default/holitherm` eintragen, dann `sudo systemctl restart holitherm`.
 - **Uhrzeit:** Ein Raspberry Pi hat keine Batterie-Uhr. Die App stellt die Heizungsuhren erst, wenn
   der Pi seine Uhrzeit aus dem Internet hat – nach einem Stromausfall also nie auf eine falsche Zeit.
+
+### Umzug von FlowThermPi
+
+Ein Pi mit FlowThermPi (bis Version 0.4.28) zieht beim ersten Update auf 0.4.29 oder neuer von selbst um – per Knopf
+in der App oder mit dem Befehl oben:
+
+- **Ordner:** `/opt/flowthermpi` → `/opt/holitherm`, `/var/lib/flowthermpi` → `/var/lib/holitherm`, ebenso die
+  Zigbee-Ordner, `/etc/flowthermpi` und `/etc/default/flowthermpi`. Sie werden nur umbenannt: Heizungen, Tokens,
+  Räume, Pläne, PIN, Verlauf und die angelernten Zigbee-Geräte bleiben, wie sie sind.
+- **Dienste:** `flowthermpi…` → `holitherm…` (App, Update, WLAN, Fernwartung, Zigbee, Protokoll, Zigbee2MQTT).
+- **Benutzer:** `flowthermpi` → `holitherm`, `flowthermpi-zigbee` → `holitherm-zigbee`.
+- **Mosquitto** bekommt neue Anmeldungen; die App meldet sich dort als `holitherm` an.
+- **WLAN-Verbindungen:** „FlowThermPi WLAN …“ → „HoLiTherm WLAN …“.
+- **Fernwartung:** In Tailscale heißt der Pi `holitherm-<Gerätenummer>` statt `flowthermpi-<Gerätenummer>`.
+- **Name des Pis:** `flowthermpi` → `holitherm`, im Heimnetz also `http://holitherm.local`. Hat jemand dem Pi einen
+  anderen Namen gegeben, bleibt der.
+
+Beim Update per Knopf kommen der Benutzer der App und der Name des Pis eine halbe Minute nach dem Update dran (Dienst
+`holitherm-umzug`), damit die App das Ergebnis vorher noch zeigt. Danach ist sie unter `http://holitherm.local`
+erreichbar; die IP-Adresse geht weiter. Meldungen: `journalctl -u flowthermpi-update -u holitherm-umzug`.
+
+**Tag in Tailscale:** Den Tag eines angemeldeten Pis ändert nur die Verwaltung. Einmal in
+[login.tailscale.com](https://login.tailscale.com/admin) unter *Access controls* `tag:holitherm` neben
+`tag:flowthermpi` eintragen – bei `tagOwners` und in der Regel zu den Pis (`"dst": ["tag:holitherm",
+"tag:flowthermpi"]`). Dann bei jedem Pi *Machines* › „…“ › *Edit ACL tags*: `tag:holitherm` statt `tag:flowthermpi`.
+Trägt kein Pi mehr `tag:flowthermpi`, den alten Tag aus den Regeln löschen. Ohne `tag:holitherm` bei `tagOwners`
+scheitert eine spätere neue Anmeldung des Pis, denn die App fragt dabei nach diesem Tag.
 
 ## WLAN einrichten
 
 Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danach in der App, unter
 *Einrichtung › Verbindungen › Heimnetz* (bis 0.4.14 *Einrichtung › WLAN*):
 
-1. Netzwerkkabel am Pi einstecken, die App öffnen (z. B. `http://flowthermpi.local`), *Einrichtung › Verbindungen ›
+1. Netzwerkkabel am Pi einstecken, die App öffnen (z. B. `http://holitherm.local`), *Einrichtung › Verbindungen ›
    Heimnetz*.
    Die App sucht die WLANs in der Nähe.
 2. Beim eigenen WLAN auf **Verbinden** tippen und das WLAN-Passwort eingeben (bei der FRITZ!Box der
    „WLAN-Netzwerkschlüssel“ auf der Unterseite). Nach bis zu einer Minute meldet die App
    „Der Pi ist jetzt im WLAN …“ und zeigt die neue Adresse.
-3. Kabel abziehen. Die App ist weiter unter `http://flowthermpi.local` erreichbar oder unter der angezeigten
+3. Kabel abziehen. Die App ist weiter unter `http://holitherm.local` erreichbar oder unter der angezeigten
    Adresse.
 
 - Klappt das Verbinden nicht (Passwort falsch, WLAN außer Reichweite), entfernt der Pi den neuen Eintrag
@@ -282,11 +309,11 @@ Der Pi wird mit Netzwerkkabel in Betrieb genommen; ins WLAN bringt man ihn danac
   (etwa über Tailscale). Der Pi prüft das vor dem Löschen selbst noch einmal.
 - Versteckte WLANs: „Namen selbst eingeben“. Firmen-WLANs mit eigener Anmeldung (802.1X) gehen nicht.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt eine Anfrage in ihren Datenordner (nur für
-  sie lesbar). Der Dienst `flowthermpi-wifi` (root) prüft sie noch einmal, löscht sie sofort und steuert
+  sie lesbar). Der Dienst `holitherm-wifi` (root) prüft sie noch einmal, löscht sie sofort und steuert
   NetworkManager (`nmcli`) – ohne Shell, mit genau drei Aktionen: suchen, verbinden, vergessen. Das
   WLAN-Passwort steht nie im Status, im Log oder in Fehlermeldungen. Beim Anlegen der Verbindung steht es
   einen Sekundenbruchteil in den Argumenten von `nmcli`, wie bei `nmcli device wifi connect … password …`.
-  Meldungen: `journalctl -u flowthermpi-wifi`.
+  Meldungen: `journalctl -u holitherm-wifi`.
 - Voraussetzung: Raspberry Pi OS ab Bookworm (NetworkManager). Die WLAN-Einrichtung gibt es ab Version 0.3.0; ein
   Pi mit 0.2.0 bekommt sie über den Update-Knopf.
 
@@ -307,7 +334,7 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
    Heizungen heizen dabei weiter.
 2. Die App zeigt einen QR-Code und einen Anmelde-Link. Mit dem Handy scannen und mit dem eigenen Tailscale-Konto
    anmelden. **Link und Code nicht weitergeben:** Wer sich damit anmeldet, holt den Pi in sein eigenes Netz.
-3. Danach zeigt die App „An – Fernhilfe bis …“ und die Adressen für unterwegs, z. B. `http://flowthermpi-a1b2c3d4`
+3. Danach zeigt die App „An – Fernhilfe bis …“ und die Adressen für unterwegs, z. B. `http://holitherm-a1b2c3d4`
    (mit MagicDNS) oder `http://100.x.y.z`. Zwei Stunden lang lässt sich das ausprobieren, dann schaltet sich die
    Fernwartung von selbst aus – bis die Bewohner die nächste Fernhilfe erlauben.
 
@@ -331,9 +358,9 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
 
 ### Was sonst noch gilt
 
-- **Name:** Im Tailscale-Netz heißt der Pi `flowthermpi-` + **Gerätenummer** (die letzten 8 Zeichen seiner
+- **Name:** Im Tailscale-Netz heißt der Pi `holitherm-` + **Gerätenummer** (die letzten 8 Zeichen seiner
   Seriennummer), damit sich mehrere Pis auseinanderhalten lassen. Die Gerätenummer steht unter *Einrichtung › Über*
-  und *Verbindungen › Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `flowthermpi.local`.
+  und *Verbindungen › Fernwartung*, am besten auch als Aufkleber auf dem Pi. Im Heimnetz bleibt er `holitherm.local`.
 - **Die Bewohner sehen es:** Während einer Fernhilfe steht in der Heizungsansicht, bis wann sie läuft; bei „Immer“
   steht dort „Fernwartung ist eingeschaltet“.
 - **Ausschalten** (bei „Nur nach Freigabe“: **Fernhilfe beenden**) trennt den Pi vom Tailscale-Netz
@@ -345,11 +372,11 @@ getaggte Geräte; aktuelle Bedingungen auf [tailscale.com/pricing](https://tails
   FRITZ!Box-Namen erreichbar bleiben. Er gibt nur sich selbst frei, nicht das Heimnetz (keine Subnet-Routen).
 - `--uninstall` lässt Tailscale installiert. Abmelden: `sudo tailscale logout`, entfernen: `sudo apt remove tailscale`.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage mit der gewünschten Aktion in
-  ihren Datenordner. Der Dienst `flowthermpi-remote` (root) kennt genau fünf: nachsehen, einschalten (beim ersten Mal
+  ihren Datenordner. Der Dienst `holitherm-remote` (root) kennt genau fünf: nachsehen, einschalten (beim ersten Mal
   mit Installieren und Anmelden), nur einschalten (Fernhilfe), ausschalten, abmelden. Namen, Tag und Einstellungen
   bestimmt er selbst, ohne Shell. Den Anmelde-Link zeigt nur die Einrichtung, nie die Heizungsansicht. Die
-  Einstellung und das Ende der Fernhilfe stehen in `/var/lib/flowthermpi/remote-settings.json`. Meldungen:
-  `journalctl -u flowthermpi-remote`.
+  Einstellung und das Ende der Fernhilfe stehen in `/var/lib/holitherm/remote-settings.json`. Meldungen:
+  `journalctl -u holitherm-remote`.
 - Voraussetzung: Raspberry Pi OS (Debian) mit Internet. Die Fernwartung gibt es ab Version 0.4.0, die Fernhilfe ab
   0.4.1; ein älterer Pi bekommt beides über den Update-Knopf.
 
@@ -362,12 +389,12 @@ Pi im anderen und den eigenen Mac. Deshalb in der Verwaltung ([login.tailscale.c
 und stattdessen diese beiden Abschnitte eintragen (die übrigen, etwa `ssh`, bleiben):
 ```jsonc
 {
-  "tagOwners": { "tag:flowthermpi": ["autogroup:admin"] },
+  "tagOwners": { "tag:holitherm": ["autogroup:admin"] },
   "grants": [
     // die eigenen Geräte untereinander (Mac, Handy …)
     { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
     // die eigenen Geräte zu den Pis: nur die App (Port 80) und SSH
-    { "src": ["autogroup:member"], "dst": ["tag:flowthermpi"], "ip": ["tcp:80", "tcp:22"] }
+    { "src": ["autogroup:member"], "dst": ["tag:holitherm"], "ip": ["tcp:80", "tcp:22"] }
   ]
 }
 ```
@@ -375,13 +402,13 @@ und stattdessen diese beiden Abschnitte eintragen (die übrigen, etwa `ssh`, ble
 Für die Pis selbst gibt es keine Regel: Sie erreichen weder einander noch den Mac. Die Verbindung geht also nur in
 eine Richtung – von den eigenen Geräten zum Pi.
 
-Jeder Pi meldet sich selbst mit dem Tag `tag:flowthermpi` an (`--advertise-tags`). `tagOwners` erlaubt den Tag den
+Jeder Pi meldet sich selbst mit dem Tag `tag:holitherm` an (`--advertise-tags`). `tagOwners` erlaubt den Tag den
 Admins des Netzes – meldet ein Admin (etwa der Inhaber) den Pi mit dem QR-Code an, bekommt er den Tag gleich dabei.
 Von Hand taggen ist dann nicht nötig, und weil der Pi schon bei der ersten Anmeldung getaggt ist, läuft seine
 Anmeldung nicht ab. Ohne den Abschnitt `tagOwners` lässt Tailscale den Tag nicht zu, und die Anmeldung scheitert.
 
 Ein Pi, der vor dieser Version angemeldet wurde, hat den Tag nicht von selbst: einmal *Machines* › beim Pi „…“ ›
-*Edit ACL tags* › `tag:flowthermpi` und *Disable key expiry*. Ein nachträglich vergebener Tag allein beendet den
+*Edit ACL tags* › `tag:holitherm` und *Disable key expiry*. Ein nachträglich vergebener Tag allein beendet den
 Ablauf nicht; die App zeigt das Ablaufdatum, solange es eins gibt.
 
 ## Heizungen im Netz suchen
@@ -496,23 +523,23 @@ Thermostat.
   Meldungen des Pi; eine schon installierte Version bleibt dann in Betrieb.
 - **Voraussetzungen:** Raspberry Pi OS **64-bit** (auf einem 32-Bit-System lehnt die App ab, auch auf einem Pi 4),
   mindestens 1,5 GB frei, Internet.
-- **Wo es liegt:** Programme in `/opt/flowthermpi-zigbee`, die Daten von Zigbee2MQTT (Einstellungen,
-  Netzwerkschlüssel, angelernte Thermostate) in `/var/lib/flowthermpi-zigbee` (nur für ihn lesbar). Zigbee2MQTT wird
-  vom eigenen Benutzer `flowthermpi-zigbee` gebaut und betrieben – ohne Anmeldung, mit Zugriff auf den USB-Stick, nie
+- **Wo es liegt:** Programme in `/opt/holitherm-zigbee`, die Daten von Zigbee2MQTT (Einstellungen,
+  Netzwerkschlüssel, angelernte Thermostate) in `/var/lib/holitherm-zigbee` (nur für ihn lesbar). Zigbee2MQTT wird
+  vom eigenen Benutzer `holitherm-zigbee` gebaut und betrieben – ohne Anmeldung, mit Zugriff auf den USB-Stick, nie
   als root.
 - **Passwörter für Mosquitto** erzeugt der Pi bei jeder Installation neu. Mosquitto kennt nur ihre Hashes; im Klartext
   stehen sie nur bei ihren Nutzern: für die App in ihrem Datenordner (`zigbee-mqtt.json`, 0600), für Zigbee2MQTT in
-  `/etc/flowthermpi/zigbee2mqtt.env` (nur root; systemd reicht sie beim Start weiter). Die Seite zeigt sie nie.
+  `/etc/holitherm/zigbee2mqtt.env` (nur root; systemd reicht sie beim Start weiter). Die Seite zeigt sie nie.
 - **Entfernen …** (bei den Programmen) hält Zigbee2MQTT an und löscht die Programme und Mosquitto wieder. Ein
   Mosquitto, das schon vorher auf dem Pi war, bleibt und
   verliert nur die Einstellungen von HoLiTherm. Die Daten von Zigbee2MQTT bleiben, damit angelernte Thermostate nach
   einer neuen Installation noch verbunden sind. `--uninstall` nimmt die Programme mit; `--uninstall --purge` auch die
   Daten und den Benutzer.
 - **Wie es abgesichert ist:** wie beim Update-Knopf. Die App legt nur eine Anfrage in ihren Datenordner; der Dienst
-  `flowthermpi-zigbee` (root) kennt genau sechs Aktionen: nachsehen, installieren, entfernen, einrichten, starten,
+  `holitherm-zigbee` (root) kennt genau sechs Aktionen: nachsehen, installieren, entfernen, einrichten, starten,
   anhalten. Was er lädt, kann die App nicht bestimmen; beim Einrichten nimmt er nur einen Funkkanal von 11 bis 26
   und einen Stick, der wirklich am Pi steckt. Archive entpackt er selbst, ohne Pfade außerhalb des Programmordners.
-  Meldungen: `journalctl -u flowthermpi-zigbee`.
+  Meldungen: `journalctl -u holitherm-zigbee`.
 
 **Zigbee einrichten** (nach der Installation, mit eingestecktem Stick):
 
@@ -524,12 +551,12 @@ Thermostat.
 - **Was dabei passiert:** Der Pi schreibt die Einstellungen von Zigbee2MQTT (Stick, Funkkanal, Verbindung zu
   Mosquitto) – ohne eigene Weboberfläche, ohne Home Assistant. Den Netzwerkschlüssel würfelt Zigbee2MQTT beim ersten
   Start selbst aus; die Seite zeigt ihn nie, und im [Protokoll](#protokoll-wenn-etwas-schiefgeht) ist er versteckt.
-  Dann startet der Dienst `flowthermpi-zigbee2mqtt`: mit dem Pi, nach einem Absturz von selbst neu, abgeschottet
+  Dann startet der Dienst `holitherm-zigbee2mqtt`: mit dem Pi, nach einem Absturz von selbst neu, abgeschottet
   (schreiben darf er nur in seinen Datenordner).
 - **Anhalten / Starten:** Angehalten bleibt Zigbee2MQTT auch nach einem Neustart des Pi aus, bis man „Starten“
   drückt. Die Thermostate behalten so lange ihre letzte Einstellung.
 - **Startet nicht:** Die Seite sagt es und zeigt die letzten Meldungen von Zigbee2MQTT (Passwörter und Schlüssel
-  darin versteckt), daneben „Neu starten“. Meldungen: `journalctl -u flowthermpi-zigbee2mqtt`.
+  darin versteckt), daneben „Neu starten“. Meldungen: `journalctl -u holitherm-zigbee2mqtt`.
 
 **Thermostate und Steckdosen anlernen:**
 
@@ -704,7 +731,7 @@ geflossen ist – ob an ihr eine Heizung hängt oder ein anderes Gerät.
   Leistung × Zeit (Zigbee2MQTT hat dafür einen bekannten Fehler). Meldet eine Steckdose sich mehr als 6 Stunden nicht,
   bleibt diese Zeit leer – nichts wird geschätzt. Die höchste Leistung ist der höchste gemessene Wert, bei einer ganz
   gemessenen Viertelstunde mindestens ihr Schnitt.
-- **Wo:** `energy/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/energy/`), eine Datei je
+- **Wo:** `energy/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/holitherm/data/energy/`), eine Datei je
   Monat, etwa 6 KB am Tag je Steckdose. Geschrieben wird alle 15 Minuten; den letzten Zählerstand merkt sich die App
   in `energy/zaehler.json`, damit nach einem Neustart oder Stromausfall nichts doppelt zählt: Was in der Zeit floss,
   kommt mit dem nächsten Zählerstand dazu. Aufgezeichnet wird erst, wenn die Uhrzeit stimmt.
@@ -946,7 +973,7 @@ Heizungen werden dafür nicht öfter gefragt.
 - **Was:** je Heizung, Thermostat und Fühler und je fünf Minuten die Raumtemperatur (Mittel), die eingestellte
   Temperatur und wie viele Sekunden das Gerät geheizt hat, „Fenster offen“ hatte und erreichbar war; bei Fühlern
   Temperatur und Luftfeuchte.
-- **Wo:** `history/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/history/`), eine Datei je
+- **Wo:** `history/JJJJ-MM.csv` neben `data.json` (auf dem Pi in `/var/lib/holitherm/data/history/`), eine Datei je
   Monat, etwa 40 KB am Tag bei vier Geräten. Die App sammelt im Speicher und schreibt alle 15 Minuten – das schont
   die Speicherkarte; bei Stromausfall fehlen höchstens die letzten 15 Minuten. Aufgezeichnet wird erst, wenn die
   Uhrzeit stimmt (der Pi hat keine Batterie-Uhr). Lücken bleiben Lücken, nichts wird aufgefüllt.
@@ -990,19 +1017,19 @@ sauber beendet wurde oder etwa der Strom weg war.
 - **Ausführliches Protokoll** (*Einrichtung › Über*), für Fehler, die nur ab und zu auftreten: schreibt 24 Stunden
   lang zusätzlich jede Abfrage der Heizungen und Fühler und jeden Aufruf der Seite mit und schaltet sich dann von
   selbst ab, auch wenn die App zwischendurch neu startet.
-- **Wo es liegt:** `logs/flowthermpi.log` neben `data.json` (auf dem Pi in `/var/lib/flowthermpi/data/logs/`). Ist die
+- **Wo es liegt:** `logs/holitherm.log` neben `data.json` (auf dem Pi in `/var/lib/holitherm/data/logs/`). Ist die
   Datei 2 MB groß, beginnt eine neue; die zehn neuesten bleiben, zusammen höchstens etwa 20 MB. Anderer Ordner:
   `--log-dir` bzw. `HEIZAPP_LOG_DIR`. Jede Zeile beginnt mit Datum, Uhrzeit (mit Millisekunden und Zeitzone), Stufe und
-  dem Teil der App. Auf der Konsole bzw. im Journal (`journalctl -u flowthermpi`) stehen dieselben Meldungen in kurz,
+  dem Teil der App. Auf der Konsole bzw. im Journal (`journalctl -u holitherm`) stehen dieselben Meldungen in kurz,
   ohne die ausführlichen.
 - **Die Systemprotokolle des Pi** darf die App nicht selbst lesen. Wie beim Update-Knopf legt sie nur eine Anfrage in
-  ihren Datenordner; der Dienst `flowthermpi-logs` (root) sammelt dann genau das oben Genannte. Er ersetzt die
+  ihren Datenordner; der Dienst `holitherm-logs` (root) sammelt dann genau das oben Genannte. Er ersetzt die
   Geheimnisse, die er auf dem Pi findet (Tokens aus `heizungen.conf`, WLAN-Passwörter von NetworkManager, die
   Passwörter für Mosquitto, `HEIZAPP_PASSWORD`), und alles, was wie eines aussieht. Das Ergebnis kann nur die App
   lesen; sie löscht es, sobald es in der Datei ist. Vom Datenordner nennt er nur Namen und Größen. Ob das Journal
   Neustarts übersteht, steht in `system.txt` („dauerhaft gespeichert“ oder „nur seit dem letzten Start“). Einen
   älteren Pi bringt der Update-Knopf auf diesen Stand; auf dem Mac oder in Docker fehlt dieser Teil, dann steht in
-  `system.txt`, warum. Meldungen: `journalctl -u flowthermpi-logs`.
+  `system.txt`, warum. Meldungen: `journalctl -u holitherm-logs`.
 
 ## Konfiguration: `heizungen.conf`
 

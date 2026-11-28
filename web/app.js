@@ -170,7 +170,7 @@ function watchUpdate() {  // after every refresh; true = the page reloads
   else if (u && u.state === "failed") endUpdateRun(`Update fehlgeschlagen: ${u.message || "unbekannter Fehler"}`, true);
   else if (u && u.state === "done") endUpdateRun(u.message || "Update fertig.");
   else if (Date.now() - updateRun.at > UPDATE_MAX_MS)
-    endUpdateRun("Das Update dauert ungewöhnlich lange. Meldungen auf dem Pi: journalctl -u flowthermpi-update", true);
+    endUpdateRun("Das Update dauert ungewöhnlich lange. Meldungen auf dem Pi: journalctl -u holitherm-update", true);
   return false;
 }
 
@@ -5230,7 +5230,7 @@ function remoteLoginHTML(r) {
       : `<p class="muted">Noch nicht angemeldet. <button class="small" data-action="remote-refresh" ${busy ? "disabled" : ""}>Neu prüfen</button></p>`}
     <p class="hint warn">Wer sich mit diesem Link anmeldet, kann die Heizungs-App danach aus der Ferne öffnen. Link und Code
       deshalb nicht weitergeben.</p>
-    <p class="hint">Der Pi meldet sich mit dem Tag <b>tag:flowthermpi</b> an. Das klappt nur, wenn das Tailscale-Netz diesen
+    <p class="hint">Der Pi meldet sich mit dem Tag <b>tag:holitherm</b> an. Das klappt nur, wenn das Tailscale-Netz diesen
       Tag kennt – einmal einzurichten, wie in der Anleitung unter „Tailscale-Netz einrichten“.</p>
     <div class="row"><button data-action="remote-cancel" ${busy ? "disabled" : ""}>Abbrechen</button></div>
   </div>`;

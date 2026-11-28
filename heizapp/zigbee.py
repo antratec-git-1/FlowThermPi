@@ -4,7 +4,7 @@ Die Thermostate funken mit Zigbee. Dafür braucht der Pi drei Programme: Zigbee2
 den Thermostaten), Mosquitto (reicht die Nachrichten zwischen Zigbee2MQTT und dieser App weiter) und Node.js (darauf
 läuft Zigbee2MQTT). Die App darf am System nichts ändern. Sie legt nur zigbee-request.json in ihren Datenordner, darin
 steht eine Aktion (status, install, remove, setup, start, stop) – bei „setup“ dazu der Funkkanal und der Stick –, und
-flowthermpi-zigbee.path startet daraufhin als root „install.py --zigbee“. Welche Versionen das lädt, steht fest in
+holitherm-zigbee.path startet daraufhin als root „install.py --zigbee“. Welche Versionen das lädt, steht fest in
 install.py; jede Datei wird nach dem Laden geprüft. Fortschritt und Ergebnis schreibt es nach zigbee-status.json, am
 Ende immer mit dem Stand der Programme und des Dienstes von Zigbee2MQTT.
 

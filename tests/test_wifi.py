@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
         self.wifi = Wifi(self.data, poll=0.01)
 
     def start_service(self):
-        """flowthermpi-wifi.path + .service: run install.py --wifi whenever a request appears."""
+        """holitherm-wifi.path + .service: run install.py --wifi whenever a request appears."""
         stop = threading.Event()
         args = install.parse_args(["--root", str(self.root), "--wifi"])
 

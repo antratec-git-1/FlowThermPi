@@ -320,7 +320,7 @@ class ZigbeeNet:
                 self._pause(10.0)
                 continue
             client = Client(login["host"], login["port"], login["user"], login["password"],
-                            client_id=f"flowthermpi-{secrets.token_hex(4)}", on_message=self._message)
+                            client_id=f"holitherm-{secrets.token_hex(4)}", on_message=self._message)
             with self._lock:
                 self._broker = "connecting"
             try:

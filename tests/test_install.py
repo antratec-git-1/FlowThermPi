@@ -45,38 +45,38 @@ class Base(unittest.TestCase):
 class InstallTest(Base):
     def test_fresh_install(self):
         system, out = self.run_install()
-        current = self.path("/opt/flowthermpi/current")
+        current = self.path("/opt/holitherm/current")
         self.assertTrue(current.is_symlink())
         self.assertTrue((current / "run.py").is_file())
         for secret in ("heizungen.conf", "data", "doku.pdf", "heizapp/__pycache__"):
             self.assertFalse((current / secret).exists(), secret)          # never copied into the program
-        config = self.path("/var/lib/flowthermpi/heizungen.conf")
+        config = self.path("/var/lib/holitherm/heizungen.conf")
         self.assertEqual(oct(config.stat().st_mode & 0o777), "0o600")
         self.assertNotIn("GEHEIMERTOKEN", config.read_text())              # fresh, empty heater list
         unit = self.path(install.UNIT).read_text()
         self.assertIn("Environment=HEIZAPP_PORT=80\n", unit)
         self.assertIn("ExecStart=", unit)
-        self.assertIn("ReadWritePaths=/var/lib/flowthermpi", unit)
-        self.assertIn("Environment=HEIZAPP_UPDATE_DIR=/var/lib/flowthermpi\n", unit)   # enables the button
-        self.assertIn("PathExists=/var/lib/flowthermpi/update-request.json\n", self.path(install.UPDATE_PATH).read_text())
+        self.assertIn("ReadWritePaths=/var/lib/holitherm", unit)
+        self.assertIn("Environment=HEIZAPP_UPDATE_DIR=/var/lib/holitherm\n", unit)   # enables the button
+        self.assertIn("PathExists=/var/lib/holitherm/update-request.json\n", self.path(install.UPDATE_PATH).read_text())
         update_unit = self.path(install.UPDATE_UNIT).read_text()
-        self.assertIn("/opt/flowthermpi/current/install.py --from-app\n", update_unit)
+        self.assertIn("/opt/holitherm/current/install.py --from-app\n", update_unit)
         self.assertIn("Type=oneshot", update_unit)
-        self.assertIn("Environment=HEIZAPP_WIFI_DIR=/var/lib/flowthermpi\n", unit)     # enables Einrichtung › WLAN
-        self.assertIn("PathExists=/var/lib/flowthermpi/wifi-request.json\n", self.path(install.WIFI_PATH).read_text())
-        self.assertIn("/opt/flowthermpi/current/install.py --wifi\n", self.path(install.WIFI_UNIT).read_text())
-        self.assertIn("Environment=HEIZAPP_REMOTE_DIR=/var/lib/flowthermpi\n", unit)   # enables Einrichtung › Fernwartung
-        self.assertIn("PathExists=/var/lib/flowthermpi/remote-request.json\n", self.path(install.REMOTE_PATH).read_text())
+        self.assertIn("Environment=HEIZAPP_WIFI_DIR=/var/lib/holitherm\n", unit)     # enables Einrichtung › WLAN
+        self.assertIn("PathExists=/var/lib/holitherm/wifi-request.json\n", self.path(install.WIFI_PATH).read_text())
+        self.assertIn("/opt/holitherm/current/install.py --wifi\n", self.path(install.WIFI_UNIT).read_text())
+        self.assertIn("Environment=HEIZAPP_REMOTE_DIR=/var/lib/holitherm\n", unit)   # enables Einrichtung › Fernwartung
+        self.assertIn("PathExists=/var/lib/holitherm/remote-request.json\n", self.path(install.REMOTE_PATH).read_text())
         remote_unit = self.path(install.REMOTE_UNIT).read_text()
-        self.assertIn("/opt/flowthermpi/current/install.py --remote\n", remote_unit)
+        self.assertIn("/opt/holitherm/current/install.py --remote\n", remote_unit)
         self.assertIn("StartLimitBurst=30\n", remote_unit)                    # the app asks often while a login is open
         commands = [" ".join(c) for c in system.commands]
         self.assertTrue(any(c.startswith("useradd --system") for c in commands))
-        self.assertIn("systemctl enable flowthermpi", commands)
-        self.assertIn("systemctl enable --now flowthermpi-update.path", commands)
-        self.assertIn("systemctl enable --now flowthermpi-wifi.path", commands)
-        self.assertIn("systemctl enable --now flowthermpi-remote.path", commands)
-        self.assertIn("systemctl restart flowthermpi", commands)
+        self.assertIn("systemctl enable holitherm", commands)
+        self.assertIn("systemctl enable --now holitherm-update.path", commands)
+        self.assertIn("systemctl enable --now holitherm-wifi.path", commands)
+        self.assertIn("systemctl enable --now holitherm-remote.path", commands)
+        self.assertIn("systemctl restart holitherm", commands)
         self.assertFalse([c for c in commands if "tailscale" in c or "apt" in c])   # Tailscale only when asked for
         self.assertIn("HoLiTherm 1.2.3 läuft", out)
         info = json.loads((current / "release.json").read_text())
@@ -84,7 +84,7 @@ class InstallTest(Base):
 
     def test_commit_of_a_source_folder_is_recorded(self):
         self.run_install("--commit", "a" * 40)
-        info = json.loads(self.path("/opt/flowthermpi/current/release.json").read_text())
+        info = json.loads(self.path("/opt/holitherm/current/release.json").read_text())
         self.assertEqual((info["commit"], info["ref"]), ("a" * 40, "main"))
         system = install.DryRun()
         with redirect_stdout(io.StringIO()):
@@ -106,7 +106,7 @@ class InstallTest(Base):
         victim = self.tmp / "fremde-datei"            # stands for e.g. /etc/shadow
         victim.write_text("geheim\n")
         os.chmod(victim, 0o644)
-        config = self.path("/var/lib/flowthermpi/heizungen.conf")
+        config = self.path("/var/lib/holitherm/heizungen.conf")
         config.unlink()
         config.symlink_to(victim)
         system = install.DryRun()
@@ -117,7 +117,7 @@ class InstallTest(Base):
         self.assertEqual(oct(victim.stat().st_mode & 0o777), "0o644")      # untouched
         self.assertEqual(victim.read_text(), "geheim\n")
         config.unlink()
-        data = self.path("/var/lib/flowthermpi/data")
+        data = self.path("/var/lib/holitherm/data")
         shutil.rmtree(data)
         outside = self.tmp / "fremder-ordner"
         outside.mkdir(mode=0o755)
@@ -130,19 +130,19 @@ class InstallTest(Base):
 
     def test_update_keeps_data_and_port_and_prunes(self):
         self.run_install("--port", "8080")
-        data = self.path("/var/lib/flowthermpi/data/data.json")
+        data = self.path("/var/lib/holitherm/data/data.json")
         data.write_text(json.dumps({"rooms": {"r1": {"name": "Wohnzimmer"}}}))
-        config = self.path("/var/lib/flowthermpi/heizungen.conf")
+        config = self.path("/var/lib/holitherm/heizungen.conf")
         config.write_text("192.168.5.81  ABC\n")
         for _ in range(4):
             self.run_install()                                              # updates, no --port
         self.assertEqual(json.loads(data.read_text())["rooms"]["r1"]["name"], "Wohnzimmer")
         self.assertEqual(config.read_text(), "192.168.5.81  ABC\n")
         self.assertIn("HEIZAPP_PORT=8080", self.path(install.UNIT).read_text())
-        releases = sorted(p.name for p in self.path("/opt/flowthermpi/releases").iterdir())
+        releases = sorted(p.name for p in self.path("/opt/holitherm/releases").iterdir())
         self.assertEqual(len(releases), install.KEEP_RELEASES)
-        newest = max(self.path("/opt/flowthermpi/releases").iterdir(), key=install.release_key)
-        self.assertEqual(self.path("/opt/flowthermpi/current").resolve(), newest.resolve())
+        newest = max(self.path("/opt/holitherm/releases").iterdir(), key=install.release_key)
+        self.assertEqual(self.path("/opt/holitherm/current").resolve(), newest.resolve())
 
     def test_import_from_folder(self):
         self.run_install()
@@ -151,11 +151,11 @@ class InstallTest(Base):
         (old / "heizungen.conf").write_text("192.168.5.81  TOKEN\n")
         (old / "data" / "data.json").write_text('{"rooms": {}}')
         _, out = self.run_install("--import", str(old))
-        config = self.path("/var/lib/flowthermpi/heizungen.conf")
+        config = self.path("/var/lib/holitherm/heizungen.conf")
         self.assertEqual(config.read_text(), "192.168.5.81  TOKEN\n")
         self.assertEqual(oct(config.stat().st_mode & 0o777), "0o600")
-        self.assertEqual(self.path("/var/lib/flowthermpi/data/data.json").read_text(), '{"rooms": {}}')
-        backups = list(self.path("/var/lib/flowthermpi").glob("heizungen.conf.bak-*"))
+        self.assertEqual(self.path("/var/lib/holitherm/data/data.json").read_text(), '{"rooms": {}}')
+        backups = list(self.path("/var/lib/holitherm").glob("heizungen.conf.bak-*"))
         self.assertEqual(len(backups), 1)                                   # the empty list from before
         self.assertIn("Tokens", out)
 
@@ -174,28 +174,28 @@ class InstallTest(Base):
         system = install.DryRun()
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall"], system)
-        self.assertFalse(self.path("/opt/flowthermpi").exists())
+        self.assertFalse(self.path("/opt/holitherm").exists())
         for unit in (install.UNIT, install.UPDATE_UNIT, install.UPDATE_PATH, install.WIFI_UNIT, install.WIFI_PATH,
                      install.REMOTE_UNIT, install.REMOTE_PATH):
             self.assertFalse(self.path(unit).exists(), unit)
-        self.assertIn(("systemctl", "disable", "--now", "flowthermpi-update.path"), system.commands)
-        self.assertIn(("systemctl", "disable", "--now", "flowthermpi-wifi.path"), system.commands)
-        self.assertIn(("systemctl", "disable", "--now", "flowthermpi-remote.path"), system.commands)
-        self.assertTrue(self.path("/var/lib/flowthermpi/heizungen.conf").exists())
+        self.assertIn(("systemctl", "disable", "--now", "holitherm-update.path"), system.commands)
+        self.assertIn(("systemctl", "disable", "--now", "holitherm-wifi.path"), system.commands)
+        self.assertIn(("systemctl", "disable", "--now", "holitherm-remote.path"), system.commands)
+        self.assertTrue(self.path("/var/lib/holitherm/heizungen.conf").exists())
         with redirect_stdout(io.StringIO()):
             install.main(["--root", str(self.root), "--uninstall", "--purge"], install.DryRun())
-        self.assertFalse(self.path("/var/lib/flowthermpi").exists())
+        self.assertFalse(self.path("/var/lib/holitherm").exists())
 
 
 
 class UpdateFromAppTest(Base):
-    """install.py --from-app, as flowthermpi-update.service runs it after the button was pressed."""
+    """install.py --from-app, as holitherm-update.service runs it after the button was pressed."""
 
     def setUp(self):
         super().setUp()
         shutil.copy(Path(install.__file__), self.src / "install.py")   # the new version brings its installer
         self.run_install("--commit", "a" * 40)
-        self.data = self.path("/var/lib/flowthermpi")
+        self.data = self.path("/var/lib/holitherm")
         self.downloads = []
         original = install.download
         install.download = self.fake_download
@@ -230,18 +230,18 @@ class UpdateFromAppTest(Base):
         self.assertEqual((status["state"], status["from"], status["to"], status["commit"]),
                          ("done", "1.2.3", "1.3.0", "b" * 40))
         self.assertTrue(status["finished"])
-        info = json.loads(self.path("/opt/flowthermpi/current/release.json").read_text())
+        info = json.loads(self.path("/opt/holitherm/current/release.json").read_text())
         self.assertEqual((info["version"], info["commit"]), ("1.3.0", "b" * 40))
         self.assertIn("HoLiTherm 1.3.0 läuft", out)        # the new version's installer did the work
 
     def test_same_commit_is_not_installed_again(self):
         self.github = ("a" * 40, None)
-        before = sorted(p.name for p in self.path("/opt/flowthermpi/releases").iterdir())
+        before = sorted(p.name for p in self.path("/opt/holitherm/releases").iterdir())
         self.press_button()
         code, _, status = self.from_app()
         self.assertEqual((code, status["state"]), (0, "done"))
         self.assertIn("schon die neueste", status["message"])
-        self.assertEqual(sorted(p.name for p in self.path("/opt/flowthermpi/releases").iterdir()), before)
+        self.assertEqual(sorted(p.name for p in self.path("/opt/holitherm/releases").iterdir()), before)
 
     def test_nothing_happens_without_request(self):
         code, out, status = self.from_app()
@@ -254,7 +254,7 @@ class UpdateFromAppTest(Base):
         self.assertEqual((code, status["state"]), (1, "failed"))
         self.assertIn("Internet", status["message"])
         self.assertEqual(oct((self.data / install.UPDATE_STATUS).stat().st_mode & 0o777), "0o600")
-        info = json.loads(self.path("/opt/flowthermpi/current/release.json").read_text())
+        info = json.loads(self.path("/opt/holitherm/current/release.json").read_text())
         self.assertEqual(info["commit"], "a" * 40)            # the old version stays
 
     def test_status_file_link_is_replaced_not_followed(self):
@@ -409,12 +409,12 @@ class FakeNM(install.DryRun):
 
 
 class WifiFromAppTest(Base):
-    """install.py --wifi, as flowthermpi-wifi.service runs it for Einrichtung › WLAN."""
+    """install.py --wifi, as holitherm-wifi.service runs it for Einrichtung › WLAN."""
 
     def setUp(self):
         super().setUp()
         self.run_install()
-        self.data = self.path("/var/lib/flowthermpi")
+        self.data = self.path("/var/lib/holitherm")
         self.nm = FakeNM()
 
     def ask(self, request):
@@ -495,7 +495,7 @@ class WifiFromAppTest(Base):
         self.assertEqual(self.nm.active, uuid)
         args = profile["args"]
         self.assertEqual((args["con-name"], args["ifname"], args["802-11-wireless-security.key-mgmt"],
-                          args["connection.autoconnect"]), ("FlowThermPi WLAN Zuhause", "wlan0", "wpa-psk", "yes"))
+                          args["connection.autoconnect"]), ("HoLiTherm WLAN Zuhause", "wlan0", "wpa-psk", "yes"))
         wlan = status["net"]["interfaces"][1]
         self.assertEqual((wlan["state"], wlan["ssid"], wlan["signal"], wlan["ipv4"]),
                          ("connected", "Zuhause", 72, ["192.168.1.21"]))
@@ -545,7 +545,7 @@ class WifiFromAppTest(Base):
     def test_forget_removes_every_entry_of_that_network(self):
         self.nm.country = "DE"
         self.nm.add_profile("Zuhause", "a-1234567", "preconfigured")
-        self.nm.add_profile("Zuhause", "b-1234567", "FlowThermPi WLAN Zuhause")
+        self.nm.add_profile("Zuhause", "b-1234567", "HoLiTherm WLAN Zuhause")
         cafe = self.nm.add_profile("Café", "")
         code, _, status = self.ask({"action": "forget", "ssid": "Zuhause"})
         self.assertEqual((code, status["state"], status["message"]), (0, "done", "„Zuhause“ ist vergessen."))
@@ -673,7 +673,7 @@ class FakeTS(install.DryRun):
                 self.url_delay -= 1
             else:
                 url = self.login
-        me = {"ID": "nA1", "HostName": self.prefs["hostname"] or "flowthermpi", "OS": "linux", "UserID": 0,
+        me = {"ID": "nA1", "HostName": self.prefs["hostname"] or "holitherm", "OS": "linux", "UserID": 0,
               "TailscaleIPs": None, "Online": False}
         result = {"Version": "1.90.8-t0a1b2c3d4-g5e6f7a8b9", "BackendState": self.backend, "AuthURL": url or "",
                   "TailscaleIPs": None, "Self": me, "Health": [], "CurrentTailnet": None, "User": None}
@@ -742,12 +742,12 @@ def pi_root(root: Path, serial: bytes | None = b"10000000a1b2c3d4\x00", distro="
 
 
 class RemoteFromAppTest(Base):
-    """install.py --remote, as flowthermpi-remote.service runs it for Einrichtung › Fernwartung."""
+    """install.py --remote, as holitherm-remote.service runs it for Einrichtung › Fernwartung."""
 
     def setUp(self):
         super().setUp()
         self.run_install()
-        self.data = self.path("/var/lib/flowthermpi")
+        self.data = self.path("/var/lib/holitherm")
         pi_root(self.root)
         self.ts = FakeTS()
         self.fetched = []
@@ -785,9 +785,9 @@ class RemoteFromAppTest(Base):
         self.assertEqual(install_cmd[0][-4:], ("install", "-y", "tailscale", "tailscale-archive-keyring"))
         self.assertTrue(self.ran("apt-get", "-o", "DPkg::Lock::Timeout=300", "update"))
         self.assertEqual(self.ran("tailscale", "up"), [("tailscale", "up", "--json", "--qr", "--timeout=8s",
-                                                        "--hostname=flowthermpi-a1b2c3d4", "--accept-dns=false",
-                                                        "--advertise-tags=tag:flowthermpi")])
-        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # the device number from the serial
+                                                        "--hostname=holitherm-a1b2c3d4", "--accept-dns=false",
+                                                        "--advertise-tags=tag:holitherm")])
+        self.assertEqual(self.ts.prefs["hostname"], "holitherm-a1b2c3d4")   # the device number from the serial
         self.assertFalse(self.ts.prefs["accept_dns"])                         # the Pi keeps the household's DNS
         self.assertTrue(self.ts.prefs["auto_update"] and status["auto_update"])
         ts = status["tailscale"]
@@ -803,9 +803,9 @@ class RemoteFromAppTest(Base):
         ts = status["tailscale"]
         self.assertEqual((code, status["state"], ts["state"], ts["auth_url"]), (0, "done", "Running", None))
         self.assertEqual((ts["dns_name"], ts["ips"], ts["tailnet"]),
-                         ("flowthermpi-a1b2c3d4.tail1234.ts.net", ["100.101.102.103", "fd7a:115c:a1e0::1"], "helfer@github"))
+                         ("holitherm-a1b2c3d4.tail1234.ts.net", ["100.101.102.103", "fd7a:115c:a1e0::1"], "helfer@github"))
         # the Pi asked for its tag at login: nobody has to tag it by hand, and its key does not expire
-        self.assertEqual((ts["tags"], ts["user"], ts["key_expiry"]), (["tag:flowthermpi"], "tagged-devices", None))
+        self.assertEqual((ts["tags"], ts["user"], ts["key_expiry"]), (["tag:holitherm"], "tagged-devices", None))
         self.assertEqual((ts["version"], ts["magic_dns"]), ("1.90.8", True))
         self.assertNotIn("qr", status)
         self.assertEqual(len(self.ran("apt-get")), 2)                          # installed once, not again
@@ -838,8 +838,8 @@ class RemoteFromAppTest(Base):
         _, _, status = self.ask("up")
         self.assertEqual(status["state"], "failed")
         self.assertIn("von Hand geändert", status["message"])
-        self.assertIn("sudo tailscale up --hostname=flowthermpi-a1b2c3d4 --accept-dns=false "
-                      "--advertise-tags=tag:flowthermpi", status["message"])
+        self.assertIn("sudo tailscale up --hostname=holitherm-a1b2c3d4 --accept-dns=false "
+                      "--advertise-tags=tag:holitherm", status["message"])
 
     def test_on_only_switches_on(self):
         # „Fernhilfe erlauben“ in the residents' view: it switches on what is set up – nothing else
@@ -887,7 +887,7 @@ class RemoteFromAppTest(Base):
         self.assertNotIn(("systemctl", "restart", "tailscaled"), self.ts.commands)
 
     def test_a_login_started_by_hand_is_replaced(self):
-        # „sudo tailscale up“ by hand, before the app: its link would sign the Pi in under the plain name „flowthermpi“
+        # „sudo tailscale up“ by hand, before the app: its link would sign the Pi in under the plain name „holitherm“
         self.ts.installed = True
         self.ts.tailscale(["up"])
         _, _, status = self.ask("status")
@@ -896,7 +896,7 @@ class RemoteFromAppTest(Base):
         _, _, status = self.ask("up")
         self.assertEqual((status["login_url"], status["tailscale"]["auth_url"], status["qr"]),
                          ("https://login.tailscale.com/a/000000000002", "https://login.tailscale.com/a/000000000002", QR))
-        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")
+        self.assertEqual(self.ts.prefs["hostname"], "holitherm-a1b2c3d4")
 
     def test_slow_servers_send_the_link_later(self):
         self.ts.url_delay = 3
@@ -945,7 +945,7 @@ class RemoteFromAppTest(Base):
 
     def test_the_request_cannot_choose_anything(self):
         _, _, status = self.ask("up", hostname="fremder-name", flags=["--advertise-routes=192.168.0.0/16"])
-        self.assertEqual(self.ts.prefs["hostname"], "flowthermpi-a1b2c3d4")   # extra fields are ignored
+        self.assertEqual(self.ts.prefs["hostname"], "holitherm-a1b2c3d4")   # extra fields are ignored
         self.assertFalse([c for c in self.ts.commands if any("routes" in part or "fremder" in part for part in c)])
         for text in ("kaputt", '{"action": "rm -rf /"}', '{"action": ["up"]}', '["up"]'):
             code, _, status = self.ask(text)
@@ -982,7 +982,350 @@ class RemoteFromAppTest(Base):
         number = install.device_number(other)
         self.assertRegex(number, r"^[0-9a-f]{8}$")
         self.assertNotIn(number, "0123456789abcdef0123456789abcdef")          # derived, the machine id itself stays hidden
-        self.assertEqual(install.remote_name(other), f"flowthermpi-{number}")
+        self.assertEqual(install.remote_name(other), f"holitherm-{number}")
+
+
+
+OLD = "flowthermpi"                                    # the names on the Pi until 0.4.28
+STICK = "usb-Test_Zigbee_Stick_MG24-if00-port0"        # made up
+
+
+def old_pi(root: Path, src: Path) -> None:
+    """A Pi with FlowThermPi 0.4.28, as its installer left it: the app with its data and logs, Zigbee2MQTT with its
+    network, the services (port 8080), Mosquitto, Tailscale's package source and the Pi's name."""
+    def write(name, text, mode=0o644):
+        path = root / name.lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        os.chmod(path, mode)
+
+    release = root / f"opt/{OLD}/releases/0007-0.4.28"
+    shutil.copytree(src, release, ignore=shutil.ignore_patterns("data", "heizungen.conf", "*.pdf", "__pycache__"))
+    (root / f"opt/{OLD}/current").symlink_to("releases/0007-0.4.28")
+    write(f"/opt/{OLD}/install.lock", "", 0o600)
+    write(f"/var/lib/{OLD}/heizungen.conf", "192.168.1.10  TOKEN-AUS-0428\n", 0o600)
+    write(f"/var/lib/{OLD}/data/data.json", '{"rooms": {"r1": {"name": "Testzimmer"}}}', 0o600)
+    write(f"/var/lib/{OLD}/data/logs/{OLD}.log", "heute\n", 0o600)
+    write(f"/var/lib/{OLD}/data/logs/{OLD}.log.1", "gestern\n", 0o600)
+    write(f"/var/lib/{OLD}/zigbee-mqtt.json", json.dumps({"host": "127.0.0.1", "port": 1883, "user": OLD,
+                                                          "password": "altes-app-pw"}), 0o600)
+    write(f"/opt/{OLD}-zigbee/installed.json", json.dumps({"complete": True, "mosquitto_ours": True}))
+    (root / f"opt/{OLD}-zigbee/zigbee2mqtt-2.14.3-1/dist").mkdir(parents=True)
+    (root / f"opt/{OLD}-zigbee/zigbee2mqtt").symlink_to("zigbee2mqtt-2.14.3-1")
+    write(f"/var/lib/{OLD}-zigbee/configuration.yaml", "version: 5\n", 0o600)
+    write(f"/var/lib/{OLD}-zigbee/database.db", '{"id":1,"type":"Coordinator"}\n', 0o600)
+    write(f"/etc/{OLD}/zigbee2mqtt.env", "ZIGBEE2MQTT_CONFIG_MQTT_USER=zigbee2mqtt\n"
+                                         "ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=altes-z2m-pw\n", 0o600)
+    write(f"/etc/default/{OLD}", "HEIZAPP_PASSWORD=im-heimnetz\n")
+    values = {"name": OLD, "user": OLD, "app": f"/opt/{OLD}", "data": f"/var/lib/{OLD}", "port": 8080,
+              "request": install.UPDATE_REQUEST, "wifi_request": install.WIFI_REQUEST,
+              "remote_request": install.REMOTE_REQUEST, "zigbee_request": install.ZIGBEE_REQUEST,
+              "logs_request": install.LOGS_REQUEST, "python": "/usr/bin/python3"}
+    for end, template in ((".service", install.UNIT_TEMPLATE), ("-update.service", install.UPDATE_UNIT_TEMPLATE),
+                          ("-update.path", install.UPDATE_PATH_TEMPLATE), ("-wifi.service", install.WIFI_UNIT_TEMPLATE),
+                          ("-wifi.path", install.WIFI_PATH_TEMPLATE), ("-remote.service", install.REMOTE_UNIT_TEMPLATE),
+                          ("-remote.path", install.REMOTE_PATH_TEMPLATE), ("-zigbee.service", install.ZIGBEE_UNIT_TEMPLATE),
+                          ("-zigbee.path", install.ZIGBEE_PATH_TEMPLATE), ("-logs.service", install.LOGS_UNIT_TEMPLATE),
+                          ("-logs.path", install.LOGS_PATH_TEMPLATE)):
+        write(f"/etc/systemd/system/{OLD}{end}", template.format(**values))
+    write(f"/etc/systemd/system/{OLD}-zigbee2mqtt.service", install.ZIGBEE2MQTT_UNIT_TEMPLATE.format(
+        user=f"{OLD}-zigbee", base=f"/opt/{OLD}-zigbee", data=f"/var/lib/{OLD}-zigbee", env=f"/etc/{OLD}/zigbee2mqtt.env",
+        port=f"/dev/serial/by-id/{STICK}"))
+    wants = root / "etc/systemd/system/multi-user.target.wants"
+    wants.mkdir(parents=True)
+    for unit in (".service", "-update.path", "-wifi.path", "-remote.path", "-zigbee.path", "-logs.path",
+                 "-zigbee2mqtt.service"):
+        (wants / f"{OLD}{unit}").symlink_to(f"/etc/systemd/system/{OLD}{unit}")   # as systemctl makes them
+    write(f"/etc/mosquitto/conf.d/{OLD}.conf", f"listener 1883 127.0.0.1\nallow_anonymous false\n"
+                                               f"password_file /etc/mosquitto/{OLD}.passwd\n")
+    write(f"/etc/mosquitto/{OLD}.passwd", f"{OLD}:$7$101$alt\nzigbee2mqtt:$7$101$alt\n", 0o600)
+    write(install.TAILSCALE_SOURCE, "# Tailscale – eingerichtet von FlowThermPi (Einrichtung › Fernwartung)\n"
+                                    "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] "
+                                    "https://pkgs.tailscale.com/stable/debian trixie main\n")
+    write("/etc/hostname", f"{OLD}\n")
+    write("/etc/hosts", f"127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost ip6-loopback\n\n127.0.1.1\t\t{OLD}\n")
+    pi_root(root)
+
+
+class FakeOldPi(install.DryRun):
+    """What a Pi with FlowThermPi 0.4.28 answers: its users, its services, NetworkManager with the WLAN connections the
+    app made, Tailscale signed in as flowthermpi-<Gerätenummer>. updating: this runs inside the old update service –
+    a oneshot service, „activating“ until its program ends."""
+
+    run = install.System.run     # the real error handling
+
+    def __init__(self, updating=False):
+        super().__init__()
+        self.users = {OLD: OLD, f"{OLD}-zigbee": f"{OLD}-zigbee"}   # user -> its own group
+        self.groups = {OLD, f"{OLD}-zigbee", "dialout"}
+        self.active = {OLD, f"{OLD}-zigbee2mqtt"}                     # services that run
+        self.running = {f"{OLD}-update"} if updating else set()       # oneshot services that run
+        self.profiles = {"0001": "FlowThermPi WLAN Zuhause", "0002": "FlowThermPi WLAN Nachbar:5G",
+                         "0003": "Wired connection 1"}
+        self.ts_host = f"{OLD}-a1b2c3d4"
+        self.refuse = set()        # users usermod refuses (as if one of their programs ran)
+        self.owners = []           # who got the app's files
+
+    @staticmethod
+    def unit(name):
+        return name.removesuffix(".service")
+
+    def user_exists(self, user=install.NAME):
+        return user in self.users
+
+    def fchown(self, fd, user=None):
+        self.owners.append(user or install.app_user(self))
+
+    def ok(self, *cmd):
+        self.commands.append(cmd)
+        if cmd[:3] == ("systemctl", "is-active", "--quiet"):
+            return self.unit(cmd[3]) in self.active
+        return False                                                   # hostnamectl too: no D-Bus here
+
+    def execute(self, cmd, env, timeout=None):
+        self.commands.append(cmd)
+        a = list(cmd)
+        if a[:2] == ["systemctl", "show"]:
+            name = self.unit(a[-1])
+            return 0, "activating\n" if name in self.running else "active\n" if name in self.active else "inactive\n", ""
+        if a[:2] in (["systemctl", "stop"], ["systemctl", "disable"]):
+            for name in a[2:]:
+                self.active.discard(self.unit(name))
+        if a[:2] == ["systemctl", "restart"] or a[:3] == ["systemctl", "enable", "--now"]:
+            self.active.add(self.unit(a[-1]))
+        if a[0] == "groupmod":
+            new, old = a[2], a[3]
+            if old not in self.groups:
+                return 6, "", f"groupmod: group '{old}' does not exist\n"
+            self.groups = (self.groups - {old}) | {new}
+            self.users = {user: new if group == old else group for user, group in self.users.items()}
+        if a[0] == "usermod":
+            new, old = a[2], a[-1]
+            if old in self.refuse:
+                return 8, "", f"usermod: user {old} is currently used by process 4242\n"
+            self.users[new] = self.users.pop(old)
+        if a[:5] == ["nmcli", "-t", "-f", "UUID,TYPE,NAME", "connection"]:
+            return 0, "".join(f"{u}:{'802-3-ethernet' if n.startswith('Wired') else '802-11-wireless'}:"
+                              f"{nm_escape(n)}\n" for u, n in self.profiles.items()), ""
+        if a[:4] == ["nmcli", "connection", "modify", "uuid"]:
+            self.profiles[a[4]] = a[6]
+        if a == ["tailscale", "status", "--json"]:
+            return 0, json.dumps({"Version": "1.90.8", "BackendState": "Running",
+                                  "Self": {"HostName": self.ts_host, "DNSName": f"{self.ts_host}.tail1234.ts.net."}}), ""
+        if a[:2] == ["tailscale", "set"]:
+            self.ts_host = a[2].split("=", 1)[1]
+        return 0, "", ""
+
+
+class MoveFromFlowThermPiTest(Base):
+    """An installation of FlowThermPi (until 0.4.28) becomes one of HoLiTherm at its first update."""
+
+    def setUp(self):
+        super().setUp()
+        old_pi(self.root, self.src)
+
+    def install(self, system, *extra):
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--source", str(self.src), *extra], system)
+        return code, out.getvalue()
+
+    def finish_move(self, system):
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--finish-move"], system)
+        return code, out.getvalue()
+
+    def names_left(self):
+        """Every file and folder on the Pi that still has the old name in it."""
+        return sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*") if OLD in p.name.lower())
+
+    def ran(self, system, *start):
+        return [c for c in system.commands if c[:len(start)] == start]
+
+    def test_command_line_moves_everything(self):
+        pi = FakeOldPi()
+        code, out = self.install(pi)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Aus FlowThermPi wird HoLiTherm", out)
+        self.assertEqual(self.names_left(), [])
+        # the data, as it was
+        self.assertEqual(self.path("/var/lib/holitherm/heizungen.conf").read_text(), "192.168.1.10  TOKEN-AUS-0428\n")
+        self.assertIn("Testzimmer", self.path("/var/lib/holitherm/data/data.json").read_text())
+        self.assertEqual(self.path("/var/lib/holitherm/data/logs/holitherm.log.1").read_text(), "gestern\n")
+        self.assertEqual(self.path("/var/lib/holitherm-zigbee/database.db").read_text(), '{"id":1,"type":"Coordinator"}\n')
+        self.assertEqual(self.path("/etc/default/holitherm").read_text(), "HEIZAPP_PASSWORD=im-heimnetz\n")
+        releases = sorted(p.name for p in self.path("/opt/holitherm/releases").iterdir())
+        self.assertEqual(releases, ["0007-0.4.28", "0008-1.2.3"])        # the old version stays for a way back
+        self.assertEqual(self.path("/opt/holitherm/current").resolve().name, "0008-1.2.3")
+        # the services: same port, the new names and the renamed user
+        unit = self.path(install.UNIT).read_text()
+        self.assertIn("Environment=HEIZAPP_PORT=8080\n", unit)
+        self.assertIn("User=holitherm\nGroup=holitherm\n", unit)
+        self.assertIn("EnvironmentFile=-/etc/default/holitherm\n", unit)
+        z2m = self.path(install.ZIGBEE_SERVICE_UNIT).read_text()
+        for line in ("User=holitherm-zigbee", "Environment=ZIGBEE2MQTT_DATA=/var/lib/holitherm-zigbee",
+                     f"Environment=ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/serial/by-id/{STICK}",
+                     "EnvironmentFile=/etc/holitherm/zigbee2mqtt.env", "WorkingDirectory=/opt/holitherm-zigbee/zigbee2mqtt"):
+            self.assertIn(line + "\n", z2m)
+        self.assertFalse(list(self.path("/etc/systemd/system/multi-user.target.wants").iterdir()))   # DryRun: no links
+        disabled = [c[3] for c in self.ran(pi, "systemctl", "disable", "--now")]
+        self.assertEqual(disabled[:5], [f"{OLD}-update.path", f"{OLD}-wifi.path", f"{OLD}-remote.path",
+                                        f"{OLD}-zigbee.path", f"{OLD}-logs.path"])   # first what starts the others
+        self.assertIn(f"{OLD}.service", disabled)
+        self.assertIn(f"{OLD}-zigbee2mqtt.service", disabled)
+        self.assertNotIn(f"{OLD}-update.service", disabled)
+        # the users: numbers stay, names change; the app's user only while its service is stopped
+        self.assertEqual(pi.users, {"holitherm": "holitherm", "holitherm-zigbee": "holitherm-zigbee"})
+        self.assertIn(("usermod", "--login", "holitherm-zigbee", "--home", "/var/lib/holitherm-zigbee", f"{OLD}-zigbee"),
+                      pi.commands)
+        rename = pi.commands.index(("usermod", "--login", "holitherm", "--home", "/var/lib/holitherm", OLD))
+        self.assertLess(pi.commands.index(("systemctl", "stop", "holitherm")), rename)
+        self.assertFalse([c for c in pi.commands if c[0] == "useradd"])
+        restart = pi.commands.index(("systemctl", "restart", "holitherm"))
+        self.assertGreater(restart, rename)
+        self.assertGreater(pi.commands.index(("systemctl", "enable", "--now", "holitherm-zigbee2mqtt")), restart)
+        self.assertFalse(self.ran(pi, "systemd-run"))                    # nothing waits: no old update runs
+        # Mosquitto: new settings, new logins – for the app as „holitherm“
+        self.assertIn("password_file /etc/mosquitto/holitherm.passwd\n",
+                      self.path("/etc/mosquitto/conf.d/holitherm.conf").read_text())
+        self.assertTrue(self.path("/etc/mosquitto/holitherm.passwd").exists())
+        login = json.loads(self.path("/var/lib/holitherm/zigbee-mqtt.json").read_text())
+        self.assertEqual(login["user"], "holitherm")
+        self.assertNotEqual(login["password"], "altes-app-pw")
+        env = self.path("/etc/holitherm/zigbee2mqtt.env").read_text()
+        self.assertIn("ZIGBEE2MQTT_CONFIG_MQTT_USER=zigbee2mqtt\n", env)
+        self.assertNotIn("altes-z2m-pw", env)
+        self.assertIn(("systemctl", "restart", "mosquitto"), pi.commands)
+        # WLAN, Tailscale, the Pi's name, the package source
+        self.assertEqual(pi.profiles, {"0001": "HoLiTherm WLAN Zuhause", "0002": "HoLiTherm WLAN Nachbar:5G",
+                                       "0003": "Wired connection 1"})
+        self.assertEqual(pi.ts_host, "holitherm-a1b2c3d4")
+        self.assertIn(("hostnamectl", "set-hostname", "holitherm"), pi.commands)
+        self.assertEqual(self.path("/etc/hostname").read_text(), "holitherm\n")   # without D-Bus: written itself
+        self.assertEqual(self.path("/etc/hosts").read_text(),
+                         "127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost ip6-loopback\n\n127.0.1.1\t\tholitherm\n")
+        self.assertIn(("systemctl", "try-restart", "avahi-daemon.service"), pi.commands)
+        self.assertIn("http://holitherm.local", out)
+        self.assertTrue(self.path(install.TAILSCALE_SOURCE).read_text().startswith(
+            "# Tailscale – eingerichtet von HoLiTherm (Einrichtung › Fernwartung)\ndeb [signed-by="))
+
+        again = FakeOldPi()                                              # a second run: nothing left to move
+        again.users, again.groups, again.active = dict(pi.users), set(pi.groups), set(pi.active)
+        code, out = self.install(again)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("FlowThermPi", out)
+        self.assertFalse([c for c in again.commands if c[0] in ("usermod", "groupmod", "nmcli", "tailscale")])
+
+    def test_update_button_finishes_the_names_half_a_minute_later(self):
+        pi = FakeOldPi(updating=True)
+        old_data = os.open(self.path(f"/var/lib/{OLD}"), os.O_RDONLY | os.O_DIRECTORY)   # as the old update has it
+        self.addCleanup(os.close, old_data)
+        code, out = self.install(pi)
+        self.assertEqual(code, 0, out)
+        # moved – but the app's user and the Pi's name wait for the end of the old update
+        self.assertEqual(self.names_left(), [])
+        self.assertEqual(pi.users, {OLD: OLD, "holitherm-zigbee": "holitherm-zigbee"})
+        self.assertIn(f"User={OLD}\nGroup={OLD}\n", self.path(install.UNIT).read_text())
+        self.assertEqual(set(pi.owners), {OLD})                          # every file of the app still for the old user
+        self.assertEqual(self.path("/etc/hostname").read_text(), f"{OLD}\n")
+        [later] = self.ran(pi, "systemd-run")
+        self.assertIn("--unit=holitherm-umzug", later)
+        self.assertIn("--on-active=30", later)
+        self.assertEqual(later[-3:], ("utf8", "/opt/holitherm/current/install.py", "--finish-move"))
+        self.assertIn(("systemctl", "is-active", "--quiet", "holitherm"), pi.commands)
+        self.assertIn("holitherm", pi.active)                            # the app runs again, under the new name
+        # the old update's last words reach the moved folder: it was renamed, not copied
+        fd = os.open(install.UPDATE_STATUS, os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=old_data)
+        os.write(fd, b'{"state": "done"}\n')
+        os.close(fd)
+        self.assertEqual(json.loads(self.path(f"/var/lib/holitherm/{install.UPDATE_STATUS}").read_text()),
+                         {"state": "done"})
+
+        pi.running = {f"{OLD}-update"}                                   # holitherm-umzug starts: the update still ends
+        sleeps = []
+        pi.sleep = lambda seconds: (sleeps.append(seconds), sleeps[2:] and pi.running.clear())
+        pi.commands.clear()
+        code, out = self.finish_move(pi)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sleeps, [2, 2, 2])
+        self.assertEqual(pi.users, {"holitherm": "holitherm", "holitherm-zigbee": "holitherm-zigbee"})
+        rename = pi.commands.index(("usermod", "--login", "holitherm", "--home", "/var/lib/holitherm", OLD))
+        self.assertLess(pi.commands.index(("systemctl", "stop", "holitherm")), rename)
+        self.assertGreater(pi.commands.index(("systemctl", "restart", "holitherm")), rename)
+        unit = self.path(install.UNIT).read_text()
+        self.assertIn("User=holitherm\nGroup=holitherm\n", unit)
+        self.assertIn("Environment=HEIZAPP_PORT=8080\n", unit)
+        self.assertEqual(self.path("/etc/hostname").read_text(), "holitherm\n")
+        self.assertIn("abgeschlossen", out)
+
+    def test_old_update_that_never_ends(self):
+        pi = FakeOldPi(updating=True)
+        code, out = self.finish_move(pi)
+        self.assertEqual(code, 1)
+        self.assertIn("nächste Update", out)
+        self.assertFalse([c for c in pi.commands if c[0] in ("usermod", "groupmod")])
+
+    def test_a_user_that_cannot_be_renamed_keeps_its_name(self):
+        pi = FakeOldPi()
+        pi.refuse = {OLD, f"{OLD}-zigbee"}
+        code, out = self.install(pi)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(pi.users, {OLD: OLD, f"{OLD}-zigbee": f"{OLD}-zigbee"})
+        self.assertIn(("groupmod", "--new-name", OLD, "holitherm"), pi.commands)   # its group back: both match
+        self.assertIn(f"User={OLD}\nGroup={OLD}\n", self.path(install.UNIT).read_text())
+        self.assertIn("bleibt vorerst", out)
+        pi.refuse.clear()                                                # the next update tries again
+        pi.commands.clear()
+        code, out = self.install(pi)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(pi.users, {"holitherm": "holitherm", "holitherm-zigbee": "holitherm-zigbee"})
+        self.assertLess(pi.commands.index(("systemctl", "stop", "holitherm-zigbee2mqtt")),
+                        pi.commands.index(("usermod", "--login", "holitherm-zigbee", "--home", "/var/lib/holitherm-zigbee",
+                                           f"{OLD}-zigbee")))
+        self.assertIn(("systemctl", "reset-failed", "holitherm-zigbee2mqtt"), pi.commands)
+        self.assertIn("User=holitherm\nGroup=holitherm\n", self.path(install.UNIT).read_text())
+
+    def test_another_name_of_the_pi_stays(self):
+        (self.root / "etc/hostname").write_text("wohnzimmer-pi\n")
+        pi = FakeOldPi()
+        code, out = self.install(pi)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.path("/etc/hostname").read_text(), "wohnzimmer-pi\n")
+        self.assertIn(f"127.0.1.1\t\t{OLD}\n", self.path("/etc/hosts").read_text())   # not ours to change
+        self.assertFalse(self.ran(pi, "hostnamectl"))
+
+    def test_a_task_of_the_app_that_runs_waits(self):
+        pi = FakeOldPi()
+        pi.running = {f"{OLD}-zigbee"}                                   # e.g. Zigbee2MQTT is being installed
+        code, out = self.install(pi)
+        self.assertEqual(code, 1)
+        self.assertIn("in ein paar Minuten", out)
+        self.assertTrue(self.path(f"/opt/{OLD}").is_dir())               # nothing moved, nothing stopped
+        self.assertFalse(self.ran(pi, "systemctl", "disable"))
+
+    def test_old_and_new_side_by_side_are_not_mixed(self):
+        self.path("/var/lib/holitherm").mkdir(parents=True)
+        pi = FakeOldPi()
+        code, out = self.install(pi)
+        self.assertEqual(code, 1)
+        self.assertIn("nebeneinander", out)
+        self.assertTrue(self.path(f"/var/lib/{OLD}/heizungen.conf").exists())
+        self.assertFalse(self.ran(pi, "systemctl", "disable"))
+
+    def test_uninstall_removes_flowthermpi_too(self):
+        pi = FakeOldPi()
+        with redirect_stdout(io.StringIO()) as out:
+            code = install.main(["--root", str(self.root), "--uninstall", "--purge"], pi)
+        self.assertEqual(code, 0, out.getvalue())
+        for gone in (f"/opt/{OLD}", f"/var/lib/{OLD}", "/opt/holitherm", "/var/lib/holitherm", install.UNIT,
+                     f"/etc/systemd/system/{OLD}.service"):
+            self.assertFalse(os.path.lexists(self.path(gone)), gone)
+        self.assertIn(("userdel", OLD), pi.commands)                      # the app's user under its name of now
+
+    def test_without_flowthermpi_nothing_moves(self):
+        shutil.rmtree(self.root)
+        system, out = self.run_install()
+        self.assertNotIn("FlowThermPi", out)
+        self.assertFalse([c for c in system.commands if c[:2] == ("systemctl", "show") or c[0] in ("usermod", "nmcli")])
 
 
 if __name__ == "__main__":

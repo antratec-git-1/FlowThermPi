@@ -2,7 +2,7 @@
 
 Der Pi wird für das Netzwerkkabel ausgeliefert; das WLAN richtet man danach hier ein. Die App darf das
 Netz nicht selbst ändern. Sie legt nur wifi-request.json in ihren Datenordner (0600), und
-flowthermpi-wifi.path startet daraufhin als root „install.py --wifi“. Das prüft die Anfrage noch einmal,
+holitherm-wifi.path startet daraufhin als root „install.py --wifi“. Das prüft die Anfrage noch einmal,
 löscht sie sofort (sie kann das WLAN-Passwort enthalten), spricht mit NetworkManager und schreibt das
 Ergebnis samt Zustand von Kabel und WLAN nach wifi-status.json – ohne Passwort.
 

@@ -1,8 +1,8 @@
 """Protokoll der App: eine Datei im Datenordner, die Bewohner dem Helfer schicken können, wenn etwas schiefgeht.
 
-HoLiTherm schreibt alles Wichtige nach <Ordner von data.json>/logs/flowthermpi.log (auf dem Pi
-/var/lib/flowthermpi/data/logs) und wie bisher auf die Konsole, auf dem Pi also ins Journal. Ist die Datei 2 MB groß,
-wird sie zu flowthermpi.log.1; neun ältere bleiben, zusammen höchstens etwa 20 MB. Jede Zeile beginnt mit Datum,
+HoLiTherm schreibt alles Wichtige nach <Ordner von data.json>/logs/holitherm.log (auf dem Pi
+/var/lib/holitherm/data/logs) und wie bisher auf die Konsole, auf dem Pi also ins Journal. Ist die Datei 2 MB groß,
+wird sie zu holitherm.log.1; neun ältere bleiben, zusammen höchstens etwa 20 MB. Jede Zeile beginnt mit Datum,
 Uhrzeit und dem Teil der App, aus dem sie kommt.
 
 Geheimnisse kommen nie hinein: Tokens der Heizungen, Passwörter und Anmelde-Links werden beim Schreiben durch „•••“
@@ -24,8 +24,8 @@ import time
 from collections import deque
 from pathlib import Path
 
-FILE = "flowthermpi.log"
-MAX_BYTES = 2 << 20     # one file; a full one becomes flowthermpi.log.1, .1 becomes .2 …
+FILE = "holitherm.log"
+MAX_BYTES = 2 << 20     # one file; a full one becomes holitherm.log.1, .1 becomes .2 …
 BACKUPS = 9             # … and the oldest of ten goes: at most about 20 MB on the SD card
 MARKER = ".running"     # exists while the app runs: left over at the next start, the app did not end cleanly
 HIDDEN = "•••"
@@ -117,14 +117,14 @@ class _Recent(logging.Handler):
 
 
 def setup(folder: str | os.PathLike | None, console: bool = True) -> Path | None:
-    """Logging of the app: to the console (on the Pi: the journal) and into folder/flowthermpi.log. Returns the log
+    """Logging of the app: to the console (on the Pi: the journal) and into folder/holitherm.log. Returns the log
     file – None without folder or if it cannot be written (the app runs anyway)."""
     global _folder, _file
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     for handler in list(root.handlers):   # earlier calls (tests) and basicConfig
         root.removeHandler(handler)
-        if getattr(handler, "_flowthermpi", False):
+        if getattr(handler, "_holitherm", False):
             handler.close()
     handlers: list[logging.Handler] = []
     if console:
@@ -148,7 +148,7 @@ def setup(folder: str | os.PathLike | None, console: bool = True) -> Path | None
         except OSError as exc:
             path, problem = None, exc
     for handler in handlers:
-        handler._flowthermpi = True
+        handler._holitherm = True
         root.addHandler(handler)
     if problem is not None:
         log.warning("Die Protokolldatei in %s lässt sich nicht schreiben (%s) – es gibt nur die Meldungen auf der "
